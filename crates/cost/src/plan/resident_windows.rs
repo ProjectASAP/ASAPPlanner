@@ -10,7 +10,7 @@
 
 use crate::plan::kept_results::computed_range;
 use crate::AnswerCache;
-use asap_types::ir::operator::tumbling_window_chain::cover_windows;
+use asap_types::ir::operator::tumbling_window_chain::CoverLevel;
 use asap_types::workload::{least_common_multiple, QueryWorkloadEntry};
 use std::collections::HashSet;
 
@@ -22,15 +22,9 @@ pub enum WindowRead {
     /// 0 (a read of the current time only) takes the newest window ended
     /// by `t − offset`.
     Range { range_ms: u64, offset_ms: u64 },
-    /// The windows of level `level` that a cover of `range` over
-    /// `level_widths_ms` (widest first) takes at `t`, `offset` before it
-    /// (`(t − offset − range, t − offset]`, [`cover_windows`]).
-    Cover {
-        range_ms: u64,
-        offset_ms: u64,
-        level_widths_ms: Vec<u64>,
-        level: usize,
-    },
+    /// The windows a cover takes from one of its levels at `t`
+    /// ([`CoverLevel::window_ends_at`]).
+    Cover(CoverLevel),
     /// Every retained window: a reader whose reads the model does not
     /// follow.
     Every,
@@ -115,11 +109,7 @@ impl ChainReader {
                 range_ms,
                 offset_ms,
             } => offset_ms + range_ms,
-            WindowRead::Cover {
-                range_ms,
-                offset_ms,
-                ..
-            } => offset_ms + range_ms,
+            WindowRead::Cover(cover) => cover.offset_ms + cover.range_ms,
             WindowRead::Every => return None,
         };
         Some(window_ms + span_ms)
@@ -225,28 +215,19 @@ fn windows_read_at(read: &WindowRead, t: i64, width: i64) -> Vec<(i64, i64)> {
             let end = t - *offset_ms as i64;
             vec![windows_ending_in(end - *range_ms as i64, end, width)]
         }
-        WindowRead::Cover {
-            range_ms,
-            offset_ms,
-            level_widths_ms,
-            level,
-        } => {
-            // A time off the narrowest level's grid reads no cover (the
-            // executor refuses it).
-            let end = t - *offset_ms as i64;
-            cover_windows(end - *range_ms as i64, end, level_widths_ms)
-                .map(|windows| {
-                    windows
-                        .into_iter()
-                        .filter(|(at, _)| at == level)
-                        .map(|(_, end)| {
-                            let index = end.div_euclid(width);
-                            (index, index)
-                        })
-                        .collect()
-                })
-                .unwrap_or_default()
-        }
+        // A time off the narrowest level's grid reads no cover (the
+        // executor refuses it).
+        WindowRead::Cover(cover) => cover
+            .window_ends_at(t)
+            .map(|ends| {
+                ends.into_iter()
+                    .map(|end| {
+                        let index = end.div_euclid(width);
+                        (index, index)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
         WindowRead::Every => Vec::new(),
     }
 }
@@ -299,11 +280,8 @@ fn resident_windows_over_time(
             ReadTimes::Query { period_ms, .. } => period_ms,
             ReadTimes::Refresh { width_ms } => width_ms,
         }];
-        if let WindowRead::Cover {
-            level_widths_ms, ..
-        } = &reader.read
-        {
-            lengths.extend(level_widths_ms.iter().copied());
+        if let WindowRead::Cover(cover) = &reader.read {
+            lengths.extend(cover.level_widths_ms.iter().copied());
         }
         for length in lengths {
             let length = length.max(1);
@@ -388,11 +366,8 @@ pub fn reader_window_reads_per_second(
         ReadTimes::Refresh { .. } => 0,
     };
     let mut period = least_common_multiple(request_period_ms, width);
-    if let WindowRead::Cover {
-        level_widths_ms, ..
-    } = &reader.read
-    {
-        for &length in level_widths_ms {
+    if let WindowRead::Cover(cover) = &reader.read {
+        for &length in &cover.level_widths_ms {
             let length = length.max(1);
             period = least_common_multiple(period, length);
         }
@@ -544,12 +519,12 @@ mod tests {
     #[test]
     fn a_cover_keeps_only_the_edges_of_its_narrow_level_resident() {
         let reader = ChainReader {
-            read: WindowRead::Cover {
+            read: WindowRead::Cover(CoverLevel {
                 range_ms: HOUR,
                 offset_ms: 0,
                 level_widths_ms: vec![5 * MIN, S15],
                 level: 1,
-            },
+            }),
             times: every_15s(),
         };
         let now = (100 * HOUR + 105_000) as i64;
@@ -567,12 +542,12 @@ mod tests {
     #[test]
     fn a_cover_under_an_offset_keeps_the_edges_an_hour_back_and_the_newest_resident() {
         let reader = ChainReader {
-            read: WindowRead::Cover {
+            read: WindowRead::Cover(CoverLevel {
                 range_ms: HOUR,
                 offset_ms: HOUR,
                 level_widths_ms: vec![5 * MIN, S15],
                 level: 1,
-            },
+            }),
             times: every_15s(),
         };
         assert_eq!(reader.retained_windows(S15), Some(480));

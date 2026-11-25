@@ -9,9 +9,9 @@ use asap_executor::runtime::{Limits, RunContext, Scope};
 use asap_executor::sources::InMemoryDataStore;
 use asap_executor::values::{Batch, Value};
 use futures::{executor::block_on, StreamExt};
-use planner_types::ir::operator::{AtModifier, Reduction, Source, TimeShift};
+use planner_types::ir::operator::{AtModifier, Reduction, TimeShift};
 use planner_types::ir::scalar::ColumnRef;
-use planner_types::ir::schema::{DataType, Field, FieldDataType, Schema};
+use planner_types::ir::schema::FieldDataType;
 use planner_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode, QueryRoot, TimeRangeKind};
 use planner_types::plan::physical_asap_dag::{PhysicalASAPDAG, PhysicalASAPNodeId};
 use planner_types::summary_type::{ExactKind, ExactParams, SummaryUpdate};
@@ -20,31 +20,11 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::common::{id_of, node, run, samples_schema, source};
+
 const MINUTE_MS: i64 = 60_000;
 const WIDTH_MS: i64 = 10 * MINUTE_MS;
 const HOUR_MS: i64 = 60 * MINUTE_MS;
-
-fn samples_schema() -> Schema {
-    Schema::with_time_index(
-        vec![
-            Field::plain("job", DataType::Utf8, false),
-            Field::plain("ts", DataType::Timestamp, false),
-            Field::plain("value", DataType::Float64, false),
-        ],
-        1,
-        vec![],
-    )
-}
-
-fn source() -> Source {
-    Source::TimeSeries {
-        metric: "latency".into(),
-    }
-}
-
-fn node(operator: Operator) -> Rc<OperatorNode> {
-    OperatorNode::new_shared(operator).unwrap()
-}
 
 fn scan() -> Rc<OperatorNode> {
     node(Operator::NonASAP(NonASAPOp::Scan {
@@ -137,26 +117,6 @@ fn sums_of(rows: Vec<Vec<Value>>) -> BTreeMap<String, f64> {
             (job.unwrap(), sum.unwrap())
         })
         .collect()
-}
-
-fn run(
-    dag: &asap_executor::plan::PhysicalDAG<'static, Batch, asap_executor::values::SchemaRef>,
-    roots: &[u64],
-    context: RunContext,
-) -> Vec<Vec<Vec<Value>>> {
-    crate::common::run_roots(dag, roots, context)
-        .unwrap()
-        .into_iter()
-        .map(|batches| batches.iter().flat_map(Batch::to_rows).collect())
-        .collect()
-}
-
-/// The id of the node of `dag` that is `operator`'s node in `nodes`.
-fn id_of(nodes: &[Rc<OperatorNode>], operator: &Rc<OperatorNode>) -> PhysicalASAPNodeId {
-    nodes
-        .iter()
-        .position(|node| Rc::ptr_eq(node, operator))
-        .unwrap()
 }
 
 /// `quantile`-style panel over a chain, with exact sums: the chain of

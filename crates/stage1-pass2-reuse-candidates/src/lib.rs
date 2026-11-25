@@ -95,10 +95,11 @@ pub fn generate_logical_asap_memo_candidates(
         pruned.iter().map(|pruned| pruned.candidate).collect()
     };
     let evaluation_period_ms = evaluation_period_ms_per_query(&memo, entries);
+    let evaluation_grids_before_chains = evaluation_grids(&evaluation_period_ms);
     let edges_before_chains = candidate_edges(
         &memo,
         &ErrorMetricsOfMemo::of(&memo, &order),
-        &evaluation_grids(&evaluation_period_ms),
+        &evaluation_grids_before_chains,
         &readout_requirements.readouts_without_per_value_failure_probability,
         evidence,
     );
@@ -106,6 +107,7 @@ pub fn generate_logical_asap_memo_candidates(
     chains::add_chain_groups(
         &mut memo,
         &evaluation_period_ms,
+        &evaluation_grids_before_chains,
         &candidates_of(&before_chains),
         &edges_before_chains,
     )?;

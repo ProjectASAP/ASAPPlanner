@@ -35,7 +35,7 @@ pub(crate) fn is_time_indexed_state<I: OperatorInput>(state: &I) -> bool {
 /// Example: `CoverLevel { range_ms: 3_600_000, level_widths_ms: vec![300_000,
 /// 15_000], level: 1 }` is the 15 s level of a 1 h cover over 5 min and
 /// 15 s windows.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct CoverLevel {
     /// The cover's range, in ms.
     pub range_ms: u64,
@@ -47,6 +47,39 @@ pub struct CoverLevel {
     pub level_widths_ms: Vec<u64>,
     /// The index of this level in `level_widths_ms`.
     pub level: usize,
+}
+
+impl CoverLevel {
+    /// The ends of the windows this level's cover takes from it at
+    /// evaluation time `evaluation_time_ms`: [`cover_level_window_ends`]
+    /// over `(T - offset_ms - range_ms, T - offset_ms]`.
+    pub fn window_ends_at(&self, evaluation_time_ms: i64) -> Result<Vec<i64>, CoverOffTheGrid> {
+        let end_ms = evaluation_time_ms.saturating_sub_unsigned(self.offset_ms);
+        cover_level_window_ends(
+            end_ms.saturating_sub_unsigned(self.range_ms),
+            end_ms,
+            &self.level_widths_ms,
+            self.level,
+        )
+    }
+}
+
+/// The ends of the windows of level `level` (an index into
+/// `level_widths_ms`) that [`cover_windows`] takes to tile `(start_ms,
+/// end_ms]`, oldest first. Example: `(99 h + 105 s, 100 h + 105 s]` over 5
+/// min and 15 s, level 1: the 13 ends in `(99 h + 105 s, 99 h + 300 s]` and
+/// the 7 in `(100 h, 100 h + 105 s]`.
+pub fn cover_level_window_ends(
+    start_ms: i64,
+    end_ms: i64,
+    level_widths_ms: &[u64],
+    level: usize,
+) -> Result<Vec<i64>, CoverOffTheGrid> {
+    Ok(cover_windows(start_ms, end_ms, level_widths_ms)?
+        .into_iter()
+        .filter(|&(of_level, _)| of_level == level)
+        .map(|(_, window_end_ms)| window_end_ms)
+        .collect())
 }
 
 /// Why a cover cannot select windows: an interval end off its narrowest

@@ -9,9 +9,9 @@ use asap_executor::physical_planner::{compile, test_support::views_at};
 use asap_executor::runtime::{Limits, RunContext, Scope};
 use asap_executor::sources::InMemoryDataStore;
 use asap_executor::values::{Batch, Value};
-use planner_types::ir::operator::{Reduction, Source};
+use planner_types::ir::operator::Reduction;
 use planner_types::ir::scalar::ColumnRef;
-use planner_types::ir::schema::{DataType, Field, FieldDataType, Schema};
+use planner_types::ir::schema::FieldDataType;
 use planner_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode, QueryRoot, TimeRangeKind};
 use planner_types::plan::materialized_view::MaterializedView;
 use planner_types::plan::physical_asap_dag::{PhysicalASAPDAG, PhysicalASAPNodeId};
@@ -23,34 +23,14 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::common::{id_of, node, run, samples_schema, source};
+
 const SECOND_MS: i64 = 1_000;
 const NARROW_MS: i64 = 15 * SECOND_MS;
 const WIDE_MS: i64 = 300 * SECOND_MS;
 const HOUR_MS: i64 = 3_600 * SECOND_MS;
 /// A cover's offset: 30 min, a multiple of both levels' widths.
 const OFFSET_MS: i64 = 1_800 * SECOND_MS;
-
-fn samples_schema() -> Schema {
-    Schema::with_time_index(
-        vec![
-            Field::plain("job", DataType::Utf8, false),
-            Field::plain("ts", DataType::Timestamp, false),
-            Field::plain("value", DataType::Float64, false),
-        ],
-        1,
-        vec![],
-    )
-}
-
-fn source() -> Source {
-    Source::TimeSeries {
-        metric: "latency".into(),
-    }
-}
-
-fn node(operator: Operator) -> Rc<OperatorNode> {
-    OperatorNode::new_shared(operator).unwrap()
-}
 
 /// One sample per job every 5 s over 3 h, values varying with time.
 fn samples() -> Vec<(&'static str, i64, f64)> {
@@ -105,25 +85,6 @@ fn sums_of(rows: Vec<Vec<Value>>) -> BTreeMap<String, f64> {
             (job.unwrap(), sum.unwrap())
         })
         .collect()
-}
-
-fn run(
-    dag: &asap_executor::plan::PhysicalDAG<'static, Batch, asap_executor::values::SchemaRef>,
-    roots: &[u64],
-    context: RunContext,
-) -> Vec<Vec<Vec<Value>>> {
-    crate::common::run_roots(dag, roots, context)
-        .unwrap()
-        .into_iter()
-        .map(|batches| batches.iter().flat_map(Batch::to_rows).collect())
-        .collect()
-}
-
-fn id_of(nodes: &[Rc<OperatorNode>], operator: &Rc<OperatorNode>) -> PhysicalASAPNodeId {
-    nodes
-        .iter()
-        .position(|node| Rc::ptr_eq(node, operator))
-        .unwrap()
 }
 
 /// What the plan builds and reads: exact sums, or DDSketch states read

@@ -14,6 +14,7 @@ use asap_cost::plan::resident_windows::{
     ReadTimes, WindowRead, WindowReadsPerSecond,
 };
 use asap_cost::{AnswerCache, CachedViewWindows, ViewWindowCache};
+use asap_types::ir::operator::tumbling_window_chain::CoverLevel;
 use asap_types::ir::properties::ExecutionTiming;
 use asap_types::ir::{NonASAPOp, Operator};
 use asap_types::plan::materialized_view::RefreshWindow;
@@ -121,12 +122,12 @@ pub(crate) fn resident_reads(
                                     })
                                     .collect();
                                 match level_widths_ms {
-                                    Some(level_widths_ms) => WindowRead::Cover {
+                                    Some(level_widths_ms) => WindowRead::Cover(CoverLevel {
                                         range_ms: window.length_ms,
                                         offset_ms: window.ends_before_evaluation_ms,
                                         level_widths_ms,
                                         level: physical_edge.input_index_of_consumer,
-                                    },
+                                    }),
                                     None => WindowRead::Every,
                                 }
                             }

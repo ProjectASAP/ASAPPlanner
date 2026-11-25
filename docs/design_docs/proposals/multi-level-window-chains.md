@@ -268,12 +268,16 @@ snapshot workloads is in the PR body (before and after the caps).
  }
 
  // crates/types/src/ir/operator/tumbling_window_chain.rs
-+/// One level of a cover: the cover's range, its levels' widths and this level's index.
-+pub struct CoverLevel { pub range_ms: u64, pub level_widths_ms: Vec<u64>, pub level: usize }
++/// One level of a cover: the cover's range and offset, its levels' widths and this level's index.
++pub struct CoverLevel { pub range_ms: u64, pub offset_ms: u64, pub level_widths_ms: Vec<u64>, pub level: usize }
 +/// An interval off the narrowest level's grid: no exact cover.
 +pub struct CoverOffTheGrid { pub start_ms: i64, pub end_ms: i64, pub narrowest_ms: u64 }
 +/// The windows tiling `(start_ms, end_ms]` (widest first): `(level, window_end_ms)`, oldest first.
 +pub fn cover_windows(start_ms: i64, end_ms: i64, level_widths_ms: &[u64]) -> Result<Vec<(usize, i64)>, CoverOffTheGrid>;
++/// The ends of `cover_windows`' windows of level `level`, oldest first.
++pub fn cover_level_window_ends(start_ms: i64, end_ms: i64, level_widths_ms: &[u64], level: usize) -> Result<Vec<i64>, CoverOffTheGrid>;
++/// `cover_level_window_ends` of the cover's range at evaluation time `T`.
++impl CoverLevel { pub fn window_ends_at(&self, evaluation_time_ms: i64) -> Result<Vec<i64>, CoverOffTheGrid>; }
 +/// Mean windows taken per level at the evaluation times of `grid` (closed form).
 +pub fn mean_cover_windows_per_level(range_ms: u64, grid: EvaluationGrid, level_widths_ms: &[u64]) -> Vec<f64>;
 
@@ -289,8 +293,8 @@ snapshot workloads is in the PR body (before and after the caps).
 
  // crates/executor/src/operators (time_range.rs)
  impl Operator {
-+    /// Keep only the windows a cover takes from one of its levels.
-+    pub fn with_cover_level(self, cover_level: CoverLevel) -> Result<Self, Error>;
++    /// Keep only the windows a cover over `level_widths_ms` takes from level `level`.
++    pub fn with_cover_level(self, level_widths_ms: Vec<u64>, level: usize) -> Result<Self, Error>;
 +    /// Tumbling-window ends anchored at the epoch, not at the range's end.
 +    pub fn with_tumbling_window_ends_from_epoch(self, width_ms: i64) -> Result<Self, Error>;
  }

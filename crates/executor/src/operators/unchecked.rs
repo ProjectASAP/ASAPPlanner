@@ -137,9 +137,8 @@ impl TryFrom<UncheckedOperator> for Operator {
                 width_ms,
                 sample_value,
                 latest_per_series,
-                tumbling_window_width_ms,
+                tumbling_window_ends,
                 cover_level,
-                tumbling_window_ends_from_epoch,
             } => {
                 let time_range = Operator::time_range(
                     input(0)?,
@@ -149,15 +148,17 @@ impl TryFrom<UncheckedOperator> for Operator {
                     sample_value,
                     latest_per_series,
                 )?;
-                let time_range = match (tumbling_window_width_ms, tumbling_window_ends_from_epoch) {
-                    (Some(width_ms), true) => {
-                        time_range.with_tumbling_window_ends_from_epoch(width_ms)?
+                let time_range = match tumbling_window_ends {
+                    Some(ends) if ends.from_epoch => {
+                        time_range.with_tumbling_window_ends_from_epoch(ends.width_ms)?
                     }
-                    (Some(width_ms), false) => time_range.with_tumbling_window_ends(width_ms)?,
-                    (None, _) => time_range,
+                    Some(ends) => time_range.with_tumbling_window_ends(ends.width_ms)?,
+                    None => time_range,
                 };
                 match cover_level {
-                    Some(cover_level) => time_range.with_cover_level(cover_level)?,
+                    Some((level_widths_ms, level)) => {
+                        time_range.with_cover_level(level_widths_ms, level)?
+                    }
                     None => time_range,
                 }
             }

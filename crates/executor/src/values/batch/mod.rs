@@ -346,18 +346,11 @@ impl Batch {
             {
                 continue;
             }
-            let mut moved = ahash::AHashMap::<u32, u32>::new();
             let mut used = Vec::new();
-            let remapped = indices
-                .values()
-                .iter()
-                .map(|&index| {
-                    *moved.entry(index).or_insert_with(|| {
-                        used.push(index as usize);
-                        (used.len() - 1) as u32
-                    })
-                })
-                .collect::<UInt32Array>();
+            let remapped = UInt32Array::from(remap_each_distinct(indices.values(), |index| {
+                used.push(index as usize);
+                (used.len() - 1) as u32
+            }));
             if used.len() == state_column.len() {
                 continue;
             }
@@ -374,7 +367,7 @@ impl Batch {
                     let (copied, charged) = super::mapped_states::MappedSketches::copied(
                         mapped.kernel(),
                         used.iter().map(|&index| (mapped, index)),
-                    );
+                    )?;
                     StateColumn::stored_views(family, super::StateStorage::Mapped(copied), charged)
                 }
                 // Shared by pointer: stored sketches are not charged again.
@@ -516,20 +509,16 @@ impl Batch {
                         .as_any()
                         .downcast_ref::<UInt32Array>()
                         .expect("summary columns hold state indices");
-                    let mut moved = ahash::AHashMap::<u32, u32>::new();
-                    for &index in local.values().iter() {
-                        let new_index = *moved.entry(index).or_insert_with(|| {
-                            selected.push((mapped, index as usize));
-                            (selected.len() - 1) as u32
-                        });
-                        indices.push(new_index);
-                    }
+                    indices.extend(remap_each_distinct(local.values(), |index| {
+                        selected.push((mapped, index as usize));
+                        (selected.len() - 1) as u32
+                    }));
                 }
                 arrays.push(Arc::new(UInt32Array::from(indices)) as ArrayRef);
                 let family = first.family().clone();
                 states.push(Some(Arc::new(if any_run_held {
                     let (copied, charged) =
-                        super::mapped_states::MappedSketches::copied(kernel, selected.into_iter());
+                        super::mapped_states::MappedSketches::copied(kernel, selected.into_iter())?;
                     StateColumn::stored_views(family, super::StateStorage::Mapped(copied), charged)
                 } else {
                     StateColumn::mapped_column(
@@ -560,29 +549,25 @@ impl Batch {
                     .as_any()
                     .downcast_ref::<UInt32Array>()
                     .expect("summary columns hold state indices");
-                let mut moved = ahash::AHashMap::<u32, u32>::new();
-                for &index in local.values().iter() {
+                indices.extend(remap_each_distinct(local.values(), |index| {
                     let next = (objects.len() + records.len()) as u32;
-                    let new_index = *moved.entry(index).or_insert_with(|| {
-                        match state_column.storage() {
-                            super::StateStorage::Exact(states) if all_exact => {
-                                records.push(states.get(index as usize))
-                            }
-                            // An object is shared by pointer (not charged
-                            // again when held outside the run); an exact
-                            // record becomes a new object.
-                            super::StateStorage::Objects(_) => objects.push((
-                                state_column.state(index as usize),
-                                state_column.state_held_outside_run(index as usize),
-                            )),
-                            super::StateStorage::Exact(_) | super::StateStorage::Mapped(_) => {
-                                objects.push((state_column.state(index as usize), false))
-                            }
+                    match state_column.storage() {
+                        super::StateStorage::Exact(states) if all_exact => {
+                            records.push(states.get(index as usize))
                         }
-                        next
-                    });
-                    indices.push(new_index);
-                }
+                        // An object is shared by pointer (not charged
+                        // again when held outside the run); an exact
+                        // record becomes a new object.
+                        super::StateStorage::Objects(_) => objects.push((
+                            state_column.state(index as usize),
+                            state_column.state_held_outside_run(index as usize),
+                        )),
+                        super::StateStorage::Exact(_) | super::StateStorage::Mapped(_) => {
+                            objects.push((state_column.state(index as usize), false))
+                        }
+                    }
+                    next
+                }));
             }
             arrays.push(Arc::new(UInt32Array::from(indices)) as ArrayRef);
             let family = first.family().clone();
@@ -757,6 +742,18 @@ impl Batch {
             + self.num_rows() * ROW_SLOT_BYTES
             + states
     }
+}
+
+/// `indices` renumbered so each distinct index gets the number `add_state`
+/// returns the first time it is met (which also collects that state), and
+/// every repeat the same number. Example: `[7, 3, 7]`, `add_state`
+/// numbering 0, 1, … gives `[0, 1, 0]`, adding states 7 and 3.
+fn remap_each_distinct(indices: &[u32], mut add_state: impl FnMut(u32) -> u32) -> Vec<u32> {
+    let mut renumbered = ahash::AHashMap::<u32, u32>::new();
+    indices
+        .iter()
+        .map(|&index| *renumbered.entry(index).or_insert_with(|| add_state(index)))
+        .collect()
 }
 
 #[cfg(test)]

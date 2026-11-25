@@ -27,6 +27,7 @@ use crate::{
     AnswerCache, CalibrationFit, CostInputs, CostModel, NodeCost, NodeCostSource, OperatorKind,
     ResourceUsage, ViewWindowCache, MEASURED_COST_SOURCE, MIXED_COST_SOURCE,
 };
+use asap_types::ir::operator::tumbling_window_chain::CoverLevel;
 use asap_types::ir::operator::Source;
 use asap_types::ir::properties::ExecutionTiming;
 use asap_types::ir::NonASAPOp;
@@ -699,12 +700,14 @@ fn window_cache_charges(
                                     levels.iter().position(|&level| level == node.id),
                                     levels.iter().map(|&level| width_of(level)).collect(),
                                 ) {
-                                    (Some(level), Some(level_widths_ms)) => WindowRead::Cover {
-                                        range_ms: window.length_ms,
-                                        offset_ms: window.ends_before_evaluation_ms,
-                                        level_widths_ms,
-                                        level,
-                                    },
+                                    (Some(level), Some(level_widths_ms)) => {
+                                        WindowRead::Cover(CoverLevel {
+                                            range_ms: window.length_ms,
+                                            offset_ms: window.ends_before_evaluation_ms,
+                                            level_widths_ms,
+                                            level,
+                                        })
+                                    }
                                     _ => WindowRead::Every,
                                 }
                             }

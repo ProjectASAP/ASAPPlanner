@@ -48,9 +48,8 @@ impl Operator {
                 width_ms,
                 sample_value,
                 latest_per_series,
-                tumbling_window_width_ms: None,
+                tumbling_window_ends: None,
                 cover_level: None,
-                tumbling_window_ends_from_epoch: false,
             },
             inputs: vec![input.clone()],
             output: input,
@@ -65,11 +64,11 @@ impl Operator {
     pub fn with_tumbling_window_ends_from_epoch(self, width_ms: i64) -> Result<Self, Error> {
         let mut operator = self.with_tumbling_window_ends(width_ms)?;
         if let Kind::TimeRange {
-            tumbling_window_ends_from_epoch,
+            tumbling_window_ends: Some(ends),
             ..
         } = &mut operator.kind
         {
-            *tumbling_window_ends_from_epoch = true;
+            ends.from_epoch = true;
         }
         Ok(operator)
     }
@@ -86,25 +85,24 @@ impl Operator {
     /// [`cover_windows`]: planner_types::ir::operator::tumbling_window_chain::cover_windows
     pub fn with_cover_level(
         mut self,
-        cover_level: planner_types::ir::operator::tumbling_window_chain::CoverLevel,
+        level_widths_ms: Vec<u64>,
+        level: usize,
     ) -> Result<Self, Error> {
         let Kind::TimeRange {
             latest_per_series: None,
-            tumbling_window_width_ms: None,
+            tumbling_window_ends: None,
             cover_level: slot,
             ..
         } = &mut self.kind
         else {
             return Err(invalid("a cover level is a range window over a chain"));
         };
-        if cover_level.level >= cover_level.level_widths_ms.len()
-            || cover_level.level_widths_ms.contains(&0)
-        {
+        if level >= level_widths_ms.len() || level_widths_ms.contains(&0) {
             return Err(invalid(
                 "a cover level reads one of its positive-width levels",
             ));
         }
-        *slot = Some(cover_level);
+        *slot = Some((level_widths_ms, level));
         Ok(self)
     }
 
@@ -120,7 +118,7 @@ impl Operator {
     pub fn with_tumbling_window_ends(mut self, width_ms: i64) -> Result<Self, Error> {
         let Kind::TimeRange {
             latest_per_series: None,
-            tumbling_window_width_ms: slot,
+            tumbling_window_ends: slot,
             ..
         } = &mut self.kind
         else {
@@ -137,7 +135,10 @@ impl Operator {
         {
             return Err(invalid("a range window's input already has a window end"));
         }
-        *slot = Some(width_ms);
+        *slot = Some(TumblingWindowEnds {
+            width_ms,
+            from_epoch: false,
+        });
         let mut output = (*self.output).clone();
         output.fields.push(result_field(
             TUMBLING_WINDOW_END_COLUMN,
@@ -147,6 +148,19 @@ impl Operator {
         self.output = Arc::new(output);
         Ok(self)
     }
+}
+
+/// How a range window stamps each row with its tumbling window's end
+/// ([`Operator::with_tumbling_window_ends`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(super) struct TumblingWindowEnds {
+    /// The windows' width.
+    pub(super) width_ms: i64,
+    /// Whether the windows are anchored at the epoch
+    /// ([`Operator::with_tumbling_window_ends_from_epoch`]), not counted
+    /// back from the range's end.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub(super) from_epoch: bool,
 }
 
 /// The column [`Operator::with_tumbling_window_ends`] appends: each row's
@@ -261,9 +275,8 @@ pub(super) fn execute<'a>(
         width_ms,
         sample_value,
         ref latest_per_series,
-        tumbling_window_width_ms,
+        tumbling_window_ends,
         ref cover_level,
-        tumbling_window_ends_from_epoch,
     } = operator.kind
     else {
         unreachable!()
@@ -278,19 +291,14 @@ pub(super) fn execute<'a>(
     let cover_ends: std::sync::Arc<Option<std::collections::BTreeSet<i64>>> = std::sync::Arc::new(
         cover_level
             .as_ref()
-            .map(|cover_level| {
-                planner_types::ir::operator::tumbling_window_chain::cover_windows(
+            .map(|(level_widths_ms, level)| {
+                planner_types::ir::operator::tumbling_window_chain::cover_level_window_ends(
                     start,
                     end,
-                    &cover_level.level_widths_ms,
+                    level_widths_ms,
+                    *level,
                 )
-                .map(|windows| {
-                    windows
-                        .into_iter()
-                        .filter(|(of_level, _)| *of_level == cover_level.level)
-                        .map(|(_, window_end)| window_end)
-                        .collect()
-                })
+                .map(|window_ends| window_ends.into_iter().collect())
             })
             .transpose()
             .map_err(|error| Error::Invalid(error.to_string()))?,
@@ -339,15 +347,8 @@ pub(super) fn execute<'a>(
                 } else {
                     batch.filter(&keep)?
                 };
-                match tumbling_window_width_ms {
-                    Some(width_ms) => window_ends(
-                        batch,
-                        &operator.output,
-                        time,
-                        end,
-                        width_ms,
-                        tumbling_window_ends_from_epoch,
-                    ),
+                match tumbling_window_ends {
+                    Some(ends) => window_ends(batch, &operator.output, time, end, ends),
                     None => Ok(batch),
                 }
             })
@@ -398,8 +399,10 @@ fn window_ends(
     output: &SchemaRef,
     time: usize,
     end: i64,
-    width_ms: i64,
-    from_epoch: bool,
+    TumblingWindowEnds {
+        width_ms,
+        from_epoch,
+    }: TumblingWindowEnds,
 ) -> Result<Batch, Error> {
     let times = timestamp_array(batch.column(time))
         .ok_or_else(|| invalid("time range column is not a timestamp"))?;

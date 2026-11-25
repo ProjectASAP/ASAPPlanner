@@ -174,7 +174,7 @@ pub(super) fn aggregate_coverage<'m>(
         Operator::NonASAP(NonASAPOp::TimeRange { .. } | NonASAPOp::TimeShift { .. })
             if operator.output_kind() == OperatorResultKind::State =>
         {
-            of_window_selection(operator)
+            of_window_selection(operator, 0)
         }
         // The windows tiling the range, from levels of one build: what the
         // same range over its narrowest level selects, under its offset as
@@ -186,7 +186,7 @@ pub(super) fn aggregate_coverage<'m>(
         }) => {
             let narrowest = *levels.last().ok_or(CoverageError::NoCoverage)?;
             let offset_ms = i64::try_from(*offset_ms).map_err(|_| CoverageError::NoCoverage)?;
-            of_window_selection_shifted(
+            of_window_selection(
                 &Operator::NonASAP(NonASAPOp::TimeRange {
                     range: *range,
                     kind: TimeRangeKind::Range,
@@ -766,17 +766,11 @@ fn time_constraint<C>(links: &[Operator<C>]) -> Option<Constraint> {
 
 /// The coverage of `selection`, a `TimeRange` or `TimeShift` over a chain
 /// (through more of them): the chain's coverage with the interval they
-/// select on the timestamp column of the chain's input, in every box.
+/// select on the timestamp column of the chain's input, in every box;
+/// moved `offset_ms` earlier (0: not moved), as by a `TimeShift` of that
+/// offset just below `selection`: a `TimeRangeCover`'s range over its
+/// narrowest level, under the cover's offset.
 fn of_window_selection(
-    selection: &Operator<MemoGroupAsInput<'_>>,
-) -> Result<AggregateCoverage, CoverageError> {
-    of_window_selection_shifted(selection, 0)
-}
-
-/// [`of_window_selection`] of `selection` moved `offset_ms` earlier, as by a
-/// `TimeShift` of that offset just below it: a `TimeRangeCover`'s range
-/// over its narrowest level, under the cover's offset.
-fn of_window_selection_shifted(
     selection: &Operator<MemoGroupAsInput<'_>>,
     offset_ms: i64,
 ) -> Result<AggregateCoverage, CoverageError> {

@@ -13,7 +13,6 @@ mod exact_state_columns;
 mod hydra_cms_execution;
 mod kernel_state_round_trip;
 mod keyed_summary_row_weight;
-mod mapped_states;
 mod multi_level_window_chains;
 mod node_ids;
 mod physical_dag;
