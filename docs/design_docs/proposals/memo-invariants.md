@@ -12,8 +12,10 @@ Stage 0 groups: G0 `Scan m` → G1 last 5m → G2 `rate` → G3 `sum by (job)`
 
 A failed check returns `InvariantViolation { check, group, origin }`, never
 a panic. `origin` is the rule recorded on the candidate that broke it, or
-the stage after which the check ran. The planner returns it as its own
-error, so `asap_planner` can give it an exit code (PR 7).
+the stage after which the check ran. After Stage 0 or Pass 1 the planner
+returns it as `PerComputationCandidateError::Invariant`, later as
+`SelectionError::Invariant`, so `asap_planner` can give it an exit code
+(PR 7).
 
 ## On insertion (always on)
 
@@ -21,8 +23,8 @@ In `Memo::find_or_add_group` / `Memo::add_candidate`, before the write.
 
 1. A group has one lineage and one sign entry per column. G3 has 2 columns,
    so 2 of each.
-2. A new candidate reads only existing groups. Reading G9 in a 5-group memo
-   fails (today: panics).
+2. A new group or candidate reads only existing groups. Reading G9 in a
+   5-group memo fails (today: panics).
 3. A new candidate has one input requirement per input.
 4. A new candidate that does not type-check over its inputs, or whose
    sketch parameters do not fit its group, fails, naming its rule.
@@ -33,7 +35,9 @@ rejection. Pass 1 already treats it as an error.
 
 ## After every stage (always on)
 
-`Memo::check_consistency`, after Stage 0, Pass 1, Pass 2, Stage 2, Stage 3.
+`Memo::check_consistency` and its siblings, called by the planner facade
+(`run_planning_until`) after Stage 0, Pass 1, Pass 2 and Stage 2. Stage 3
+only reads the memo, so after it only check 12 runs.
 
 5. Each group's stored "used by" list is correct. G3's includes G4.
 6. Each group's stored "queries" list is correct. G3's is {q0, q1}.

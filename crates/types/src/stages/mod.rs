@@ -16,10 +16,10 @@ mod pruning;
 pub use logical::{
     listed_build_parameters, ranked_column_of_group, AggregateCoverage, AggregateDefinition,
     CandidateError, CandidateExpression, CandidateForMemoGroup, CandidateForMemoGroupId,
-    ColumnLineage, CoverageError, EvaluationGrid, GroupProperties, LogicalASAPMemoCandidates,
-    LogicalEdge, LogicalProperties, LogicalPropertiesError, LogicalRequirements, Memo, MemoGroup,
-    MemoGroupError, MemoGroupId, MemoQuery, OriginOfCandidateForMemoGroup, RequiredAccuracy,
-    ValueSign,
+    ColumnLineage, CoverageError, EvaluationGrid, GroupProperties, InvariantCheck, InvariantOrigin,
+    InvariantViolation, LogicalASAPMemoCandidates, LogicalEdge, LogicalProperties,
+    LogicalPropertiesError, LogicalRequirements, Memo, MemoContents, MemoGroup, MemoGroupError,
+    MemoGroupId, MemoQuery, OriginOfCandidateForMemoGroup, RequiredAccuracy, ValueSign,
 };
 pub use physical::{
     anchor_is_evaluation_time, producer_satisfies_physical_requirements, queries_of_context,

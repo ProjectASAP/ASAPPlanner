@@ -171,6 +171,7 @@ fn pass2_of(
         &data,
         PlanningModels::builtin(),
         RunUntil::Pass2,
+        true,
     )
     .unwrap();
     run.run.logical_asap_candidates.unwrap()

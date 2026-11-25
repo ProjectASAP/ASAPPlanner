@@ -55,6 +55,9 @@
 //     (`PlanningModels::ignore_accuracy_guarantees`), comparing candidates
 //     on cost alone. By default it enforces them, as `plan_installable`
 //     does.
+//   - `--check-invariants`: also runs the costly memo invariants after each
+//     stage (`PlanSearchSettings::check_invariants`); the cheap ones always
+//     run. The golden runner and `planner_fuzz` pass it.
 //   - `--plan-file <file>` (needs `--run-until stage3`): besides the stage
 //     output, writes the selected plan as an `InstallablePlan` JSON plan
 //     file (`InstallablePlan::of_dag`), which a runtime reads with
@@ -180,7 +183,7 @@ use serde_json::{json, Value};
 const USAGE: &str = "usage: asap_planner (--workload <file>)... \
 --run-until stage0|stage1_pass1|stage1_pass2|stage2|stage3 [--format text|json] [--verbose] [--out <file>] \
 [--sql-catalog-table <json>]... [--cost-inputs <file>] [--deployment-capabilities <file>] \
-[--ignore-accuracy-guarantees] [--plan-file <file>]";
+[--ignore-accuracy-guarantees] [--check-invariants] [--plan-file <file>]";
 
 fn main() {
     match run(std::env::args().skip(1).collect()) {
@@ -224,6 +227,7 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
     let mut cost_inputs = CostInputs::default();
     let mut deployment_capabilities = DeploymentCapabilities::default();
     let mut ignore_accuracy_guarantees = false;
+    let mut check_invariants = false;
     let mut verbose = false;
     let mut plan_file = None;
     let mut args = args.into_iter();
@@ -249,6 +253,7 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
             "--cost-inputs" => cost_inputs = read_json(&flag, &value()?)?,
             "--deployment-capabilities" => deployment_capabilities = read_json(&flag, &value()?)?,
             "--ignore-accuracy-guarantees" => ignore_accuracy_guarantees = true,
+            "--check-invariants" => check_invariants = true,
             "--verbose" => verbose = true,
             "--printing-full-candidates" => {
                 return Err(Failure::Usage(
@@ -288,7 +293,14 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
         .with_cost_inputs(&cost_inputs)
         .with_deployment_capabilities(&deployment_capabilities)
         .with_ignore_accuracy_guarantees(ignore_accuracy_guarantees);
-    let result = run_stages_until(roots.clone(), &entries, &data, models, run_until);
+    let result = run_stages_until(
+        roots.clone(),
+        &entries,
+        &data,
+        models,
+        run_until,
+        check_invariants,
+    );
     // The selected plan's cost, as `plan_installable` reports it.
     let plan_cost = result
         .as_ref()

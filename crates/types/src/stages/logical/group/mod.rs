@@ -21,7 +21,7 @@ use crate::ir::ASAPOp;
 use crate::ir::SchemaDerivationError;
 use crate::ir::{NonASAPOp, ScalarExpr};
 use crate::ir::{Operator, OperatorResultKind};
-use crate::stages::{CandidateForMemoGroup, Memo};
+use crate::stages::{CandidateForMemoGroup, InvariantViolation, Memo};
 use crate::summary_type::SketchAlgorithm;
 
 /// A group, by index in the memo's groups.
@@ -138,7 +138,7 @@ impl GroupProperties {
 
 /// Why an expression is not valid over its input groups: what
 /// [`Memo::find_or_add_group`] and, wrapped in
-/// [`CandidateError::NotValidOverInputGroups`](crate::stages::CandidateError::NotValidOverInputGroups),
+/// an [`InvariantViolation`] of [`CandidateError`](crate::stages::CandidateError),
 /// [`Memo::add_candidate`] return. The memo is unchanged.
 #[derive(Debug, thiserror::Error)]
 pub enum MemoGroupError {
@@ -149,6 +149,19 @@ pub enum MemoGroupError {
     /// selections not proven to relate as the family's merge requires).
     #[error("invalid aggregate coverage: {0}")]
     Coverage(#[from] CoverageError),
+    /// A bug in the caller or in property derivation (checks 1–2).
+    #[error(transparent)]
+    Invariant(#[from] InvariantViolation),
+}
+
+impl MemoGroupError {
+    /// The invariant it breaks, if any.
+    pub fn invariant_violation(&self) -> Option<&InvariantViolation> {
+        match self {
+            Self::Invariant(violation) => Some(violation),
+            Self::Schema(_) | Self::Coverage(_) => None,
+        }
+    }
 }
 
 /// Whether `operator` is a valid expression over its input groups
@@ -167,6 +180,15 @@ pub(super) fn validate_expression_over_input_groups(
         _ => None,
     };
     Ok((schema, merge_coverage))
+}
+
+/// The `aggregate_coverage` a group computing `operator` gets
+/// ([`derive_group_properties`]): what the memo's check 14 compares each
+/// candidate's with.
+pub(super) fn aggregate_coverage_of(
+    operator: &Operator<MemoGroupAsInput<'_>>,
+) -> Option<AggregateCoverage> {
+    aggregate_coverage(operator).ok()
 }
 
 /// The properties of new memo group `group` computing `expression` over

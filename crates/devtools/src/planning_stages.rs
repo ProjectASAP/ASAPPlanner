@@ -112,7 +112,10 @@ pub fn run_planning_stages_over(
         entries,
         data,
         models,
-        PlanSearchSettings { inspect: true },
+        PlanSearchSettings {
+            inspect: true,
+            check_invariants: false,
+        },
     )
 }
 
@@ -128,16 +131,22 @@ pub fn run_search_over(
 }
 
 /// The stages over `roots` up to and including `until`, as the facade runs
-/// them (`run_planning_until`), each stage's output kept. A failure after
-/// Pass 1 is reported in the run, as the facade does.
+/// them (`run_planning_until`), each stage's output kept, the costly memo
+/// invariants run when `check_invariants`
+/// (`PlanSearchSettings::check_invariants`). A failure after Pass 1 is
+/// reported in the run, as the facade does.
 pub fn run_stages_until(
     roots: Vec<QueryRoot>,
     entries: &[QueryWorkloadEntry],
     data: &DataWorkload,
     models: PlanningModels<'_>,
     until: RunUntil,
+    check_invariants: bool,
 ) -> Result<PlanningStagesRun, PlanningStagesError> {
-    let settings = PlanSearchSettings { inspect: true };
+    let settings = PlanSearchSettings {
+        inspect: true,
+        check_invariants,
+    };
     run_until(roots, entries, data, models, settings, until)
 }
 

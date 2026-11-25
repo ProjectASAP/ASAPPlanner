@@ -238,7 +238,7 @@ impl FuzzWorkload {
         let mut command = String::new();
         command.push_str(&format!(
             "cargo run -p asap-devtools --bin asap_planner -- --workload {workload_file} \
-             --run-until stage3 --format json"
+             --run-until stage3 --format json --check-invariants"
         ));
         for table in &self.tables {
             command.push_str(&format!(" \\\n  --sql-catalog-table '{table}'"));
@@ -511,7 +511,10 @@ impl Planner {
                 &entries,
                 &data,
                 models,
-                PlanSearchSettings::default(),
+                PlanSearchSettings {
+                    check_invariants: true,
+                    ..PlanSearchSettings::default()
+                },
             ),
         }
         .map_err(|e| e.to_string())?;
