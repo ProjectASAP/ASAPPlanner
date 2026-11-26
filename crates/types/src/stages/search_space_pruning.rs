@@ -16,8 +16,13 @@ pub struct SearchSpacePruning {
     pub threshold_theta: bool,
     /// Rule 5, Stage 2: a query-time result is offered with $\ell$ =
     /// `OneEvaluation` only when two readers may read it in one evaluation
-    /// (two consumer inputs, or a consumer and a query output); read once,
-    /// its `None` form does all the `OneEvaluation` one does at no more cost.
+    /// context (two consumer inputs, a consumer anchored with `@ end()` or
+    /// `@ start()`, or a consumer and a query output). Read once, its
+    /// `None` form does all the `OneEvaluation` one does at no more cost:
+    /// the only `OneEvaluation` medium offered is memory, which holds at
+    /// least what `None` holds while its one consumer runs; retention,
+    /// raw data on disk and kept results are charged alike to both forms;
+    /// and `None` delivers on every context.
     pub one_evaluation_by_readers: bool,
     /// Rule 4, Stage 2: an input a consumer reads off its evaluation grid
     /// (a cover's wider levels, a merge of narrower windows) reads only

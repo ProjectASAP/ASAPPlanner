@@ -10,12 +10,11 @@ use asap_types::deployment_capabilities::DeploymentCapabilities;
 use asap_types::ir::properties::ExecutionTiming;
 use asap_types::stages::{
     CandidateForMemoGroupId, Lifetime, LogicalASAPMemoCandidates, PhysicalASAPMemoCandidates,
-    PhysicalCandidateId, PhysicalProperties, PruneReason,
+    PhysicalCandidateId, PhysicalProperties, PruneReason, SearchSpacePruning,
 };
 use asap_types::workload::DataWorkload;
 
 use crate::generate_physical_asap_memo_candidates;
-use asap_types::stages::SearchSpacePruning;
 
 /// Stage 2 over `logical`, checking what Stage 3 relies on: the edges are
 /// grouped by (consumer, input) over emitted candidates, and every emitted
@@ -27,8 +26,9 @@ fn generate(
 ) -> PhysicalASAPMemoCandidates {
     // The unit tests check every offered (τ, ℓ) and edge: rules 4 and 5 off.
     let mut every_alternative = SearchSpacePruning::default();
-    every_alternative.one_evaluation_by_readers = false;
-    every_alternative.context_reachability = false;
+    for rule in ["one_evaluation_by_readers", "context_reachability"] {
+        every_alternative.set(rule, false).expect("a pruning rule");
+    }
     let physical = generate_physical_asap_memo_candidates(
         logical,
         data,

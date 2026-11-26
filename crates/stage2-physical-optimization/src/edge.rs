@@ -6,7 +6,6 @@
 use std::collections::HashMap;
 use std::ops::Range;
 
-use asap_types::ir::properties::ExecutionTiming;
 use asap_types::stages::{
     producer_satisfies_physical_requirements, CandidateForMemoGroupId, LogicalASAPMemoCandidates,
     PhysicalCandidate, PhysicalCandidateId, PhysicalEdge,
@@ -74,7 +73,9 @@ pub(super) fn expand_edges(
                             &alternatives[producer_index],
                             consumer_timing,
                         ) && (!stored_only
-                            || stored_at_ingestion_time(&alternatives[producer_index])),
+                            || alternatives[producer_index]
+                                .physical_properties
+                                .is_stored_at_ingestion_time()),
                     };
                     if edge.is_logically_and_physically_admissible() {
                         admissible_producer_alternatives_per_input[consumer_index]
@@ -87,11 +88,4 @@ pub(super) fn expand_edges(
         }
     }
     (edges, admissible_producer_alternatives_per_input)
-}
-
-/// Whether `producer` is stored at ingestion time, its windows anchored at
-/// the epoch: (IngestionTime, AcrossEvaluations).
-fn stored_at_ingestion_time(producer: &PhysicalCandidate) -> bool {
-    producer.physical_properties.timing() == ExecutionTiming::IngestionTime
-        && producer.physical_properties.is_across_evaluations()
 }
