@@ -255,6 +255,7 @@ pub fn run_planning_until(
             data,
             models.cost_inputs,
             models.deployment_capabilities.final_results_cache(),
+            settings.search_space_pruning,
         );
         report.stage3_ms = elapsed_ms(started);
         selection.map_err(SelectionError::Selection)

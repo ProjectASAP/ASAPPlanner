@@ -18,6 +18,7 @@ use super::accuracy::AccuracyRules;
 use super::model::{has_one_reader, selection_cost_per_second, SelectionInputs};
 use super::COST_RELATIVE_TOLERANCE;
 use crate::selectable::QueryId;
+use asap_types::stages::MemoGroupId;
 
 /// How many times the greedy plan is rebuilt without an execution that
 /// made it infeasible before giving up on a bound.
@@ -35,17 +36,27 @@ type TreeInputs = Vec<Option<(usize, usize)>>;
 /// bound. Such an execution is in no optimal plan, as long as every
 /// other selected execution costs at least 0 with its selected inputs.
 /// None is ruled out when no feasible plan is found, the accuracy
-/// constraint (K) (`rules`) included. Also returns the bound: the feasible
-/// plan's cost per second, `None` without one.
+/// constraint (K) (`rules`) included. Also returns the feasible plan, whose
+/// cost per second is the bound; `None` without one.
+///
+/// With `sharing_aware` (`SearchSpacePruning::sharing_aware_bound`), the
+/// feasible plan is the cheapest of the one-tree-per-query plan and two
+/// greedy plans that charge executions already chosen for an earlier
+/// query as free ([`feasible_plan`]), and an execution's least cost also
+/// counts the least cost of each query output group other than its own
+/// ([`least_cost_of_other_output_groups`]): every plan answers every
+/// query from its output group, by executions other than this one.
 pub(crate) fn dearer_than_a_feasible_plan(
     inputs: &SelectionInputs<'_>,
     rules: Option<&AccuracyRules>,
-) -> (Option<f64>, Vec<bool>) {
+    sharing_aware: bool,
+) -> (Option<FeasiblePlan>, Vec<bool>) {
     let selectable = inputs.selectable;
     let count = selectable.executions().len();
-    let Some(bound) = feasible_plan_cost_per_second(inputs, rules) else {
+    let Some(plan) = feasible_plan(inputs, rules, sharing_aware) else {
         return (None, vec![false; count]);
     };
+    let bound = plan.cost_per_second;
     let costs = inputs.costs;
     let executions = selectable.executions();
     // The least retention (R) makes each execution pay; a query-time
@@ -84,37 +95,104 @@ pub(crate) fn dearer_than_a_feasible_plan(
     // is left out only when it is clearly dearer (by 1e-9 of the bound;
     // 1e-21/s when the bound is 0).
     let tolerance = 1e-9 * bound.abs().max(1e-12);
-    let dearer = (0..count)
+    // Each execution's least cost: its own, less what a bound on the kept
+    // results may drop, plus its least retention and the most its input
+    // edges can take off. `None` when it could not be costed.
+    let least: Vec<Option<f64>> = (0..count)
         .map(|index| {
-            let Ok(own) = &costs.per_execution[index] else {
-                return false;
-            };
-            let least = own - bounded_kept_results_cost(index)
-                + least_retention_cost(index)
-                + (0..selectable.input_count(index))
-                    .map(|i| {
-                        selectable
-                            .edges_into(index, i)
-                            .iter()
-                            .filter_map(|&position| costs.per_edge[position])
-                            .fold(0.0, f64::min)
-                    })
-                    .sum::<f64>();
-            least > bound + tolerance
+            let own = costs.per_execution[index].as_ref().ok()?;
+            Some(
+                own - bounded_kept_results_cost(index)
+                    + least_retention_cost(index)
+                    + (0..selectable.input_count(index))
+                        .map(|i| {
+                            selectable
+                                .edges_into(index, i)
+                                .iter()
+                                .filter_map(|&position| costs.per_edge[position])
+                                .fold(0.0, f64::min)
+                        })
+                        .sum::<f64>(),
+            )
         })
         .collect();
-    (Some(bound), dearer)
+    let others = sharing_aware.then(|| least_cost_of_other_output_groups(inputs, &least));
+    let dearer = (0..count)
+        .map(|index| {
+            least[index].is_some_and(|least| {
+                let others = others.as_ref().map_or(0.0, |others| others(index));
+                least + others > bound + tolerance
+            })
+        })
+        .collect();
+    (Some(plan), dearer)
 }
 
-/// The cost per second (less the request overhead every plan pays) of a
-/// feasible plan ([`selection_cost_per_second`]): each query output reads
+/// Per execution, by position, the least cost every plan also pays to
+/// answer the queries whose outputs are in a group other than its own: per
+/// output group whose query outputs it alone answers, the least `least`
+/// cost of the executions answering them (at most 0 for a group none of
+/// which could be costed). Distinct groups are distinct executions, and an
+/// execution's least cost counts only its own edges, so the costs add.
+///
+/// Example: two queries, `quantile_over_time(0.99, m[5m])` and
+/// `sum(sum_over_time(n[5m]))`, answered from two groups whose cheapest
+/// answering executions cost at least 0.03/s and 0.02/s: an execution of
+/// the first query's chain also pays 0.02/s for the second, so it is left
+/// out when its own least cost is over the bound less 0.02/s.
+fn least_cost_of_other_output_groups<'a>(
+    inputs: &'a SelectionInputs<'_>,
+    least: &[Option<f64>],
+) -> impl Fn(usize) -> f64 + 'a {
+    let selectable = inputs.selectable;
+    let executions = selectable.executions();
+    let group_of = |index: usize| {
+        inputs.physical.physical_candidates[executions[index].candidate.0]
+            .logical_candidate_id
+            .group
+    };
+    // Per output group (each query whose answering executions are all in
+    // one group), its least answering cost.
+    let mut least_of_group: BTreeMap<MemoGroupId, f64> = BTreeMap::new();
+    for (_, answering) in selectable.answering() {
+        let Some(&first) = answering.first() else {
+            continue;
+        };
+        let group = group_of(first);
+        if answering.iter().any(|&index| group_of(index) != group) {
+            continue;
+        }
+        let cheapest = answering
+            .iter()
+            .filter_map(|&index| least[index])
+            .fold(f64::INFINITY, f64::min);
+        let cheapest = if cheapest.is_finite() { cheapest } else { 0.0 };
+        let entry = least_of_group.entry(group).or_insert(cheapest);
+        *entry = entry.min(cheapest);
+    }
+    let total: f64 = least_of_group.values().sum();
+    let group_of_execution: Vec<MemoGroupId> = (0..executions.len()).map(group_of).collect();
+    move |index| {
+        total
+            - least_of_group
+                .get(&group_of_execution[index])
+                .copied()
+                .unwrap_or(0.0)
+    }
+}
+
+/// A feasible plan and its cost per second (less the request overhead
+/// every plan pays, [`selection_cost_per_second`]): each query output reads
 /// the cheapest tree of executions below it, each execution's input from
 /// the producer whose tree is cheapest ($\rho_\kappa c_{\kappa,v} + \sum_i
 /// \min_u (\rho_\kappa c_{\kappa,u,v,i} + \text{tree}_u)$), over the
 /// executions its query may read (constraint (X)). The query outputs are
-/// added in order, a later tree reusing the executions an earlier one
-/// added. When that gives an execution with one reader per context a
-/// second consumer, closes a cycle, or reuses a tree with an execution
+/// added in `query_order` (positions in `SelectableExecutions::answering`),
+/// a later tree reusing the executions an earlier one added; with
+/// `reuse_chosen_as_free`, a later query's trees also cost the executions
+/// already added as nothing, so it reads them where that is cheapest.
+/// When that gives an execution with one reader per context a second
+/// consumer, closes a cycle, or reuses a tree with an execution
 /// the query must not read, the plan is rebuilt with that execution left
 /// out of the query's trees. `None` when no feasible plan is found that
 /// way, or when the plan found misses an accuracy target under (K)
@@ -122,10 +200,12 @@ pub(crate) fn dearer_than_a_feasible_plan(
 /// readouts of a ratio may each meet their level and compose above the
 /// target, and a bound from such a plan could leave out the readouts the
 /// optimum needs.
-fn feasible_plan_cost_per_second(
+fn greedy_plan(
     inputs: &SelectionInputs<'_>,
     rules: Option<&AccuracyRules>,
-) -> Option<f64> {
+    query_order: &[usize],
+    reuse_chosen_as_free: bool,
+) -> Option<FeasiblePlan> {
     let selectable = inputs.selectable;
     let executions = selectable.executions();
     let count = executions.len();
@@ -146,16 +226,30 @@ fn feasible_plan_cost_per_second(
             .entry(*query)
             .or_insert_with(|| (0..count).map(|e| forbidden(*query, e)).collect());
     }
-    // The cheapest trees, per set of executions left out.
+    // The cheapest trees, per set of executions left out (when no
+    // execution is free, the trees depend on that set alone).
     let mut trees: HashMap<Vec<bool>, (Vec<f64>, Vec<TreeInputs>)> = HashMap::new();
     'repair: for _ in 0..REPAIRS {
         let mut plan = GreedyPlan::new(count);
         let mut answering: Vec<(QueryId, usize)> = Vec::new();
-        for (query, outputs) in selectable.answering() {
+        for &position in query_order {
+            let (query, outputs) = &selectable.answering()[position];
             let left_out = &excluded[query];
-            let (tree_cost, chosen) = trees
-                .entry(left_out.clone())
-                .or_insert_with(|| cheapest_trees(inputs, left_out));
+            let free: Option<Vec<bool>> =
+                reuse_chosen_as_free.then(|| plan.producers.iter().map(Option::is_some).collect());
+            let shared;
+            let (tree_cost, chosen) = match &free {
+                Some(free) => {
+                    shared = cheapest_trees(inputs, left_out, Some(free));
+                    (&shared.0, &shared.1)
+                }
+                None => {
+                    let (cost, chosen) = trees
+                        .entry(left_out.clone())
+                        .or_insert_with(|| cheapest_trees(inputs, left_out, None));
+                    (&*cost, &*chosen)
+                }
+            };
             let best = outputs
                 .iter()
                 .copied()
@@ -168,6 +262,9 @@ fn feasible_plan_cost_per_second(
                 continue 'repair;
             }
         }
+        // In the selection's query order, as `selection_cost_per_second`
+        // and (K) read it.
+        answering.sort_by_key(|&(query, _)| query);
         if rules.is_some_and(|rules| {
             rules
                 .selection_meets_targets(inputs, &plan.edges, &answering)
@@ -177,19 +274,73 @@ fn feasible_plan_cost_per_second(
         }
         let (cost, _) =
             selection_cost_per_second(inputs, &plan.executions, &plan.edges, &answering);
-        return cost.is_finite().then_some(cost);
+        return cost.is_finite().then_some(FeasiblePlan {
+            cost_per_second: cost,
+            executions: plan.executions,
+            edges: plan.edges,
+            answering,
+        });
     }
     None
+}
+
+/// A feasible plan found greedily ([`greedy_plan`]): its cost per second,
+/// less the request overhead every plan pays, which bounds the MILP's
+/// optimum from above, and its executions, edges and query outputs (by
+/// position in `SelectableExecutions`), a starting solution for the MILP.
+#[derive(Debug, Clone)]
+pub(crate) struct FeasiblePlan {
+    pub(crate) cost_per_second: f64,
+    pub(crate) executions: Vec<usize>,
+    pub(crate) edges: Vec<usize>,
+    pub(crate) answering: Vec<(QueryId, usize)>,
+}
+
+/// The cheapest feasible plan found greedily: one tree per query
+/// ([`greedy_plan`] in query order); with `sharing_aware`, also the plans
+/// that charge the executions earlier queries chose as free, the queries
+/// taken in order and in reverse order, so that a state a later query
+/// reads is not bought twice.
+///
+/// Example: `quantile_over_time(0.99, m[1h])` every 15 s and every 60 s:
+/// one tree per query buys a 15 s chain and a 60 s chain; charging the
+/// 15 s chain as free, the 60 s query reads it too, a cheaper plan.
+fn feasible_plan(
+    inputs: &SelectionInputs<'_>,
+    rules: Option<&AccuracyRules>,
+    sharing_aware: bool,
+) -> Option<FeasiblePlan> {
+    let forward: Vec<usize> = (0..inputs.selectable.answering().len()).collect();
+    let mut plans = vec![greedy_plan(inputs, rules, &forward, false)];
+    if sharing_aware {
+        let reverse: Vec<usize> = forward.iter().rev().copied().collect();
+        plans.push(greedy_plan(inputs, rules, &forward, true));
+        plans.push(greedy_plan(inputs, rules, &reverse, true));
+    }
+    plans
+        .into_iter()
+        .flatten()
+        .min_by(|a, b| a.cost_per_second.total_cmp(&b.cost_per_second))
 }
 
 /// Per execution not `excluded`, the cost of its cheapest tree and, per
 /// input, the edge it reads it over: relaxed until no tree gets cheaper
 /// (at most once per execution), so a tree over a cycle of executions is
 /// never cheaper than one without it when costs are not negative.
-fn cheapest_trees(inputs: &SelectionInputs<'_>, excluded: &[bool]) -> (Vec<f64>, Vec<TreeInputs>) {
+fn cheapest_trees(
+    inputs: &SelectionInputs<'_>,
+    excluded: &[bool],
+    free: Option<&[bool]>,
+) -> (Vec<f64>, Vec<TreeInputs>) {
     let selectable = inputs.selectable;
     let count = excluded.len();
-    let mut tree_cost = vec![f64::INFINITY; count];
+    // An execution already in the plan, with its tree, costs nothing more.
+    let mut tree_cost: Vec<f64> = (0..count)
+        .map(|v| match free {
+            Some(free) if free[v] && !excluded[v] => 0.0,
+            _ => f64::INFINITY,
+        })
+        .collect();
     let mut chosen: Vec<TreeInputs> = (0..count)
         .map(|v| vec![None; selectable.input_count(v)])
         .collect();
@@ -199,7 +350,7 @@ fn cheapest_trees(inputs: &SelectionInputs<'_>, excluded: &[bool]) -> (Vec<f64>,
             let Ok(own) = &inputs.costs.per_execution[v] else {
                 continue;
             };
-            if excluded[v] {
+            if excluded[v] || free.is_some_and(|free| free[v]) {
                 continue;
             }
             let mut cost = *own;

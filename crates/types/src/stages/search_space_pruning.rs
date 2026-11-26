@@ -30,6 +30,11 @@ pub struct SearchSpacePruning {
     /// producers are not admissible, and a producer no context can read
     /// is pruned as reaching no query output.
     pub context_reachability: bool,
+    /// Rule 2, Stage 3: the greedy plan that bounds the optimum charges a
+    /// state several queries read once, an execution is left out when its
+    /// least cost plus the other query outputs' least costs is over that
+    /// bound, and the plan is the MILP's starting solution.
+    pub sharing_aware_bound: bool,
 }
 
 impl Default for SearchSpacePruning {
@@ -38,6 +43,7 @@ impl Default for SearchSpacePruning {
             threshold_theta: true,
             one_evaluation_by_readers: true,
             context_reachability: true,
+            sharing_aware_bound: true,
         }
     }
 }

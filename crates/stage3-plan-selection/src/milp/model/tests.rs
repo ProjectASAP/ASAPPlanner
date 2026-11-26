@@ -918,7 +918,7 @@ fn the_bound_leaves_out_of_each_query_only_what_it_must_not_read() {
         kept_query_time_results: None,
         answer_cache: None,
     };
-    let (_, left_out) = dearer_than_a_feasible_plan(&inputs, None);
+    let (_, left_out) = dearer_than_a_feasible_plan(&inputs, None, false);
     let unused: Vec<bool> = selectable
         .executions()
         .iter()
@@ -962,6 +962,7 @@ fn the_bound_counts_the_least_retention_an_execution_pays() {
             answer_cache: None,
         },
         None,
+        false,
     );
     let left_out: Vec<usize> = selectable
         .executions()

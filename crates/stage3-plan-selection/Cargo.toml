@@ -17,6 +17,9 @@ serde_json = "1"
 
 good_lp = { version = "=1.15.3", default-features = false, features = ["highs"] }
 highs = "=2.4.0"
+# The sparse starting solution (`Highs_setSparseSolution`), which the
+# `highs` crate does not wrap.
+highs-sys = "=1.15.0"
 
 [dev-dependencies]
 asap-types = { path = "../types", features = ["test-support"] }

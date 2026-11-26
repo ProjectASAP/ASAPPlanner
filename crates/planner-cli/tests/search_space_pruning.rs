@@ -126,6 +126,13 @@ fn assert_same_cost(pruned: &Value, unpruned: &Value, rule: &str) {
     );
 }
 
+/// The MILP's variable count.
+fn milp_variables(document: &Value) -> u64 {
+    document["stage3_plan_selection"]["milp_variables"]
+        .as_u64()
+        .unwrap()
+}
+
 /// Pass 2's memo groups.
 fn pass2_groups(document: &Value) -> &Vec<Value> {
     document["memo"]["steps"]
@@ -521,6 +528,49 @@ fn rule5_an_anchored_consumer_on_two_grids_keeps_the_optimum() {
     let pruned = plan(&workload, &raw_retained(), &[]);
     let unpruned = plan(&workload, &raw_retained(), &["one_evaluation_by_readers"]);
     assert_same_cost(&pruned, &unpruned, "one_evaluation_by_readers");
+}
+
+// Rule 2: sharing-aware greedy upper bound and bound pruning (Stage 3).
+
+/// `quantile_over_time(0.99, m[1h])` at relative 0.01 every 15 s and every
+/// 60 s, 10,000 series sampled every 100 ms: alone, the 60 s query's
+/// cheapest tree reads a 60 s chain and the 15 s query's a 15 s chain; a
+/// 15 s chain serves both. A greedy plan that charges executions already
+/// chosen as free (the queries in order and in reverse order) costs
+/// strictly less than one tree per query, at the same optimum, and no more
+/// variables reach the MILP. The document reports the bound
+/// (`milp_upper_bound_cost_per_second`), at least the selected plan's cost.
+#[test]
+fn rule2_a_sharing_aware_bound_is_tighter_at_the_same_optimum() {
+    let workload = promql(
+        vec![
+            repeating("quantile_over_time(0.99, m[1h])", 15_000, 0, 0.01),
+            repeating("quantile_over_time(0.99, m[1h])", 60_000, 0, 0.01),
+        ],
+        10_000,
+        100,
+    );
+    let pruned = plan(&workload, &raw_retained(), &[]);
+    let unpruned = plan(&workload, &raw_retained(), &["sharing_aware_bound"]);
+    assert_same_cost(&pruned, &unpruned, "sharing_aware_bound");
+    let bound = |document: &Value| {
+        document["stage3_plan_selection"]["milp_upper_bound_cost_per_second"]
+            .as_f64()
+            .expect("the greedy plan's cost is reported")
+    };
+    assert!(
+        bound(&pruned) < bound(&unpruned),
+        "bound {:e}/s with the rule, {:e}/s without",
+        bound(&pruned),
+        bound(&unpruned)
+    );
+    assert!(bound(&pruned) >= cost(&pruned) * (1.0 - 1e-9));
+    assert!(
+        milp_variables(&pruned) <= milp_variables(&unpruned),
+        "variables {} with the rule, {} without",
+        milp_variables(&pruned),
+        milp_variables(&unpruned)
+    );
 }
 
 // Rule 8a: identical candidates (fixed on main; a regression guard).

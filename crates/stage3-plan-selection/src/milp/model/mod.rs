@@ -28,7 +28,9 @@ use good_lp::{
 use asap_cost::{AnswerCache, KeptQueryTimeResults};
 use asap_types::accuracy::FailureProbabilityBound;
 use asap_types::ir::operator::Source;
-use asap_types::stages::{PhysicalASAPMemoCandidates, PhysicalCandidateId, PhysicalEdgeId};
+use asap_types::stages::{
+    PhysicalASAPMemoCandidates, PhysicalCandidateId, PhysicalEdgeId, SearchSpacePruning,
+};
 use asap_types::workload::QueryWorkloadEntry;
 
 use super::accuracy::{accuracy_constraints, AccuracyRules, AccuracyVariables, ErrorModel};
@@ -41,7 +43,7 @@ use super::retention::{
     least_retention_ms, resident_window_terms, resident_windows_quantity, retention_constraints,
     retention_variables,
 };
-use super::upper_bound::dearer_than_a_feasible_plan;
+use super::upper_bound::{dearer_than_a_feasible_plan, FeasiblePlan};
 use crate::cost::ExecutionCosts;
 use crate::selectable::{Execution, QueryId, SelectableExecutions};
 
@@ -688,20 +690,28 @@ pub(super) fn objective_scale(largest: f64) -> f64 {
 pub(crate) fn solve_selection(
     inputs: &SelectionInputs<'_>,
 ) -> Result<SolvedSelection, SelectionMilpError> {
-    solve_selection_reporting_lp_bound(inputs, false)
+    solve_selection_with(inputs, false, SearchSpacePruning::default())
 }
 
-/// [`solve_selection`], first solving the LP relaxation of the same model
+/// [`solve_selection`], also solving the LP relaxation of the same model
 /// when `report_lp_bound` (`LatencySelectionChecks::report_root_lp_bound`),
-/// for [`SolvedSelection::lp_bound_per_second`].
-pub(crate) fn solve_selection_reporting_lp_bound(
+/// for [`SolvedSelection::lp_bound_per_second`], under the Stage 3 rules
+/// of `search_space_pruning`: with `sharing_aware_bound`, the greedy
+/// feasible plan is sharing-aware, bounds the executions left out with
+/// the other query outputs' least costs ([`dearer_than_a_feasible_plan`]),
+/// and is the MILP's starting solution.
+pub(crate) fn solve_selection_with(
     inputs: &SelectionInputs<'_>,
     report_lp_bound: bool,
+    search_space_pruning: SearchSpacePruning,
 ) -> Result<SolvedSelection, SelectionMilpError> {
     let started = Instant::now();
     let costs = inputs.costs;
     let rules = AccuracyRules::of(inputs);
-    let (upper_bound_per_second, dearer) = dearer_than_a_feasible_plan(inputs, rules.as_ref());
+    let sharing_aware = search_space_pruning.sharing_aware_bound;
+    let (feasible_plan, dearer) =
+        dearer_than_a_feasible_plan(inputs, rules.as_ref(), sharing_aware);
+    let upper_bound_per_second = feasible_plan.as_ref().map(|plan| plan.cost_per_second);
     let kept: Vec<bool> = dearer
         .iter()
         .zip(dominated_by_lifetime_twin(inputs))
@@ -809,6 +819,9 @@ pub(crate) fn solve_selection_reporting_lp_bound(
     model.set_option("mip_abs_gap", 0.0);
     model.set_option("output_flag", false);
     model.set_option("threads", 1);
+    if let Some(plan) = feasible_plan.as_ref().filter(|_| sharing_aware) {
+        offer_starting_solution(&mut model, plan, &variables, &kept, &column_of);
+    }
     let construction_ms = started.elapsed().as_millis() as u64;
     // The LP relaxation's optimum, unscaled, when asked for: solved after
     // the MILP, on its model, so the measurement cannot change the plan.
@@ -921,6 +934,56 @@ pub(crate) fn solve_selection_reporting_lp_bound(
         solve_ms,
         solve_count,
     })
+}
+
+/// Offers the greedy feasible `plan` to HiGHS as a starting solution: $x$
+/// of each kept execution, $y$ of each edge and $z$ of each query output,
+/// 1 when the plan selects it and 0 otherwise; HiGHS completes the other
+/// columns, and drops the start when it is not feasible, so it can speed
+/// the search up but not change the optimum.
+fn offer_starting_solution(
+    model: &mut highs::Model,
+    plan: &FeasiblePlan,
+    variables: &SelectionVariables,
+    kept: &[bool],
+    column_of: &HashMap<Variable, usize>,
+) {
+    let selected: HashSet<usize> = plan.executions.iter().copied().collect();
+    let selected_edges: HashSet<usize> = plan.edges.iter().copied().collect();
+    let selected_outputs: HashSet<(QueryId, usize)> = plan.answering.iter().copied().collect();
+    let mut values: BTreeMap<usize, f64> = BTreeMap::new();
+    let mut set = |variable: &Variable, on: bool| {
+        if let Some(&column) = column_of.get(variable) {
+            let value = values.entry(column).or_insert(0.0);
+            *value = value.max(f64::from(u8::from(on)));
+        }
+    };
+    for (index, variable) in variables.x.iter().enumerate() {
+        if kept[index] {
+            set(variable, selected.contains(&index));
+        }
+    }
+    for (position, variable) in &variables.y {
+        set(variable, selected_edges.contains(position));
+    }
+    for (pair, variable) in &variables.z {
+        set(variable, selected_outputs.contains(pair));
+    }
+    let (columns, values): (Vec<highs_sys::HighsInt>, Vec<f64>) = values
+        .into_iter()
+        .map(|(column, value)| (column as highs_sys::HighsInt, value))
+        .unzip();
+    // A start HiGHS refuses is ignored: the search runs as without it.
+    // SAFETY: `columns` and `values` have the same length, every column is
+    // one of the model's, and the model's pointer is live.
+    unsafe {
+        highs_sys::Highs_setSparseSolution(
+            model.as_mut_ptr(),
+            columns.len() as highs_sys::HighsInt,
+            columns.as_ptr(),
+            values.as_ptr(),
+        );
+    }
 }
 
 /// The LP relaxation's objective of `model` (scaled as the model is), a

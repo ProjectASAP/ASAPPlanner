@@ -40,7 +40,7 @@ use asap_types::deployment_capabilities::FinalResultsCache;
 use asap_types::plan::physical_asap_dag::PhysicalASAPDAG;
 use asap_types::stages::{
     MemoGroupId, OriginOfCandidateForMemoGroup, PhysicalASAPMemoCandidates, PruneReason,
-    PrunedCandidate,
+    PrunedCandidate, SearchSpacePruning,
 };
 use asap_types::workload::{DataWorkload, QueryWorkloadEntry};
 
@@ -49,7 +49,7 @@ use crate::milp::model::cluster::{
     solve_cluster_selection, ClusterInputs, ClusterSelectionError, FeasiblePlan,
 };
 use crate::milp::model::{
-    solve_selection, solve_selection_reporting_lp_bound, SelectionInputs, SelectionMilpError,
+    solve_selection, solve_selection_with, SelectionInputs, SelectionMilpError,
 };
 use crate::plan::plan_of;
 use crate::report::{accepted_accuracy, excluded_by_deployment, infeasible};
@@ -83,6 +83,7 @@ pub fn select_plan(
     data: &DataWorkload,
     cost_inputs: &CostInputs,
     final_results_cache: FinalResultsCache,
+    search_space_pruning: SearchSpacePruning,
 ) -> Result<(PhysicalASAPDAG, Selection), ErrorSelectingPlan> {
     cost_inputs
         .validate()
@@ -216,9 +217,10 @@ pub fn select_plan(
         optimality_gap,
     ) = match cluster_limits {
         None => (
-            solve_selection_reporting_lp_bound(
+            solve_selection_with(
                 &selection_inputs,
                 cost_inputs.latency_selection_checks.report_root_lp_bound,
+                search_space_pruning,
             )
             .map_err(milp_error)?,
             None,
