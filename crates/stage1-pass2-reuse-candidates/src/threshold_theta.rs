@@ -186,11 +186,16 @@ fn size_vector(theta: &SketchParams) -> SizeVector {
             layers,
         } => v(
             0,
-            &[f(heap_size), f(sketch_rows), f(sketch_cols), f(layers)],
+            &[
+                f(heap_size),
+                f(sketch_rows),
+                f(sketch_cols),
+                f64::from(layers),
+            ],
         ),
         SketchParams::Kll { k } => v(1, &[f(k)]),
         SketchParams::Cms { width, depth } => v(2, &[f(width), f(depth)]),
-        SketchParams::Hll { precision } => v(3, &[f(precision)]),
+        SketchParams::Hll { precision } => v(3, &[f64::from(precision)]),
         SketchParams::DDSketch { alpha } => v(4, &[1.0 / alpha.max(f64::MIN_POSITIVE)]),
         SketchParams::CmsWithHeap {
             width,
