@@ -6,7 +6,7 @@ use crate::node::operator_statistics::EdgeStatistics;
 use crate::DataPlaneExecution;
 use asap_types::ir::operator::AggIntent;
 use asap_types::ir::schema::{DataType, Field, FieldDataType, Schema, PROMQL_SERIES_IDENTITY};
-use asap_types::summary_type::SketchParams;
+use asap_types::summary_type::{SketchAlgorithm, SketchParams};
 use asap_types::workload::ValueMagnitudeRange;
 
 mod kll;
@@ -37,10 +37,12 @@ fn column_bytes(field: &Field) -> u64 {
 /// kept once per series per file and its window time once per window, not
 /// per row. A plain column beside them other than the 8-byte window time
 /// (a value) is counted at [`column_bytes`]. Any other row holds its
-/// window's time and its group keys, each at [`column_bytes`]. Example, at
-/// the defaults: a per-series Sum carrying `job` holds 4 + 2 × 4 = 12
-/// bytes beside its 24-byte sealed state, 36 in all; a Sum grouped by
-/// `job` holds 8 + 16 = 24.
+/// window's time and its group keys, each at [`column_bytes`], and, for a
+/// state sealed into a view layout (DDSketch, KLL, Count-Min), its offset
+/// in its column. Example, at the defaults: a per-series Sum carrying `job`
+/// holds 4 + 2 × 4 = 12 bytes beside its 24-byte sealed state, 36 in all;
+/// a Sum grouped by `job` holds 8 + 16 = 24, a KLL grouped by `job`
+/// 8 + 16 + 4 = 28.
 pub(crate) fn state_row_bytes_beside_state(schema: &Schema, execution: &DataPlaneExecution) -> u64 {
     let not_state = || {
         schema.fields.iter().filter(|field| {
@@ -51,7 +53,20 @@ pub(crate) fn state_row_bytes_beside_state(schema: &Schema, execution: &DataPlan
         })
     };
     if !not_state().any(|field| field.name == PROMQL_SERIES_IDENTITY) {
-        return not_state().map(column_bytes).sum();
+        let view_offset_bytes = match schema.fields.iter().any(|field| {
+            matches!(
+                field.dtype,
+                FieldDataType::Sketch(
+                    SketchAlgorithm::DDSketch
+                        | SketchAlgorithm::KLL
+                        | SketchAlgorithm::CountMinSketch
+                )
+            )
+        }) {
+            true => execution.state_offset_bytes_per_row,
+            false => 0,
+        };
+        return not_state().map(column_bytes).sum::<u64>() + view_offset_bytes;
     }
     let is_text = |field: &&Field| field.dtype == FieldDataType::Plain(DataType::Utf8);
     let key_columns = not_state().filter(is_text).count() as u64;

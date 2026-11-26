@@ -19,12 +19,12 @@ const KLL_CAPACITY_HEIGHTS: usize = 20;
 /// version (8), and `k`, `m`, its levels and its items (8 each).
 const KLL_VIEW_HEADER_BYTES: u64 = 40;
 
-/// Rows up to which [`kll_retained`] runs the compaction schedule; past
+/// Rows up to which [`kll_retained_levels_and_items`] runs the compaction schedule; past
 /// them a state is priced at the capacity of its levels, a bound.
 /// 2^20 rows run about 10^5 compactions per seed.
 const KLL_SIMULATED_ROWS_MAX: u64 = 1 << 20;
 
-/// Coin seeds [`kll_retained`] runs the schedule with (1 to 16), the most
+/// Coin seeds [`kll_retained_levels_and_items`] runs the schedule with (1 to 16), the most
 /// items of any taken: enough that it bounds the mean state of a column
 /// (at 1,100 rows and `k` = 200 a state retains 183 to 186 items; four
 /// seeds leave at most 185, sixteen 186).
@@ -37,7 +37,7 @@ const KLL_SIMULATED_SEEDS: std::ops::RangeInclusive<u64> = 1..=16;
 /// byte of its row beside the state (`state_offset_bytes_per_row`).
 ///
 /// Up to `k` rows nothing compacts: one level and every row. Past `k`, the
-/// levels and items [`kll_retained`] gives. Unknown rows fill every level
+/// levels and items [`kll_retained_levels_and_items`] gives. Unknown rows fill every level
 /// at its capacity. A state is assumed to fold at least one row.
 ///
 /// Example: `k` = 132 over a 15 s window of one sample a second (15 rows):
@@ -47,15 +47,18 @@ pub(super) fn kll_view_bytes(k: u32, input_rows: StateInputRows) -> u64 {
     let (levels, items) = match input_rows.rows_per_state() {
         None => (KLL_MAX_LEVELS as u64, kll_capacity_items(k, KLL_MAX_LEVELS)),
         Some(rows) if rows <= k => (1, rows.max(1)),
-        Some(rows) => kll_retained(k, rows),
+        Some(rows) => kll_retained_levels_and_items(k, rows),
     };
     KLL_VIEW_HEADER_BYTES + (4 * (levels + 1)).div_ceil(8) * 8 + 8 * items
 }
 
-/// Bytes an owned KLL of `k` holds after folding `input_rows`: the struct,
+/// Bytes an owned KLL of `k` (a state still receiving values) is priced at
+/// after folding `input_rows`, as before sealing states into views: the struct,
 /// `levels + 1` 8-byte level boundaries for the `L(n)` levels `n` rows fill
 /// (`kll_levels_after`), and its 8-byte items. Up to `k` rows, exactly the
-/// `n` items, as a shrunk sketch (`Kll::shrink_to_fit`) holds them. Past
+/// `n` items, as a shrunk sketch (`Kll::shrink_to_fit`) holds them; an
+/// open sketch holds more (62 level slots and a buffer doubling from 16
+/// items), which this leaves uncharged. Past
 /// `k`, the buffer an open sketch grows to (16 items doubled up to the
 /// capacity of all its levels, `kll_buffer_items`), what a merge holds
 /// while it folds windows. Unknown rows fill every level.
@@ -90,18 +93,36 @@ pub(super) fn kll_owned_bytes(k: u32, input_rows: StateInputRows) -> u64 {
 /// [`KLL_SIMULATED_SEEDS`] (the library's own coin, `Kll::with_seed`), and
 /// the most items any leaves is taken. Past [`KLL_SIMULATED_ROWS_MAX`] rows,
 /// the capacity of the levels the rows fill bounds it.
-fn kll_retained(k: u64, rows: u64) -> (u64, u64) {
+///
+/// Results are cached by `(k, rows)`: planning prices the same states many
+/// times, and near [`KLL_SIMULATED_ROWS_MAX`] one run of all seeds takes
+/// about 20 ms.
+fn kll_retained_levels_and_items(k: u64, rows: u64) -> (u64, u64) {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    /// Levels and items retained, by `(k, rows)`.
+    type RetainedByShape = HashMap<(u64, u64), (u64, u64)>;
+    static RETAINED: OnceLock<Mutex<RetainedByShape>> = OnceLock::new();
     if rows > KLL_SIMULATED_ROWS_MAX {
         let levels = kll_levels_after(k, rows);
         return (levels, kll_capacity_items(k, levels as usize));
     }
-    KLL_SIMULATED_SEEDS
+    let cache = RETAINED.get_or_init(Default::default);
+    if let Some(&retained) = cache.lock().expect("not poisoned").get(&(k, rows)) {
+        return retained;
+    }
+    let retained = KLL_SIMULATED_SEEDS
         .map(|seed| kll_retained_with_seed(k, rows, seed))
         .max_by_key(|&(_, items)| items)
-        .expect("seeds")
+        .expect("seeds");
+    cache
+        .lock()
+        .expect("not poisoned")
+        .insert((k, rows), retained);
+    retained
 }
 
-/// [`kll_retained`] for one coin `seed`: exactly what
+/// [`kll_retained_levels_and_items`] for one coin `seed`: exactly what
 /// `asap_sketchlib::Kll::with_seed(k, 8, seed)` retains after `rows`
 /// updates.
 fn kll_retained_with_seed(k: u64, rows: u64, seed: u64) -> (u64, u64) {

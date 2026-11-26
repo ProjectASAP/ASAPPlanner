@@ -1535,9 +1535,12 @@ fn evaluate_states(
                 } else if nullable {
                     None
                 } else {
+                    let family = match states.family() {
+                        SummaryFamilyType::Sketch(algorithm) => format!("{algorithm:?}"),
+                        other => format!("{other:?}"),
+                    };
                     return Err(Error::Operator(format!(
-                        "{:?} quantile of an empty population",
-                        states.family()
+                        "{family} quantile of an empty population"
                     )));
                 }
             }
