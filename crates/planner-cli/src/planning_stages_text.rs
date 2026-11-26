@@ -912,6 +912,7 @@ fn root_prune_reason_name(reason: &RootPruneReason) -> &'static str {
             "ChainWidthDoesNotDivideEvaluationGrid"
         }
         RootPruneReason::InputGroupHasNoCandidate { .. } => "InputGroupHasNoCandidate",
+        RootPruneReason::AboveReaderThreshold { .. } => "AboveReaderThreshold",
         RootPruneReason::NoConsumer => "NoConsumer",
     }
 }
@@ -1027,6 +1028,11 @@ pub fn root_prune_reason_text(reason: &RootPruneReason) -> String {
         RootPruneReason::InputGroupHasNoCandidate { .. } => {
             "the input group has no candidate".to_owned()
         }
+        RootPruneReason::AboveReaderThreshold { .. } => {
+            "a smaller θ of the same shape meets this reader (search-space pruning rule \
+             threshold_theta)"
+                .to_owned()
+        }
         RootPruneReason::NoConsumer => "no consumer, and not a query output".to_owned(),
     }
 }
@@ -1090,7 +1096,8 @@ fn write_pass2_pruned(out: &mut String, logical: &LogicalASAPMemoCandidates, ver
                     consumer, input, ..
                 }
                 | RootPruneReason::NoGuarantee { consumer, input }
-                | RootPruneReason::InputGroupHasNoCandidate { consumer, input } => {
+                | RootPruneReason::InputGroupHasNoCandidate { consumer, input }
+                | RootPruneReason::AboveReaderThreshold { consumer, input } => {
                     let _ = write!(line, "at {} input {input}: ", candidate_id_text(*consumer));
                 }
                 RootPruneReason::ValuesPerEvaluationUnknown { consumer, .. } => {

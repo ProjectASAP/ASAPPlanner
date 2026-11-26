@@ -211,7 +211,12 @@ pub fn run_planning_until(
         }
         // Pass 2: the reuse rules, readout requirements and logical edges.
         let started = Instant::now();
-        let logical = generate_logical_asap_memo_candidates(pass1, entries, models.evidence);
+        let logical = generate_logical_asap_memo_candidates(
+            pass1,
+            entries,
+            models.evidence,
+            settings.search_space_pruning,
+        );
         report.pass2_ms = elapsed_ms(started);
         let logical = logical_asap_candidates.insert(
             logical.map_err(|error| SelectionError::LogicalASAPCandidates(error.to_string()))?,
