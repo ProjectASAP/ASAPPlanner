@@ -71,6 +71,7 @@ impl SearchSpacePruning {
             ),
             ("sharing_aware_bound", &mut self.sharing_aware_bound),
             ("mandatory_group_cover", &mut self.mandatory_group_cover),
+            ("single_reader_dp", &mut self.single_reader_dp),
         ]
     }
 
