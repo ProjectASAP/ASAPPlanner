@@ -10,7 +10,7 @@ use asap_types::stages::{
     listed_build_parameters, CandidateForMemoGroup, Memo, MemoGroupId,
     OriginOfCandidateForMemoGroup,
 };
-use asap_types::summary_type::SketchParams;
+use asap_types::summary_type::{SketchAlgorithm, SketchParams};
 
 use crate::{schema, PerComputationCandidateError};
 
@@ -127,13 +127,20 @@ pub(crate) fn add_group(
 /// The state group of `build` (a `SummaryAgg`) with its build candidates:
 /// one per configuration of a sketch algorithm's predefined list
 /// (`parameter_list`), or the one exact accumulator build. Each lists
-/// `fused_groups`.
+/// `fused_groups`. A Count-Min build whose weights are not proven
+/// non-negative ([`count_min_weights_not_proven_non_negative`]) gets no
+/// candidate: its estimates are bounds only for non-negative weights, so
+/// no deployment can use it, and its readouts are dead.
 pub(crate) fn add_state_group(
     memo: &mut Memo,
     build: Operator<MemoGroupId>,
     fused_groups: &[MemoGroupId],
 ) -> Result<MemoGroupId, PerComputationCandidateError> {
     let group = memo.find_or_add_group(build.clone())?;
+    if count_min_weights_not_proven_non_negative(&memo.groups()[group.0 as usize].group_properties)
+    {
+        return Ok(group);
+    }
     for parameters in listed_build_parameters(&build) {
         add_candidate(
             memo,
@@ -144,6 +151,21 @@ pub(crate) fn add_state_group(
         )?;
     }
     Ok(group)
+}
+
+/// Whether a state group holds a Count-Min state (`Cms`, `CmsWithHeap`,
+/// `HydraCms`) whose weights are not proven non-negative: its state
+/// column, which records the sign of the weights it is updated with
+/// (`column_signs`), is not `NonNegative`.
+///
+/// Example: `topk(5, sum by (host) (m))` over a gauge `m` with no declared
+/// sign lists no `CmsWithHeap` θ; with `column_signs: {value:
+/// non_negative}` it lists all 240.
+pub(crate) fn count_min_weights_not_proven_non_negative(group: &GroupProperties) -> bool {
+    matches!(
+        group.sketch_algorithm_of_state(),
+        Some(SketchAlgorithm::Cms | SketchAlgorithm::CmsWithHeap | SketchAlgorithm::HydraCms)
+    ) && group.state_column_sign() != Some(ValueSign::NonNegative)
 }
 
 /// Adds the candidate `operator` with `parameters` to `group`. Its input
