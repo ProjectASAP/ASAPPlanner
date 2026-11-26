@@ -447,7 +447,9 @@ fn quantile_rank_without_raw_data_charges_the_larger_kll_more() {
         let w = workload(QUANTILE_RANK, setting);
         // Every listed k (rule 1 off): the test compares the costs of two.
         let mut every_theta = SearchSpacePruning::default();
-        every_theta.threshold_theta = false;
+        every_theta
+            .set("threshold_theta", false)
+            .expect("a pruning rule");
         let run = planning_run_with(&w, false, every_theta);
         // The `k`s of the stored KLL windows (tumbling-window chains)
         // Stage 1 offers, smallest first.

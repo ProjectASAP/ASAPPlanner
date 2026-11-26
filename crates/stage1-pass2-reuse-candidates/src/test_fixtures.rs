@@ -75,7 +75,9 @@ pub fn pass2_with_evidence(
 ) -> LogicalASAPMemoCandidates {
     // The unit tests check every θ's edges and chains: rule 1 off.
     let mut every_theta = SearchSpacePruning::default();
-    every_theta.threshold_theta = false;
+    every_theta
+        .set("threshold_theta", false)
+        .expect("a pruning rule");
     generate_logical_asap_memo_candidates(memo, entries, evidence, &[], every_theta).unwrap()
 }
 
