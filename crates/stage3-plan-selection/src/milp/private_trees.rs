@@ -3,8 +3,8 @@
 //! it to the rest of the selection, is solved by dynamic programming, and
 //! only its cheapest tree reaches the MILP.
 //!
-//! An execution is *private* when one selectable edge reads it and no query
-//! output does, its candidate is exact (θ = None: no error for (K) to
+//! An execution is *private* when one selectable edge into a kept consumer
+//! reads it and no query output does, its candidate is exact (θ = None: no error for (K) to
 //! compose), nothing it holds is charged outside its own cost (no
 //! retention $h_v$, raw data on disk, kept results or resident windows),
 //! and every producer on its inputs is private too. A private execution's
@@ -43,7 +43,15 @@ pub(crate) fn dearer_private_trees(
         }
     }
     let locally_uncoupled = |index: usize| {
-        kept[index] && uncoupled(inputs, costs, index, answers[index], accuracy_enforced)
+        kept[index]
+            && uncoupled(
+                inputs,
+                costs,
+                index,
+                answers[index],
+                accuracy_enforced,
+                kept,
+            )
     };
     // The kept producer of each selectable edge, `None` for one left out.
     let kept_producer = |position: usize| {
@@ -119,7 +127,9 @@ pub(crate) fn dearer_private_trees(
 }
 
 /// Whether execution `index` has no term coupling it to the rest of the
-/// selection: one selectable edge reads it and no query output
+/// selection: one selectable edge into a kept consumer reads it (the
+/// others' consumers are left out, so no plan reads it over them) and no
+/// query output
 /// (`answers`), its candidate is exact (or accuracy is not enforced), and
 /// it has no retention, raw data on disk, kept results or resident
 /// windows.
@@ -129,12 +139,18 @@ fn uncoupled(
     index: usize,
     answers: bool,
     accuracy_enforced: bool,
+    kept: &[bool],
 ) -> bool {
     let selectable = inputs.selectable;
     let v = selectable.executions()[index].candidate;
     let logical = inputs.physical.physical_candidates[v.0].logical_candidate_id;
     !answers
-        && selectable.edges_out_of(index).len() == 1
+        && selectable
+            .edges_out_of(index)
+            .iter()
+            .filter(|&&position| kept[selectable.edges()[position].consumer])
+            .count()
+            == 1
         && costs.per_execution[index].is_ok()
         && (!accuracy_enforced || {
             let candidate = inputs.physical.logical_candidates.memo.candidate(logical);

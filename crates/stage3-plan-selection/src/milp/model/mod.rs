@@ -693,7 +693,13 @@ pub(super) fn objective_scale(largest: f64) -> f64 {
 pub(crate) fn solve_selection(
     inputs: &SelectionInputs<'_>,
 ) -> Result<SolvedSelection, SelectionMilpError> {
-    solve_selection_with(inputs, false, SearchSpacePruning::default())
+    // The unit tests check the formulation over every execution: rule 7,
+    // which leaves out dearer private trees, off.
+    let mut pruning = SearchSpacePruning::default();
+    pruning
+        .set("single_reader_dp", false)
+        .expect("a pruning rule");
+    solve_selection_with(inputs, false, pruning)
 }
 
 /// [`solve_selection`], also solving the LP relaxation of the same model
