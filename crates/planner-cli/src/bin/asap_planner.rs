@@ -147,7 +147,7 @@
 //     $\alpha^{\log} = 0$ as Pass 2 recorded it). With a selected plan, `selected_candidates`
 //     maps each group the plan uses to the indices of its candidates there;
 //   - `search`, `search_space_pruning_off` (the pruning rules switched
-//     off), `accuracy_guarantees` (`"enforced"` or `"ignored"`),
+//     off; absent when none is), `accuracy_guarantees` (`"enforced"` or `"ignored"`),
 //     `deployment_capabilities` (as planned with) and `run_until`.
 // A section of a stage after `--run-until` is null.
 //
@@ -487,7 +487,12 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
         document["workload"]["data_workload"] =
             serde_json::to_value(&data).map_err(|e| e.to_string())?;
         document["search"] = json!("candidate-connections");
-        document["search_space_pruning_off"] = json!(search_space_pruning.rules_off());
+        // Only when some rule is off, so documents of default runs (the
+        // goldens) keep their shape.
+        let rules_off = search_space_pruning.rules_off();
+        if !rules_off.is_empty() {
+            document["search_space_pruning_off"] = json!(rules_off);
+        }
         document["accuracy_guarantees"] = json!(if ignore_accuracy_guarantees {
             "ignored"
         } else {

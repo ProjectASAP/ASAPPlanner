@@ -184,8 +184,9 @@ fn live_candidates(document: &Value) -> BTreeMap<CandidateKey, &Value> {
 
 // The switches.
 
-/// `all=off` is accepted and recorded in the document; the plan costs what
-/// it costs with every rule on.
+/// `all=off` is accepted; a default run's document has no
+/// `search_space_pruning_off`; the plan costs what it costs with every rule
+/// on.
 #[test]
 fn every_rule_off_is_recorded_and_costs_the_same() {
     let workload = promql(
@@ -200,7 +201,7 @@ fn every_rule_off_is_recorded_and_costs_the_same() {
     );
     let pruned = plan(&workload, &raw_retained(), &[]);
     let unpruned = plan(&workload, &raw_retained(), &["all"]);
-    assert_eq!(pruned["search_space_pruning_off"], json!([]));
+    assert!(pruned["search_space_pruning_off"].is_null());
     assert_same_cost(&pruned, &unpruned, "all");
 }
 
