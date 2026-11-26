@@ -14,7 +14,7 @@ use crate::node::operator_statistics::EdgeStatistics;
 use crate::node::state_bytes::{sketch_state_bytes, state_bytes_per_row, StateInputRows};
 use crate::node::usage::{cost_source, reads_one_batch_of};
 use crate::plan::execution_demand::{computations, evaluation_rate, query_starts};
-use crate::plan::kept_results::{computed_range, held_by_bounded_cache, kept_per_grid};
+use crate::plan::kept_results::{answers_kept, computed_range, held_by_bounded_cache};
 use crate::plan::resident_windows::{
     reader_window_reads_per_second, view_resident_windows, ChainReader, ReadTimes, WindowRead,
     WindowReadsPerSecond,
@@ -344,7 +344,7 @@ pub fn plan_cost(
         usage.scanned_bytes_per_second += node_costed.scanned_bytes_per_second;
         fit.add(node_costed.fit);
         work_ms.insert(node.id, node_costed.work_ms_per_execution);
-        output.insert(node.id, node_costed.output);
+        output.insert(node.id, node_costed.output_facts.statistics);
         if let Some(window) = node_costed.maintained {
             maintained.push((node.id, window));
         }
@@ -492,27 +492,26 @@ pub fn plan_cost(
     // evaluations read (its longest retention) plus a margin, charged to its
     // root; past the cache's bound, each query's share dropped.
     if let Some(answers) = settings.data_plane_execution.answer_cache {
-        let horizon_ms = dag
+        let longest_retention_ms = dag
             .nodes
             .iter()
             .filter_map(|node| node.retention_ms)
             .max()
-            .unwrap_or(0)
-            .saturating_add(answers.retention_margin_ms);
-        let pool: Vec<(PhysicalASAPNodeId, f64)> = dag
-            .roots
-            .iter()
-            .zip(entries)
-            .map(|(&root, entry)| {
-                let count = kept_per_grid(horizon_ms, entry.evaluation_grid().period_ms);
-                (root, output[&root].bytes as f64 * count)
-            })
-            .collect();
-        let total: f64 = pool.iter().map(|(_, bytes)| bytes).sum();
-        let held = held_by_bounded_cache(total, answers.max_bytes);
-        for (root, bytes) in pool {
-            let bytes = if total > 0.0 {
-                bytes * held / total
+            .unwrap_or(0);
+        let kept = answers_kept(
+            longest_retention_ms,
+            answers,
+            dag.roots.iter().zip(entries).map(|(root, entry)| {
+                (output[root].bytes as f64, entry.evaluation_grid().period_ms)
+            }),
+        );
+        for (&root, entry) in dag.roots.iter().zip(entries) {
+            let bytes = kept.bytes_of(
+                output[&root].bytes as f64,
+                entry.evaluation_grid().period_ms,
+            );
+            let bytes = if kept.total_bytes > 0.0 {
+                bytes * kept.held_bytes / kept.total_bytes
             } else {
                 0.0
             };
@@ -522,7 +521,10 @@ pub fn plan_cost(
                 .memory_and_disk
                 .peak_memory_bytes
                 .saturating_add(bytes as u64);
-            node_cost.detail += &format!("; keeps {bytes:.0} bytes of answers ({horizon_ms} ms)");
+            node_cost.detail += &format!(
+                "; keeps {bytes:.0} bytes of answers ({} ms)",
+                kept.horizon_ms
+            );
             if let (Some(cost), Some(unit_cost)) = (&mut node_cost.cost_per_second, unit_costs) {
                 *cost += unit_cost.cost_per_memory_byte_second * bytes;
             }
@@ -989,7 +991,7 @@ pub fn partial_copy_merge_ms(
     usage: &NodeResourceUsageAndCost<'_>,
     settings: &CostInputs,
 ) -> f64 {
-    let family = usage.family;
+    let family = usage.output_facts.family;
     if family == StateFamily::None {
         return 0.0;
     }
@@ -1007,7 +1009,7 @@ pub fn partial_copy_merge_ms(
         || {
             // A partial copy merges into a state of the same window.
             let state_bytes = state_bytes_per_row(
-                usage.output,
+                usage.output_facts.statistics,
                 &node.output_schema,
                 settings.data_plane_execution.stored_row_bytes_beside_state,
             );

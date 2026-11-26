@@ -6,7 +6,7 @@
 //! computes only the steps it has not answered before.
 
 use crate::AnswerCache;
-use asap_types::workload::{greatest_common_divisor, QueryWorkloadEntry, RangeEvaluation};
+use asap_types::workload::{least_common_multiple, QueryWorkloadEntry, RangeEvaluation};
 
 /// Evaluation times on a grid of `period_ms` within `kept_ms` behind the
 /// newest (both ends included), on average over where the newest falls:
@@ -26,6 +26,53 @@ pub fn held_by_bounded_cache(total: f64, max_bytes: Option<u64>) -> f64 {
     }
 }
 
+/// The answers an answer cache keeps ([`answers_kept`]): each query's
+/// answer per evaluation time as far back as the plan's evaluations read
+/// (its longest retention) plus the cache's margin.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AnswersKept {
+    /// How far back answers are kept, in ms: the longest retention plus
+    /// `AnswerCache::retention_margin_ms`.
+    pub horizon_ms: u64,
+    /// The bytes of every query's kept answers.
+    pub total_bytes: f64,
+    /// The bytes the cache holds of them: at most its bound
+    /// ([`held_by_bounded_cache`]).
+    pub held_bytes: f64,
+}
+
+impl AnswersKept {
+    /// The bytes kept of one query whose answer is `answer_bytes`,
+    /// evaluated every `period_ms`, before the cache's bound.
+    pub fn bytes_of(&self, answer_bytes: f64, period_ms: u64) -> f64 {
+        answer_bytes * kept_per_grid(self.horizon_ms, period_ms)
+    }
+}
+
+/// What an answer cache keeps of the queries' answers, each given by its
+/// answer's bytes and its evaluation period in ms, under a plan whose
+/// longest retention is `longest_retention_ms` ([`AnswersKept`]).
+///
+/// Example: a 1 h retention, a 1 min margin, one query every 15 s whose
+/// answer is 1,000 bytes: a 3,660,000 ms horizon, 245,000 bytes kept.
+pub fn answers_kept(
+    longest_retention_ms: u64,
+    answers: AnswerCache,
+    answer_bytes_and_period_ms: impl IntoIterator<Item = (f64, u64)>,
+) -> AnswersKept {
+    let mut kept = AnswersKept {
+        horizon_ms: longest_retention_ms.saturating_add(answers.retention_margin_ms),
+        total_bytes: 0.0,
+        held_bytes: 0.0,
+    };
+    kept.total_bytes = answer_bytes_and_period_ms
+        .into_iter()
+        .map(|(bytes, period_ms)| kept.bytes_of(bytes, period_ms))
+        .sum();
+    kept.held_bytes = held_by_bounded_cache(kept.total_bytes, answers.max_bytes);
+    kept
+}
+
 /// Steps one request of a query every `interval_ms` evaluating `range`
 /// computes when the answers of its earlier steps are kept by evaluation
 /// time. A request at `t` evaluates `t − j · step` (its steps run back from
@@ -37,7 +84,7 @@ pub fn held_by_bounded_cache(total: f64, max_bytes: Option<u64>) -> f64 {
 /// Examples: a 1 h range at 15 s steps (241 steps) every 15 s computes 1
 /// step; every 20 s, 4 (the request 60 s before shares the rest); every
 /// 10 s, 2; every 5 min, 20; every 2 h, all 241.
-pub fn steps_computed_per_request(range: Option<RangeEvaluation>, interval_ms: Option<u64>) -> f64 {
+fn steps_computed_per_request(range: Option<RangeEvaluation>, interval_ms: Option<u64>) -> f64 {
     let Some(range) = range else {
         return 1.0;
     };
@@ -46,7 +93,7 @@ pub fn steps_computed_per_request(range: Option<RangeEvaluation>, interval_ms: O
     match interval_ms {
         Some(interval_ms) => {
             let interval_ms = interval_ms.max(1);
-            let shared_ms = interval_ms / greatest_common_divisor(interval_ms, step_ms) * step_ms;
+            let shared_ms = least_common_multiple(interval_ms, step_ms);
             (shared_ms / step_ms).min(steps) as f64
         }
         None => steps as f64,

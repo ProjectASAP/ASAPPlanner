@@ -152,10 +152,7 @@ pub(crate) fn resident_window_terms(
         let Some(read_variable) = read.reader.variable(read.execution, y, z) else {
             continue;
         };
-        let windows = match costs.resident_at_most {
-            true => read.most_windows as f64,
-            false => read.mean_windows,
-        };
+        let windows = read.resident_windows;
         if per_window <= 0.0 || windows <= 0.0 {
             continue;
         }
@@ -189,10 +186,7 @@ pub(crate) fn resident_windows_quantity(
             continue;
         }
         let v = selectable.executions()[read.execution].candidate;
-        let windows = match costs.resident_at_most {
-            true => read.most_windows as f64,
-            false => read.mean_windows,
-        };
+        let windows = read.resident_windows;
         let kept = most.entry(v).or_default();
         *kept = kept.max(windows);
     }

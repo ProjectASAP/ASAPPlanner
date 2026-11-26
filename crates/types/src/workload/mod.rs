@@ -19,7 +19,8 @@ pub use data::{
 };
 pub use planning::{PlanningWorkload, WorkloadError};
 pub use query::{
-    greatest_common_divisor, BatchEntry, DemandEstimate, DurationMs, Predictability, Query,
-    QueryLanguage, QueryRecurrence, QueryRequirements, QueryWorkload, QueryWorkloadEntry,
-    RangeEvaluation, RepeatedDemand, RepeatingEntry, RepetitionInterval, SqlDialect, TimestampMs,
+    greatest_common_divisor, least_common_multiple, BatchEntry, DemandEstimate, DurationMs,
+    Predictability, Query, QueryLanguage, QueryRecurrence, QueryRequirements, QueryWorkload,
+    QueryWorkloadEntry, RangeEvaluation, RepeatedDemand, RepeatingEntry, RepetitionInterval,
+    SqlDialect, TimestampMs,
 };

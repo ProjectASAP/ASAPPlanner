@@ -20,19 +20,22 @@ use asap_types::plan::materialized_view::RefreshWindow;
 use asap_types::stages::{ExecutionContext, PhysicalASAPMemoCandidates, PhysicalCandidateId};
 use asap_types::workload::QueryWorkloadEntry;
 
+use crate::cost::ExecutionCosts;
 use crate::retention::edge_readers_need;
 use crate::selectable::{Reader, SelectableExecutions};
 
-/// One read of a cached view's execution: the windows it keeps resident,
-/// mean and most, and what its readers read from disk.
+/// One read of a cached view's execution: the windows it keeps resident
+/// and what its readers read from disk.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct ResidentRead {
     /// The execution read, by position in
     /// `SelectableExecutions::executions`.
     pub(crate) execution: usize,
     pub(crate) reader: Reader,
-    pub(crate) mean_windows: f64,
-    pub(crate) most_windows: u64,
+    /// The windows it keeps resident: over time, the mean, or the most
+    /// for a quantity charging the peak (`resident_reads`'s
+    /// `most_windows`).
+    pub(crate) resident_windows: f64,
     /// Bytes its readers read from disk per second: each reader's windows
     /// read while not in the cache, summed, as `plan_cost` charges them.
     pub(crate) bytes_read_from_disk_per_second: f64,
@@ -45,20 +48,22 @@ pub(crate) struct ResidentRead {
 /// window `cache` (a query's steps as `answer_cache` has the data plane
 /// compute them), with the windows it keeps resident: the windows
 /// written within the idle time of those the read needs retained
-/// (`retained_ms_of_read`, its need as $h_v$ retains it), and for an edge,
+/// (its need, `costs.retention_need_ms_per_edge`, as $h_v$ retains it,
+/// `ExecutionCosts::retention_ms_for_need`), and for an edge,
 /// the most any reader above it keeps
 /// ([`reader_resident_windows`], each query reaching a query-time reader on
 /// the edge consumer's grid one reader, as `plan_cost` takes each query
 /// reaching it). A read the cost model does not follow keeps every window
-/// it needs retained.
+/// it needs retained. Each read carries its mean resident windows, or with
+/// `most_windows` (peak memory) the most.
 pub(crate) fn resident_reads(
     physical: &PhysicalASAPMemoCandidates,
     selectable: &SelectableExecutions,
     entries: &[QueryWorkloadEntry],
     (cache, answer_cache): (ViewWindowCache, Option<AnswerCache>),
     cached: &HashMap<PhysicalCandidateId, CachedViewWindows>,
-    need_ms_per_edge: &[Option<u64>],
-    retained_ms_of_read: impl Fn(PhysicalCandidateId, u64) -> u64,
+    costs: &ExecutionCosts,
+    most_windows: bool,
 ) -> Vec<ResidentRead> {
     let idle_ms = cache.idle_ms;
     let executions = selectable.executions();
@@ -71,13 +76,16 @@ pub(crate) fn resident_reads(
         (Option<(f64, u64)>, Option<WindowReadsPerSecond>),
     > = HashMap::new();
     let mut reads = Vec::new();
-    for (index, reader, need_ms) in selectable.reads_back(need_ms_per_edge) {
+    for (index, reader, need_ms) in selectable.reads_back(&costs.retention_need_ms_per_edge) {
         let v = executions[index].candidate;
         let (Some(windows), Some(need_ms)) = (cached.get(&v), need_ms) else {
             continue;
         };
         let width_ms = windows.width_ms.max(1);
-        let retained = retained_ms_of_read(v, need_ms).div_ceil(width_ms).max(1);
+        let retained = costs
+            .retention_ms_for_need(v, need_ms)
+            .div_ceil(width_ms)
+            .max(1);
         let (mut mean, mut most) = written_resident_windows(width_ms, retained, idle_ms);
         let bytes_per_window = windows.bytes_per_window as f64;
         let (mut bytes_read_from_disk_per_second, mut most_bytes_read_from_disk_per_run) =
@@ -193,8 +201,10 @@ pub(crate) fn resident_reads(
         reads.push(ResidentRead {
             execution: index,
             reader,
-            mean_windows: mean,
-            most_windows: most,
+            resident_windows: match most_windows {
+                true => most as f64,
+                false => mean,
+            },
             bytes_read_from_disk_per_second,
             most_bytes_read_from_disk_per_run,
         });

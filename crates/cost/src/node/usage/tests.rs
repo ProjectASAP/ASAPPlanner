@@ -51,23 +51,25 @@ fn a_merge_over_a_chain_s_windows_outputs_one_state_per_group() {
     let chain_output = ProducerOutput {
         payload: &chain.payload,
         output_schema: &chain.output_schema,
-        output: EdgeStatistics {
-            rows: 1_000,
-            bytes: 16_000,
+        output_facts: OutputFacts {
+            statistics: EdgeStatistics {
+                rows: 1_000,
+                bytes: 16_000,
+            },
+            sources: BTreeSet::new(),
+            family: StateFamily::Exact(&ExactKind::Sum),
+            unchanged_columns: BTreeSet::new(),
+            tumbling_windows: 1.0,
+            chain_tumbling_window_width_ms: Some(60_000),
+            raw_rows_span_ms: None,
+            raw_rows_per_ms: None,
+            folded_per_row: None,
+            raw_rows_short_of_range: None,
+            state_data_span_ms: None,
+            raw_rows_shifted_back_ms: 0,
+            states_last_merged: false,
+            state_input_rows: None,
         },
-        sources: BTreeSet::new(),
-        family: StateFamily::Exact(&ExactKind::Sum),
-        unchanged_columns: BTreeSet::new(),
-        tumbling_windows: 1.0,
-        chain_tumbling_window_width_ms: Some(60_000),
-        raw_rows_span_ms: None,
-        raw_rows_per_ms: None,
-        folded_per_row: None,
-        raw_rows_short_of_range: None,
-        state_data_span_ms: None,
-        raw_rows_shifted_back_ms: 0,
-        states_last_merged: false,
-        state_input_rows: None,
     };
     let windows = node(Payload::NonASAP(NonASAPOp::TimeRange {
         range: Duration::from_secs(300),
@@ -84,8 +86,8 @@ fn a_merge_over_a_chain_s_windows_outputs_one_state_per_group() {
         &settings,
     )
     .unwrap();
-    assert_eq!(windows_usage.output.rows, 5_000);
-    assert_eq!(windows_usage.tumbling_windows, 5.0);
+    assert_eq!(windows_usage.output_facts.statistics.rows, 5_000);
+    assert_eq!(windows_usage.output_facts.tumbling_windows, 5.0);
     let merge = node(Payload::ASAP(ASAPOp::SummaryMerge {
         children: vec![0],
         group_by: None,
@@ -100,8 +102,8 @@ fn a_merge_over_a_chain_s_windows_outputs_one_state_per_group() {
         &settings,
     )
     .unwrap();
-    assert_eq!(merge_usage.output.rows, 1_000);
-    assert_eq!(merge_usage.output.bytes, 16_000);
+    assert_eq!(merge_usage.output_facts.statistics.rows, 1_000);
+    assert_eq!(merge_usage.output_facts.statistics.bytes, 16_000);
     assert!(
         merge_usage
             .cost
@@ -166,23 +168,25 @@ fn an_operator_keeping_its_input_window_over_a_chain_or_its_windows_selects_what
         let mut below = ProducerOutput {
             payload: &chain.payload,
             output_schema: &chain.output_schema,
-            output: EdgeStatistics {
-                rows: 1_000,
-                bytes: 16_000,
+            output_facts: OutputFacts {
+                statistics: EdgeStatistics {
+                    rows: 1_000,
+                    bytes: 16_000,
+                },
+                sources: BTreeSet::new(),
+                family: StateFamily::Exact(&ExactKind::Sum),
+                unchanged_columns: BTreeSet::new(),
+                tumbling_windows: 1.0,
+                chain_tumbling_window_width_ms: Some(60_000),
+                raw_rows_span_ms: None,
+                raw_rows_per_ms: None,
+                folded_per_row: None,
+                raw_rows_short_of_range: None,
+                state_data_span_ms: None,
+                raw_rows_shifted_back_ms: 0,
+                states_last_merged: false,
+                state_input_rows: None,
             },
-            sources: BTreeSet::new(),
-            family: StateFamily::Exact(&ExactKind::Sum),
-            unchanged_columns: BTreeSet::new(),
-            tumbling_windows: 1.0,
-            chain_tumbling_window_width_ms: Some(60_000),
-            raw_rows_span_ms: None,
-            raw_rows_per_ms: None,
-            folded_per_row: None,
-            raw_rows_short_of_range: None,
-            state_data_span_ms: None,
-            raw_rows_shifted_back_ms: 0,
-            states_last_merged: false,
-            state_input_rows: None,
         };
         for &step in path {
             let usage = node_resource_usage_and_cost(
@@ -200,7 +204,7 @@ fn an_operator_keeping_its_input_window_over_a_chain_or_its_windows_selects_what
         let usage =
             node_resource_usage_and_cost(&merge, &[below], (1, 1.0), None, None, &data, &settings)
                 .unwrap();
-        (usage.cost.detail, usage.output)
+        (usage.cost.detail, usage.output_facts.statistics)
     };
     let direct = merge_over(&[&range]);
     assert!(
@@ -231,23 +235,25 @@ fn a_merge_over_a_chain_s_windows_is_costed_by_the_chain_s_family() {
     let windows_output = ProducerOutput {
         payload: &windows.payload,
         output_schema: &windows.output_schema,
-        output: EdgeStatistics {
-            rows: 5_000,
-            bytes: 5_000 * 4_096,
+        output_facts: OutputFacts {
+            statistics: EdgeStatistics {
+                rows: 5_000,
+                bytes: 5_000 * 4_096,
+            },
+            sources: BTreeSet::new(),
+            family: StateFamily::None,
+            unchanged_columns: BTreeSet::new(),
+            tumbling_windows: 5.0,
+            chain_tumbling_window_width_ms: None,
+            raw_rows_span_ms: None,
+            raw_rows_per_ms: None,
+            folded_per_row: None,
+            raw_rows_short_of_range: None,
+            state_data_span_ms: None,
+            raw_rows_shifted_back_ms: 0,
+            states_last_merged: false,
+            state_input_rows: None,
         },
-        sources: BTreeSet::new(),
-        family: StateFamily::None,
-        unchanged_columns: BTreeSet::new(),
-        tumbling_windows: 5.0,
-        chain_tumbling_window_width_ms: None,
-        raw_rows_span_ms: None,
-        raw_rows_per_ms: None,
-        folded_per_row: None,
-        raw_rows_short_of_range: None,
-        state_data_span_ms: None,
-        raw_rows_shifted_back_ms: 0,
-        states_last_merged: false,
-        state_input_rows: None,
     };
     let mut merge = node(Payload::ASAP(ASAPOp::SummaryMerge {
         children: vec![0],
@@ -265,14 +271,17 @@ fn a_merge_over_a_chain_s_windows_is_costed_by_the_chain_s_family() {
     )
     .unwrap();
     assert!(matches!(
-        merge_usage.family,
+        merge_usage.output_facts.family,
         StateFamily::Sketch(SketchParams::DDSketch { .. })
     ));
     assert_eq!(
         merge_usage.cpu_ops_per_second,
         5_000.0 * crate::node::operations_per_unit::DDSKETCH_MERGE_OPERATIONS_PER_STATE
-            + crate::node::operations_per_unit::merge_output_terms(merge_usage.family, 1_000)
-                .operations()
+            + crate::node::operations_per_unit::merge_output_terms(
+                merge_usage.output_facts.family,
+                1_000
+            )
+            .operations()
     );
 }
 
@@ -307,23 +316,25 @@ fn a_project_or_filter_over_states_passes_their_family_on() {
     let states_output = ProducerOutput {
         payload: &states.payload,
         output_schema: &states.output_schema,
-        output: EdgeStatistics {
-            rows: 1_000,
-            bytes: 1_000 * 4_844,
+        output_facts: OutputFacts {
+            statistics: EdgeStatistics {
+                rows: 1_000,
+                bytes: 1_000 * 4_844,
+            },
+            sources: BTreeSet::new(),
+            family: StateFamily::Sketch(&kll),
+            unchanged_columns: BTreeSet::new(),
+            tumbling_windows: 1.0,
+            chain_tumbling_window_width_ms: None,
+            raw_rows_span_ms: None,
+            raw_rows_per_ms: None,
+            folded_per_row: None,
+            raw_rows_short_of_range: None,
+            state_data_span_ms: None,
+            raw_rows_shifted_back_ms: 0,
+            states_last_merged: true,
+            state_input_rows: None,
         },
-        sources: BTreeSet::new(),
-        family: StateFamily::Sketch(&kll),
-        unchanged_columns: BTreeSet::new(),
-        tumbling_windows: 1.0,
-        chain_tumbling_window_width_ms: None,
-        raw_rows_span_ms: None,
-        raw_rows_per_ms: None,
-        folded_per_row: None,
-        raw_rows_short_of_range: None,
-        state_data_span_ms: None,
-        raw_rows_shifted_back_ms: 0,
-        states_last_merged: true,
-        state_input_rows: None,
     };
     for passing in [
         Payload::NonASAP(NonASAPOp::Project {
@@ -355,14 +366,21 @@ fn a_project_or_filter_over_states_passes_their_family_on() {
         .unwrap();
         let name = passing.payload.kind_name();
         assert!(
-            matches!(usage.family, StateFamily::Sketch(SketchParams::Kll { .. })),
+            matches!(
+                usage.output_facts.family,
+                StateFamily::Sketch(SketchParams::Kll { .. })
+            ),
             "{name}"
         );
         // Merged states stay merged: an estimate over them reads sorted
         // levels.
-        assert!(usage.states_last_merged, "{name}");
+        assert!(usage.output_facts.states_last_merged, "{name}");
         // The same 4,828-byte states, without `job`'s 16 bytes a row.
-        assert_eq!(usage.output.bytes, 1_000 * (4_844 - 16), "{name}");
+        assert_eq!(
+            usage.output_facts.statistics.bytes,
+            1_000 * (4_844 - 16),
+            "{name}"
+        );
     }
 }
 
@@ -383,23 +401,25 @@ fn a_merge_over_a_rate_chain_s_windows_is_costed_by_the_rate_accumulator() {
     let windows_output = ProducerOutput {
         payload: &windows.payload,
         output_schema: &windows.output_schema,
-        output: EdgeStatistics {
-            rows: 5_000,
-            bytes: 5_000 * asap_types::summary_type::ExactKind::Counter.sealed_state_bytes(),
+        output_facts: OutputFacts {
+            statistics: EdgeStatistics {
+                rows: 5_000,
+                bytes: 5_000 * asap_types::summary_type::ExactKind::Counter.sealed_state_bytes(),
+            },
+            sources: BTreeSet::new(),
+            family: StateFamily::None,
+            unchanged_columns: BTreeSet::new(),
+            tumbling_windows: 5.0,
+            chain_tumbling_window_width_ms: None,
+            raw_rows_span_ms: None,
+            raw_rows_per_ms: None,
+            folded_per_row: None,
+            raw_rows_short_of_range: None,
+            state_data_span_ms: None,
+            raw_rows_shifted_back_ms: 0,
+            states_last_merged: false,
+            state_input_rows: None,
         },
-        sources: BTreeSet::new(),
-        family: StateFamily::None,
-        unchanged_columns: BTreeSet::new(),
-        tumbling_windows: 5.0,
-        chain_tumbling_window_width_ms: None,
-        raw_rows_span_ms: None,
-        raw_rows_per_ms: None,
-        folded_per_row: None,
-        raw_rows_short_of_range: None,
-        state_data_span_ms: None,
-        raw_rows_shifted_back_ms: 0,
-        states_last_merged: false,
-        state_input_rows: None,
     };
     let mut merge = node(Payload::ASAP(ASAPOp::SummaryMerge {
         children: vec![0],
@@ -420,12 +440,18 @@ fn a_merge_over_a_rate_chain_s_windows_is_costed_by_the_rate_accumulator() {
         &settings,
     )
     .unwrap();
-    assert_eq!(merge_usage.family, StateFamily::Exact(&ExactKind::Counter));
+    assert_eq!(
+        merge_usage.output_facts.family,
+        StateFamily::Exact(&ExactKind::Counter)
+    );
     assert_eq!(
         merge_usage.cpu_ops_per_second,
         5_000.0 * crate::node::operations_per_unit::COUNTER_MERGE_OPERATIONS_PER_STATE
-            + crate::node::operations_per_unit::merge_output_terms(merge_usage.family, 1_000)
-                .operations()
+            + crate::node::operations_per_unit::merge_output_terms(
+                merge_usage.output_facts.family,
+                1_000
+            )
+            .operations()
     );
 }
 
@@ -455,23 +481,25 @@ fn raw_rows<'a>(
     ProducerOutput {
         payload: &producer.payload,
         output_schema: &producer.output_schema,
-        output: EdgeStatistics {
-            rows,
-            bytes: rows * 48,
+        output_facts: OutputFacts {
+            statistics: EdgeStatistics {
+                rows,
+                bytes: rows * 48,
+            },
+            sources: BTreeSet::from([metric]),
+            family: StateFamily::None,
+            unchanged_columns: BTreeSet::new(),
+            tumbling_windows: 1.0,
+            chain_tumbling_window_width_ms: None,
+            raw_rows_span_ms: Some(span_ms),
+            raw_rows_per_ms: None,
+            folded_per_row: None,
+            raw_rows_short_of_range: None,
+            state_data_span_ms: None,
+            raw_rows_shifted_back_ms: 0,
+            states_last_merged: false,
+            state_input_rows: None,
         },
-        sources: BTreeSet::from([metric]),
-        family: StateFamily::None,
-        unchanged_columns: BTreeSet::new(),
-        tumbling_windows: 1.0,
-        chain_tumbling_window_width_ms: None,
-        raw_rows_span_ms: Some(span_ms),
-        raw_rows_per_ms: None,
-        folded_per_row: None,
-        raw_rows_short_of_range: None,
-        state_data_span_ms: None,
-        raw_rows_shifted_back_ms: 0,
-        states_last_merged: false,
-        state_input_rows: None,
     }
 }
 
@@ -728,23 +756,25 @@ fn a_query_time_chain_pays_the_time_range_over_the_rows_it_reads() {
     let rows = ProducerOutput {
         payload: &scan.payload,
         output_schema: &scan.output_schema,
-        output: EdgeStatistics {
-            rows: 36_000,
-            bytes: 36_000 * 16,
+        output_facts: OutputFacts {
+            statistics: EdgeStatistics {
+                rows: 36_000,
+                bytes: 36_000 * 16,
+            },
+            sources: BTreeSet::new(),
+            family: StateFamily::None,
+            unchanged_columns: BTreeSet::new(),
+            tumbling_windows: 1.0,
+            chain_tumbling_window_width_ms: None,
+            raw_rows_span_ms: None,
+            raw_rows_per_ms: None,
+            folded_per_row: None,
+            raw_rows_short_of_range: None,
+            state_data_span_ms: None,
+            raw_rows_shifted_back_ms: 0,
+            states_last_merged: false,
+            state_input_rows: None,
         },
-        sources: BTreeSet::new(),
-        family: StateFamily::None,
-        unchanged_columns: BTreeSet::new(),
-        tumbling_windows: 1.0,
-        chain_tumbling_window_width_ms: None,
-        raw_rows_span_ms: None,
-        raw_rows_per_ms: None,
-        folded_per_row: None,
-        raw_rows_short_of_range: None,
-        state_data_span_ms: None,
-        raw_rows_shifted_back_ms: 0,
-        states_last_merged: false,
-        state_input_rows: None,
     };
     let chain = PhysicalASAPDAGNode {
         retention_ms: Some(300_000),
@@ -786,7 +816,7 @@ fn a_grouping_counts_raw_batches_from_the_time_its_input_spans() {
     let scan_usage =
         node_resource_usage_and_cost(&scan, &[], (1, 1.0), Some(300_000), None, &data, &settings)
             .unwrap();
-    assert_eq!(scan_usage.output.rows, 300_000);
+    assert_eq!(scan_usage.output_facts.statistics.rows, 300_000);
     let filter = node(Payload::NonASAP(NonASAPOp::Filter {
         pred: Predicate(ScalarExpr::Literal(ScalarValue::Boolean(true))),
         child: 0,
@@ -804,8 +834,8 @@ fn a_grouping_counts_raw_batches_from_the_time_its_input_spans() {
     // The filter keeps a tenth of the rows; the cost model passes every
     // row on, so the test sets what it keeps.
     let mut kept = produced(&filter, &filter_usage);
-    kept.output.rows = 30_000;
-    kept.output.bytes /= 10;
+    kept.output_facts.statistics.rows = 30_000;
+    kept.output_facts.statistics.bytes /= 10;
     let aggregate = node(Payload::NonASAP(NonASAPOp::Aggregate {
         reduction: Reduction::PerEntity,
         measures: vec![AggIntent::Max { col: None }],
@@ -854,6 +884,7 @@ fn a_sort_limit_dedup_and_concat_pass_on_the_time_their_raw_rows_span() {
             &settings,
         )
         .unwrap()
+        .output_facts
         .raw_rows_span_ms
     };
     let raw = || produced(&scan, &scan_usage);
@@ -927,8 +958,8 @@ fn a_query_time_chain_sizes_its_windows_from_the_time_its_input_spans() {
         node_resource_usage_and_cost(&scan, &[], (1, 1.0), Some(300_000), None, &data, &settings)
             .unwrap();
     let mut kept = produced(&scan, &scan_usage);
-    kept.output.rows = 30_000;
-    kept.output.bytes /= 10;
+    kept.output_facts.statistics.rows = 30_000;
+    kept.output_facts.statistics.bytes /= 10;
     let chain = PhysicalASAPDAGNode {
         retention_ms: Some(300_000),
         ..node(Payload::ASAP(ASAPOp::SummaryTumblingWindowChain {
@@ -949,6 +980,7 @@ fn a_query_time_chain_sizes_its_windows_from_the_time_its_input_spans() {
             .unwrap();
     assert_eq!(
         usage
+            .output_facts
             .state_input_rows
             .and_then(|rows| rows.rows_per_state()),
         Some(6)
@@ -986,28 +1018,30 @@ fn a_merge_reading_one_state_per_group_passes_it_through() {
         let one_window = ProducerOutput {
             payload: &window.payload,
             output_schema: &window.output_schema,
-            output: EdgeStatistics {
-                rows: 1_000,
-                bytes: 1_000 * state_bytes,
+            output_facts: OutputFacts {
+                statistics: EdgeStatistics {
+                    rows: 1_000,
+                    bytes: 1_000 * state_bytes,
+                },
+                sources: BTreeSet::new(),
+                family: StateFamily::None,
+                unchanged_columns: BTreeSet::new(),
+                tumbling_windows: 1.0,
+                chain_tumbling_window_width_ms: None,
+                raw_rows_span_ms: None,
+                raw_rows_per_ms: None,
+                folded_per_row: None,
+                raw_rows_short_of_range: None,
+                state_data_span_ms: None,
+                raw_rows_shifted_back_ms: 0,
+                states_last_merged: false,
+                state_input_rows: Some(StateInputRows {
+                    folded_rows_per_state: Some((100) as f64),
+                    non_negative: true,
+                    value_magnitude_range: None,
+                    distinct_values: None,
+                }),
             },
-            sources: BTreeSet::new(),
-            family: StateFamily::None,
-            unchanged_columns: BTreeSet::new(),
-            tumbling_windows: 1.0,
-            chain_tumbling_window_width_ms: None,
-            raw_rows_span_ms: None,
-            raw_rows_per_ms: None,
-            folded_per_row: None,
-            raw_rows_short_of_range: None,
-            state_data_span_ms: None,
-            raw_rows_shifted_back_ms: 0,
-            states_last_merged: false,
-            state_input_rows: Some(StateInputRows {
-                folded_rows_per_state: Some((100) as f64),
-                non_negative: true,
-                value_magnitude_range: None,
-                distinct_values: None,
-            }),
         };
         let merge = PhysicalASAPDAGNode {
             parameters: Some(parameters.clone()),
@@ -1078,7 +1112,7 @@ fn sql_aggregate_operations_per_row(
     };
     let mut rows = raw_rows(&range, "t", 300_000, 300_000);
     rows.output_schema = &range.output_schema;
-    rows.unchanged_columns = ["job", "region", "instance", "user_id", "value"].into();
+    rows.output_facts.unchanged_columns = ["job", "region", "instance", "user_id", "value"].into();
     let names = measures.iter().map(|_| String::new()).collect();
     let aggregate = node(Payload::NonASAP(NonASAPOp::Aggregate {
         reduction: Reduction::by(keys),
@@ -1241,7 +1275,7 @@ fn http_distinct_count_operations_per_row(
     };
     let mut input = raw_rows(&range, "http", rows, rows / 10);
     input.output_schema = &range.output_schema;
-    input.unchanged_columns = ["region", "service", "instance", "user_id"].into();
+    input.output_facts.unchanged_columns = ["region", "service", "instance", "user_id"].into();
     let aggregate = node(Payload::NonASAP(NonASAPOp::Aggregate {
         reduction: Reduction::by(keys),
         measures: vec![AggIntent::Cardinality { cols: vec![4] }],
@@ -1340,7 +1374,8 @@ fn a_kmv_build_costs_per_retained_hash_it_compares() {
     for (keys, k, measured) in [(vec![], 4_323, 329.0), (vec![2], 26_656, 8_357.0)] {
         let mut rows = raw_rows(&range, "t", 300_000, 300_000);
         rows.output_schema = &range.output_schema;
-        rows.unchanged_columns = ["job", "region", "instance", "user_id", "value"].into();
+        rows.output_facts.unchanged_columns =
+            ["job", "region", "instance", "user_id", "value"].into();
         let build = PhysicalASAPDAGNode {
             parameters: Some(SketchParams::Kmv { k }),
             ..node(Payload::ASAP(ASAPOp::SummaryAgg {
@@ -1382,7 +1417,7 @@ fn user_id_sketch_detail(
     };
     let mut rows = raw_rows(&range, "t", 300_000, 300_000);
     rows.output_schema = &range.output_schema;
-    rows.unchanged_columns = ["job", "region", "instance", "user_id", "value"].into();
+    rows.output_facts.unchanged_columns = ["job", "region", "instance", "user_id", "value"].into();
     let summary_type = FieldDataType::Sketch(algorithm);
     let input = SummaryUpdate::column(ColumnRef::Named("user_id".into()));
     let reduction = Reduction::by(vec![]);
@@ -1490,7 +1525,8 @@ fn a_kmv_build_charges_its_measured_time_per_row() {
     ] {
         let mut input = raw_rows(&range, "t", rows, 300_000);
         input.output_schema = &range.output_schema;
-        input.unchanged_columns = ["job", "region", "instance", "user_id", "value"].into();
+        input.output_facts.unchanged_columns =
+            ["job", "region", "instance", "user_id", "value"].into();
         let build = PhysicalASAPDAGNode {
             parameters: Some(SketchParams::Kmv { k }),
             ..node(Payload::ASAP(ASAPOp::SummaryAgg {
@@ -1632,23 +1668,25 @@ fn a_kmv_rollup_merge_costs_per_hash_it_inserts() {
     let states = ProducerOutput {
         payload: &build.payload,
         output_schema: &build.output_schema,
-        output: EdgeStatistics {
-            rows: 1_000,
-            bytes: 1_000 * (state_bytes + 32),
+        output_facts: OutputFacts {
+            statistics: EdgeStatistics {
+                rows: 1_000,
+                bytes: 1_000 * (state_bytes + 32),
+            },
+            sources: BTreeSet::from(["http"]),
+            family: StateFamily::Sketch(&parameters),
+            unchanged_columns: ["region", "service"].into(),
+            tumbling_windows: 1.0,
+            chain_tumbling_window_width_ms: None,
+            raw_rows_span_ms: None,
+            raw_rows_per_ms: None,
+            folded_per_row: None,
+            raw_rows_short_of_range: None,
+            state_data_span_ms: None,
+            raw_rows_shifted_back_ms: 0,
+            states_last_merged: false,
+            state_input_rows: Some(rows),
         },
-        sources: BTreeSet::from(["http"]),
-        family: StateFamily::Sketch(&parameters),
-        unchanged_columns: ["region", "service"].into(),
-        tumbling_windows: 1.0,
-        chain_tumbling_window_width_ms: None,
-        raw_rows_span_ms: None,
-        raw_rows_per_ms: None,
-        folded_per_row: None,
-        raw_rows_short_of_range: None,
-        state_data_span_ms: None,
-        raw_rows_shifted_back_ms: 0,
-        states_last_merged: false,
-        state_input_rows: Some(rows),
     };
     let rollup = PhysicalASAPDAGNode {
         parameters: Some(parameters.clone()),
@@ -1660,7 +1698,7 @@ fn a_kmv_rollup_merge_costs_per_hash_it_inserts() {
     let usage =
         node_resource_usage_and_cost(&rollup, &[states], (1, 1.0), None, None, &data, &settings)
             .unwrap();
-    assert_eq!(usage.output.rows, 100);
+    assert_eq!(usage.output_facts.statistics.rows, 100);
     let charged_s = usage.work_ms_per_execution / 1_000.0;
     assert!(
         (0.8..=1.25).contains(&(299.0 / charged_s)),
@@ -1710,23 +1748,25 @@ fn a_rollup_merges_its_states_when_its_group_estimate_ties_its_input() {
     let states = ProducerOutput {
         payload: &build.payload,
         output_schema: &build.output_schema,
-        output: EdgeStatistics {
-            rows: 1_000,
-            bytes: 1_000 * (state_bytes + 32),
+        output_facts: OutputFacts {
+            statistics: EdgeStatistics {
+                rows: 1_000,
+                bytes: 1_000 * (state_bytes + 32),
+            },
+            sources: BTreeSet::from(["http"]),
+            family: StateFamily::Sketch(&parameters),
+            unchanged_columns: ["region", "service"].into(),
+            tumbling_windows: 1.0,
+            chain_tumbling_window_width_ms: None,
+            raw_rows_span_ms: None,
+            raw_rows_per_ms: None,
+            folded_per_row: None,
+            raw_rows_short_of_range: None,
+            state_data_span_ms: None,
+            raw_rows_shifted_back_ms: 0,
+            states_last_merged: false,
+            state_input_rows: Some(rows),
         },
-        sources: BTreeSet::from(["http"]),
-        family: StateFamily::Sketch(&parameters),
-        unchanged_columns: ["region", "service"].into(),
-        tumbling_windows: 1.0,
-        chain_tumbling_window_width_ms: None,
-        raw_rows_span_ms: None,
-        raw_rows_per_ms: None,
-        folded_per_row: None,
-        raw_rows_short_of_range: None,
-        state_data_span_ms: None,
-        raw_rows_shifted_back_ms: 0,
-        states_last_merged: false,
-        state_input_rows: Some(rows),
     };
     let merge_ms = |group_by: Option<Vec<usize>>| {
         let merge = PhysicalASAPDAGNode {
@@ -1746,7 +1786,11 @@ fn a_rollup_merges_its_states_when_its_group_estimate_ties_its_input() {
             &settings,
         )
         .unwrap();
-        assert_eq!(usage.output.rows, 1_000, "{}", usage.cost.detail);
+        assert_eq!(
+            usage.output_facts.statistics.rows, 1_000,
+            "{}",
+            usage.cost.detail
+        );
         usage.work_ms_per_execution
     };
     let kept_groups_ms = merge_ms(None);
@@ -1777,23 +1821,25 @@ fn query_time_memory_is_held_only_while_the_node_computes() {
     let states = ProducerOutput {
         payload: &input.payload,
         output_schema: &input.output_schema,
-        output: EdgeStatistics {
-            rows: 5_000,
-            bytes: 80_000,
+        output_facts: OutputFacts {
+            statistics: EdgeStatistics {
+                rows: 5_000,
+                bytes: 80_000,
+            },
+            sources: BTreeSet::new(),
+            family: StateFamily::Exact(&ExactKind::Sum),
+            unchanged_columns: BTreeSet::new(),
+            tumbling_windows: 1.0,
+            chain_tumbling_window_width_ms: None,
+            raw_rows_span_ms: None,
+            raw_rows_per_ms: None,
+            folded_per_row: None,
+            raw_rows_short_of_range: None,
+            state_data_span_ms: None,
+            raw_rows_shifted_back_ms: 0,
+            states_last_merged: false,
+            state_input_rows: None,
         },
-        sources: BTreeSet::new(),
-        family: StateFamily::Exact(&ExactKind::Sum),
-        unchanged_columns: BTreeSet::new(),
-        tumbling_windows: 1.0,
-        chain_tumbling_window_width_ms: None,
-        raw_rows_span_ms: None,
-        raw_rows_per_ms: None,
-        folded_per_row: None,
-        raw_rows_short_of_range: None,
-        state_data_span_ms: None,
-        raw_rows_shifted_back_ms: 0,
-        states_last_merged: false,
-        state_input_rows: None,
     };
     let merge = PhysicalASAPDAGNode {
         lifetime: Lifetime::OneEvaluation(StorageMedium::Memory),
@@ -1888,9 +1934,12 @@ fn a_query_time_scan_reads_what_its_consumers_read_and_keeps_its_retention() {
     assert_eq!(read_ms, Some(1_000));
     let usage = node_resource_usage_and_cost(&scan, &[], (1, 1.0), read_ms, None, &data, &settings)
         .unwrap();
-    assert_eq!(usage.output.rows, 1_000);
+    assert_eq!(usage.output_facts.statistics.rows, 1_000);
     let (_, kept_bytes) = usage.raw_scan.expect("a query-time scan keeps raw data");
-    assert_eq!(kept_bytes, (usage.output.bytes * 3_601) as f64);
+    assert_eq!(
+        kept_bytes,
+        (usage.output_facts.statistics.bytes * 3_601) as f64
+    );
 }
 
 /// Raw rows materialized at ingestion time behind an offset (a
@@ -1916,23 +1965,25 @@ fn an_ingestion_time_view_of_raw_rows_keeps_the_rows_its_retention_covers() {
     let one_second_of_rows = ProducerOutput {
         payload: &scan.payload,
         output_schema: &scan.output_schema,
-        output: EdgeStatistics {
-            rows: 1_000,
-            bytes: 64_000,
+        output_facts: OutputFacts {
+            statistics: EdgeStatistics {
+                rows: 1_000,
+                bytes: 64_000,
+            },
+            sources: ["m"].into(),
+            family: StateFamily::None,
+            unchanged_columns: BTreeSet::new(),
+            tumbling_windows: 1.0,
+            chain_tumbling_window_width_ms: None,
+            raw_rows_span_ms: None,
+            raw_rows_per_ms: None,
+            folded_per_row: None,
+            raw_rows_short_of_range: None,
+            state_data_span_ms: None,
+            raw_rows_shifted_back_ms: 0,
+            states_last_merged: false,
+            state_input_rows: None,
         },
-        sources: ["m"].into(),
-        family: StateFamily::None,
-        unchanged_columns: BTreeSet::new(),
-        tumbling_windows: 1.0,
-        chain_tumbling_window_width_ms: None,
-        raw_rows_span_ms: None,
-        raw_rows_per_ms: None,
-        folded_per_row: None,
-        raw_rows_short_of_range: None,
-        state_data_span_ms: None,
-        raw_rows_shifted_back_ms: 0,
-        states_last_merged: false,
-        state_input_rows: None,
     };
     let row_schema = Schema::new(vec![
         Field::plain("ts", DataType::Timestamp, false),
@@ -1989,23 +2040,25 @@ fn a_view_without_retention_is_not_costed() {
     let one_second_of_rows = ProducerOutput {
         payload: &scan.payload,
         output_schema: &scan.output_schema,
-        output: EdgeStatistics {
-            rows: 1_000,
-            bytes: 64_000,
+        output_facts: OutputFacts {
+            statistics: EdgeStatistics {
+                rows: 1_000,
+                bytes: 64_000,
+            },
+            sources: BTreeSet::new(),
+            family: StateFamily::None,
+            unchanged_columns: BTreeSet::new(),
+            tumbling_windows: 1.0,
+            chain_tumbling_window_width_ms: None,
+            raw_rows_span_ms: None,
+            raw_rows_per_ms: None,
+            folded_per_row: None,
+            raw_rows_short_of_range: None,
+            state_data_span_ms: None,
+            raw_rows_shifted_back_ms: 0,
+            states_last_merged: false,
+            state_input_rows: None,
         },
-        sources: BTreeSet::new(),
-        family: StateFamily::None,
-        unchanged_columns: BTreeSet::new(),
-        tumbling_windows: 1.0,
-        chain_tumbling_window_width_ms: None,
-        raw_rows_span_ms: None,
-        raw_rows_per_ms: None,
-        folded_per_row: None,
-        raw_rows_short_of_range: None,
-        state_data_span_ms: None,
-        raw_rows_shifted_back_ms: 0,
-        states_last_merged: false,
-        state_input_rows: None,
     };
     let shift = PhysicalASAPDAGNode {
         output_state: ExecutionDataState::INGESTION_ROWS,
@@ -2070,23 +2123,25 @@ fn a_view_over_an_ingestion_time_chain_keeps_one_output_per_chain_window() {
     let one_window_of_states = ProducerOutput {
         payload: &chain.payload,
         output_schema: &chain.output_schema,
-        output: EdgeStatistics {
-            rows: 1_000,
-            bytes: 16_000,
+        output_facts: OutputFacts {
+            statistics: EdgeStatistics {
+                rows: 1_000,
+                bytes: 16_000,
+            },
+            sources: BTreeSet::new(),
+            family: StateFamily::Exact(&ExactKind::Sum),
+            unchanged_columns: BTreeSet::new(),
+            tumbling_windows: 1.0,
+            chain_tumbling_window_width_ms: Some(60_000),
+            raw_rows_span_ms: None,
+            raw_rows_per_ms: None,
+            folded_per_row: None,
+            raw_rows_short_of_range: None,
+            state_data_span_ms: None,
+            raw_rows_shifted_back_ms: 0,
+            states_last_merged: false,
+            state_input_rows: None,
         },
-        sources: BTreeSet::new(),
-        family: StateFamily::Exact(&ExactKind::Sum),
-        unchanged_columns: BTreeSet::new(),
-        tumbling_windows: 1.0,
-        chain_tumbling_window_width_ms: Some(60_000),
-        raw_rows_span_ms: None,
-        raw_rows_per_ms: None,
-        folded_per_row: None,
-        raw_rows_short_of_range: None,
-        state_data_span_ms: None,
-        raw_rows_shifted_back_ms: 0,
-        states_last_merged: false,
-        state_input_rows: None,
     };
     let usage = node_resource_usage_and_cost(
         &shift,
@@ -2144,23 +2199,25 @@ fn ddsketch_build_cost(
     let producer_output = ProducerOutput {
         payload: &producer.payload,
         output_schema: &producer.output_schema,
-        output: EdgeStatistics {
-            rows: 600,
-            bytes: 9_600,
+        output_facts: OutputFacts {
+            statistics: EdgeStatistics {
+                rows: 600,
+                bytes: 9_600,
+            },
+            sources: BTreeSet::from([source]),
+            family: StateFamily::None,
+            unchanged_columns,
+            tumbling_windows: 1.0,
+            chain_tumbling_window_width_ms: None,
+            raw_rows_span_ms: None,
+            raw_rows_per_ms: None,
+            folded_per_row: None,
+            raw_rows_short_of_range: None,
+            state_data_span_ms: None,
+            raw_rows_shifted_back_ms: 0,
+            states_last_merged: false,
+            state_input_rows: None,
         },
-        sources: BTreeSet::from([source]),
-        family: StateFamily::None,
-        unchanged_columns,
-        tumbling_windows: 1.0,
-        chain_tumbling_window_width_ms: None,
-        raw_rows_span_ms: None,
-        raw_rows_per_ms: None,
-        folded_per_row: None,
-        raw_rows_short_of_range: None,
-        state_data_span_ms: None,
-        raw_rows_shifted_back_ms: 0,
-        states_last_merged: false,
-        state_input_rows: None,
     };
     let settings = CostInputs::default();
     let usage = node_resource_usage_and_cost(
@@ -2173,7 +2230,7 @@ fn ddsketch_build_cost(
         &settings,
     )
     .unwrap();
-    (usage.output.bytes, usage.cost)
+    (usage.output_facts.statistics.bytes, usage.cost)
 }
 
 /// The bytes `sketch_state_bytes` gives a DDSketch state at α = 0.01 over 600
@@ -2374,23 +2431,25 @@ fn ddsketch_assumed_facts_over_sources(
     let producer_output = ProducerOutput {
         payload: &producer.payload,
         output_schema: &producer.output_schema,
-        output: EdgeStatistics {
-            rows: 600,
-            bytes: 9_600,
+        output_facts: OutputFacts {
+            statistics: EdgeStatistics {
+                rows: 600,
+                bytes: 9_600,
+            },
+            sources: sources.iter().copied().collect(),
+            family: StateFamily::None,
+            unchanged_columns: BTreeSet::from(["ts", "value"]),
+            tumbling_windows: 1.0,
+            chain_tumbling_window_width_ms: None,
+            state_input_rows: None,
+            raw_rows_span_ms: None,
+            raw_rows_per_ms: None,
+            folded_per_row: None,
+            raw_rows_short_of_range: None,
+            state_data_span_ms: None,
+            raw_rows_shifted_back_ms: 0,
+            states_last_merged: false,
         },
-        sources: sources.iter().copied().collect(),
-        family: StateFamily::None,
-        unchanged_columns: BTreeSet::from(["ts", "value"]),
-        tumbling_windows: 1.0,
-        chain_tumbling_window_width_ms: None,
-        state_input_rows: None,
-        raw_rows_span_ms: None,
-        raw_rows_per_ms: None,
-        folded_per_row: None,
-        raw_rows_short_of_range: None,
-        state_data_span_ms: None,
-        raw_rows_shifted_back_ms: 0,
-        states_last_merged: false,
     };
     let settings = CostInputs::default();
     node_resource_usage_and_cost(
@@ -2572,23 +2631,25 @@ fn kll_merge_cpu_ops_over(k: u32, window_ms: u64, range_s: u64) -> f64 {
     let scan_output = ProducerOutput {
         payload: &scan.payload,
         output_schema: &scan.output_schema,
-        output: EdgeStatistics {
-            rows: 1_000,
-            bytes: 48_000,
+        output_facts: OutputFacts {
+            statistics: EdgeStatistics {
+                rows: 1_000,
+                bytes: 48_000,
+            },
+            sources: ["latency"].into(),
+            family: StateFamily::None,
+            unchanged_columns: BTreeSet::new(),
+            tumbling_windows: 1.0,
+            chain_tumbling_window_width_ms: None,
+            raw_rows_span_ms: None,
+            raw_rows_per_ms: None,
+            folded_per_row: None,
+            raw_rows_short_of_range: None,
+            state_data_span_ms: None,
+            raw_rows_shifted_back_ms: 0,
+            states_last_merged: false,
+            state_input_rows: None,
         },
-        sources: ["latency"].into(),
-        family: StateFamily::None,
-        unchanged_columns: BTreeSet::new(),
-        tumbling_windows: 1.0,
-        chain_tumbling_window_width_ms: None,
-        raw_rows_span_ms: None,
-        raw_rows_per_ms: None,
-        folded_per_row: None,
-        raw_rows_short_of_range: None,
-        state_data_span_ms: None,
-        raw_rows_shifted_back_ms: 0,
-        states_last_merged: false,
-        state_input_rows: None,
     };
     let mut chain = node(Payload::ASAP(ASAPOp::SummaryTumblingWindowChain {
         child: 0,
@@ -2633,7 +2694,7 @@ fn kll_merge_cpu_ops_over(k: u32, window_ms: u64, range_s: u64) -> f64 {
     )
     .unwrap();
     assert_eq!(
-        windows_usage.output.rows,
+        windows_usage.output_facts.statistics.rows,
         1_000 * range_s * 1_000 / window_ms
     );
     let mut merge = node(Payload::ASAP(ASAPOp::SummaryMerge {
@@ -2652,7 +2713,7 @@ fn kll_merge_cpu_ops_over(k: u32, window_ms: u64, range_s: u64) -> f64 {
         &settings,
     )
     .unwrap();
-    assert_eq!(merge_usage.output.rows, 1_000);
+    assert_eq!(merge_usage.output_facts.statistics.rows, 1_000);
     merge_usage.cpu_ops_per_second
 }
 
@@ -2699,23 +2760,25 @@ fn a_finalize_charges_each_group_its_measured_time() {
     let merged_output = ProducerOutput {
         payload: &merged.payload,
         output_schema: &merged.output_schema,
-        output: EdgeStatistics {
-            rows: 1_000,
-            bytes: 56_000,
+        output_facts: OutputFacts {
+            statistics: EdgeStatistics {
+                rows: 1_000,
+                bytes: 56_000,
+            },
+            sources: BTreeSet::new(),
+            family: StateFamily::Exact(&ExactKind::Sum),
+            unchanged_columns: BTreeSet::new(),
+            tumbling_windows: 1.0,
+            chain_tumbling_window_width_ms: None,
+            raw_rows_span_ms: None,
+            raw_rows_per_ms: None,
+            folded_per_row: None,
+            raw_rows_short_of_range: None,
+            state_data_span_ms: None,
+            raw_rows_shifted_back_ms: 0,
+            states_last_merged: false,
+            state_input_rows: None,
         },
-        sources: BTreeSet::new(),
-        family: StateFamily::Exact(&ExactKind::Sum),
-        unchanged_columns: BTreeSet::new(),
-        tumbling_windows: 1.0,
-        chain_tumbling_window_width_ms: None,
-        raw_rows_span_ms: None,
-        raw_rows_per_ms: None,
-        folded_per_row: None,
-        raw_rows_short_of_range: None,
-        state_data_span_ms: None,
-        raw_rows_shifted_back_ms: 0,
-        states_last_merged: false,
-        state_input_rows: None,
     };
     let finalize = node(Payload::ASAP(ASAPOp::FinalizeExactAccumulator {
         child: 0,
@@ -2756,23 +2819,25 @@ fn a_per_series_aggregate_charges_the_labels_it_carries() {
     let rows_output = ProducerOutput {
         payload: &rows.payload,
         output_schema: &rows.output_schema,
-        output: EdgeStatistics {
-            rows: 300_000,
-            bytes: 300_000 * 48,
+        output_facts: OutputFacts {
+            statistics: EdgeStatistics {
+                rows: 300_000,
+                bytes: 300_000 * 48,
+            },
+            sources: BTreeSet::new(),
+            family: StateFamily::None,
+            unchanged_columns: BTreeSet::new(),
+            tumbling_windows: 1.0,
+            chain_tumbling_window_width_ms: None,
+            raw_rows_span_ms: None,
+            raw_rows_per_ms: None,
+            folded_per_row: None,
+            raw_rows_short_of_range: None,
+            state_data_span_ms: None,
+            raw_rows_shifted_back_ms: 0,
+            states_last_merged: false,
+            state_input_rows: None,
         },
-        sources: BTreeSet::new(),
-        family: StateFamily::None,
-        unchanged_columns: BTreeSet::new(),
-        tumbling_windows: 1.0,
-        chain_tumbling_window_width_ms: None,
-        raw_rows_span_ms: None,
-        raw_rows_per_ms: None,
-        folded_per_row: None,
-        raw_rows_short_of_range: None,
-        state_data_span_ms: None,
-        raw_rows_shifted_back_ms: 0,
-        states_last_merged: false,
-        state_input_rows: None,
     };
     let ms_per_row = |labels: &[&str]| {
         let mut aggregate = node(Payload::NonASAP(NonASAPOp::Aggregate {
@@ -2879,42 +2944,47 @@ fn a_merge_over_several_inputs_sizes_its_state_for_all_of_them() {
     let input = ProducerOutput {
         payload: &windows.payload,
         output_schema: &windows.output_schema,
-        output: EdgeStatistics {
-            rows: 360_000,
-            bytes: 360_000 * 944,
+        output_facts: OutputFacts {
+            statistics: EdgeStatistics {
+                rows: 360_000,
+                bytes: 360_000 * 944,
+            },
+            sources: BTreeSet::new(),
+            family: StateFamily::Sketch(&SketchParams::Kll { k }),
+            unchanged_columns: BTreeSet::new(),
+            tumbling_windows: 360.0,
+            chain_tumbling_window_width_ms: Some(10_000),
+            raw_rows_span_ms: None,
+            raw_rows_per_ms: None,
+            folded_per_row: None,
+            raw_rows_short_of_range: None,
+            state_data_span_ms: None,
+            raw_rows_shifted_back_ms: 0,
+            states_last_merged: false,
+            state_input_rows: Some(rows),
         },
-        sources: BTreeSet::new(),
-        family: StateFamily::Sketch(&SketchParams::Kll { k }),
-        unchanged_columns: BTreeSet::new(),
-        tumbling_windows: 360.0,
-        chain_tumbling_window_width_ms: Some(10_000),
-        raw_rows_span_ms: None,
-        raw_rows_per_ms: None,
-        folded_per_row: None,
-        raw_rows_short_of_range: None,
-        state_data_span_ms: None,
-        raw_rows_shifted_back_ms: 0,
-        states_last_merged: false,
-        state_input_rows: Some(rows),
     };
     let wider = ProducerOutput {
-        output: EdgeStatistics {
-            rows: 60_000,
-            bytes: 60_000 * 1_328,
+        output_facts: OutputFacts {
+            statistics: EdgeStatistics {
+                rows: 60_000,
+                bytes: 60_000 * 1_328,
+            },
+            tumbling_windows: 60.0,
+            chain_tumbling_window_width_ms: Some(60_000),
+            raw_rows_span_ms: None,
+            raw_rows_per_ms: None,
+            folded_per_row: None,
+            raw_rows_short_of_range: None,
+            state_data_span_ms: None,
+            raw_rows_shifted_back_ms: 0,
+            states_last_merged: false,
+            state_input_rows: Some(StateInputRows {
+                folded_rows_per_state: Some((100) as f64),
+                ..rows
+            }),
+            ..input.output_facts.clone()
         },
-        tumbling_windows: 60.0,
-        chain_tumbling_window_width_ms: Some(60_000),
-        raw_rows_span_ms: None,
-        raw_rows_per_ms: None,
-        folded_per_row: None,
-        raw_rows_short_of_range: None,
-        state_data_span_ms: None,
-        raw_rows_shifted_back_ms: 0,
-        states_last_merged: false,
-        state_input_rows: Some(StateInputRows {
-            folded_rows_per_state: Some((100) as f64),
-            ..rows
-        }),
         ..input.clone()
     };
     let mut merge = node(Payload::ASAP(ASAPOp::SummaryMerge {
@@ -2933,13 +3003,14 @@ fn a_merge_over_several_inputs_sizes_its_state_for_all_of_them() {
         &settings,
     )
     .unwrap();
-    assert_eq!(usage.output.rows, 1_000);
+    assert_eq!(usage.output_facts.statistics.rows, 1_000);
     let merged = StateInputRows {
         folded_rows_per_state: Some((9_600) as f64),
         ..rows
     };
     assert_eq!(
         usage
+            .output_facts
             .state_input_rows
             .and_then(|rows| rows.rows_per_state()),
         Some(9_600)
@@ -2953,7 +3024,8 @@ fn a_merge_over_several_inputs_sizes_its_state_for_all_of_them() {
             > sketch_state_bytes(&SketchParams::Kll { k }, from_first_alone)
     );
     assert!(
-        usage.output.bytes_per_row() > sketch_state_bytes(&SketchParams::Kll { k }, merged),
+        usage.output_facts.statistics.bytes_per_row()
+            > sketch_state_bytes(&SketchParams::Kll { k }, merged),
         "merged state sized for 9,600 rows"
     );
 }
@@ -2970,29 +3042,34 @@ fn kll_estimate_us_per_group(producer: Payload, rows_per_state: u64, state_bytes
     let state_output = ProducerOutput {
         payload: &states.payload,
         output_schema: &states.output_schema,
-        output: EdgeStatistics {
-            rows: 1_000,
-            bytes: 1_000 * state_bytes,
+        output_facts: OutputFacts {
+            statistics: EdgeStatistics {
+                rows: 1_000,
+                bytes: 1_000 * state_bytes,
+            },
+            sources: BTreeSet::new(),
+            family: StateFamily::Sketch(&kll),
+            unchanged_columns: BTreeSet::new(),
+            tumbling_windows: 1.0,
+            chain_tumbling_window_width_ms: None,
+            raw_rows_span_ms: None,
+            raw_rows_per_ms: None,
+            folded_per_row: None,
+            raw_rows_short_of_range: None,
+            state_data_span_ms: None,
+            raw_rows_shifted_back_ms: 0,
+            // A merge leaves its states merged.
+            states_last_merged: matches!(
+                states.payload,
+                Payload::ASAP(ASAPOp::SummaryMerge { .. })
+            ),
+            state_input_rows: Some(StateInputRows {
+                folded_rows_per_state: Some((rows_per_state) as f64),
+                non_negative: true,
+                value_magnitude_range: None,
+                distinct_values: None,
+            }),
         },
-        sources: BTreeSet::new(),
-        family: StateFamily::Sketch(&kll),
-        unchanged_columns: BTreeSet::new(),
-        tumbling_windows: 1.0,
-        chain_tumbling_window_width_ms: None,
-        raw_rows_span_ms: None,
-        raw_rows_per_ms: None,
-        folded_per_row: None,
-        raw_rows_short_of_range: None,
-        state_data_span_ms: None,
-        raw_rows_shifted_back_ms: 0,
-        // A merge leaves its states merged.
-        states_last_merged: matches!(states.payload, Payload::ASAP(ASAPOp::SummaryMerge { .. })),
-        state_input_rows: Some(StateInputRows {
-            folded_rows_per_state: Some((rows_per_state) as f64),
-            non_negative: true,
-            value_magnitude_range: None,
-            distinct_values: None,
-        }),
     };
     let estimate = node(Payload::ASAP(ASAPOp::SummaryEstimate {
         summary_input: 0,
@@ -3447,23 +3524,25 @@ fn terms_reproduce_the_formula_cpu_of_every_costed_node() {
         let chain_output = ProducerOutput {
             payload: &chain.payload,
             output_schema: &chain.output_schema,
-            output: EdgeStatistics {
-                rows: 1_000,
-                bytes: 1_000 * state_bytes,
+            output_facts: OutputFacts {
+                statistics: EdgeStatistics {
+                    rows: 1_000,
+                    bytes: 1_000 * state_bytes,
+                },
+                sources: BTreeSet::from(["latency"]),
+                family,
+                unchanged_columns: BTreeSet::new(),
+                tumbling_windows: 1.0,
+                chain_tumbling_window_width_ms: Some(60_000),
+                raw_rows_span_ms: None,
+                raw_rows_per_ms: None,
+                folded_per_row: None,
+                raw_rows_short_of_range: None,
+                state_data_span_ms: None,
+                raw_rows_shifted_back_ms: 0,
+                states_last_merged: false,
+                state_input_rows: Some(rows_per_state),
             },
-            sources: BTreeSet::from(["latency"]),
-            family,
-            unchanged_columns: BTreeSet::new(),
-            tumbling_windows: 1.0,
-            chain_tumbling_window_width_ms: Some(60_000),
-            raw_rows_span_ms: None,
-            raw_rows_per_ms: None,
-            folded_per_row: None,
-            raw_rows_short_of_range: None,
-            state_data_span_ms: None,
-            raw_rows_shifted_back_ms: 0,
-            states_last_merged: false,
-            state_input_rows: Some(rows_per_state),
         };
         let windows = PhysicalASAPDAGNode {
             output_schema: chain.output_schema.clone(),
@@ -3513,7 +3592,8 @@ fn terms_reproduce_the_formula_cpu_of_every_costed_node() {
     let sql_rows = || {
         let mut rows = raw_rows(&sql_range, "t", 300_000, 300_000);
         rows.output_schema = &sql_range.output_schema;
-        rows.unchanged_columns = ["job", "region", "instance", "user_id", "value"].into();
+        rows.output_facts.unchanged_columns =
+            ["job", "region", "instance", "user_id", "value"].into();
         rows
     };
     for (keys, k) in [(vec![], 4_323), (vec![2], 26_656)] {
@@ -3595,23 +3675,25 @@ fn terms_reproduce_the_formula_cpu_of_every_costed_node() {
         &[ProducerOutput {
             payload: &kmv_build.payload,
             output_schema: &kmv_build.output_schema,
-            output: EdgeStatistics {
-                rows: 1_000,
-                bytes: 1_000 * (kmv_state_bytes + 32),
+            output_facts: OutputFacts {
+                statistics: EdgeStatistics {
+                    rows: 1_000,
+                    bytes: 1_000 * (kmv_state_bytes + 32),
+                },
+                sources: BTreeSet::from(["http"]),
+                family: StateFamily::Sketch(&kmv),
+                unchanged_columns: ["region", "service"].into(),
+                tumbling_windows: 1.0,
+                chain_tumbling_window_width_ms: None,
+                raw_rows_span_ms: None,
+                raw_rows_per_ms: None,
+                folded_per_row: None,
+                raw_rows_short_of_range: None,
+                state_data_span_ms: None,
+                raw_rows_shifted_back_ms: 0,
+                states_last_merged: false,
+                state_input_rows: Some(kmv_rows),
             },
-            sources: BTreeSet::from(["http"]),
-            family: StateFamily::Sketch(&kmv),
-            unchanged_columns: ["region", "service"].into(),
-            tumbling_windows: 1.0,
-            chain_tumbling_window_width_ms: None,
-            raw_rows_span_ms: None,
-            raw_rows_per_ms: None,
-            folded_per_row: None,
-            raw_rows_short_of_range: None,
-            state_data_span_ms: None,
-            raw_rows_shifted_back_ms: 0,
-            states_last_merged: false,
-            state_input_rows: Some(kmv_rows),
         }],
         None,
         &rollup_data,
@@ -3636,7 +3718,7 @@ fn terms_reproduce_the_formula_cpu_of_every_costed_node() {
         }))
     };
     let mut six_hundred_rows = raw_rows(&latency_scan, "latency", 600, 60_000);
-    six_hundred_rows.raw_rows_span_ms = None;
+    six_hundred_rows.output_facts.raw_rows_span_ms = None;
     check(
         "DDSketch build",
         &ddsketch_build,
@@ -3671,28 +3753,30 @@ fn terms_reproduce_the_formula_cpu_of_every_costed_node() {
             &[ProducerOutput {
                 payload: &states.payload,
                 output_schema: &states.output_schema,
-                output: EdgeStatistics {
-                    rows: 1_000,
-                    bytes: 1_000 * state_bytes,
+                output_facts: OutputFacts {
+                    statistics: EdgeStatistics {
+                        rows: 1_000,
+                        bytes: 1_000 * state_bytes,
+                    },
+                    sources: BTreeSet::new(),
+                    family: StateFamily::Sketch(&kll_547),
+                    unchanged_columns: BTreeSet::new(),
+                    tumbling_windows: 1.0,
+                    chain_tumbling_window_width_ms: None,
+                    raw_rows_span_ms: None,
+                    raw_rows_per_ms: None,
+                    folded_per_row: None,
+                    raw_rows_short_of_range: None,
+                    state_data_span_ms: None,
+                    raw_rows_shifted_back_ms: 0,
+                    states_last_merged: false,
+                    state_input_rows: Some(StateInputRows {
+                        folded_rows_per_state: Some((rows_per_state) as f64),
+                        non_negative: true,
+                        value_magnitude_range: None,
+                        distinct_values: None,
+                    }),
                 },
-                sources: BTreeSet::new(),
-                family: StateFamily::Sketch(&kll_547),
-                unchanged_columns: BTreeSet::new(),
-                tumbling_windows: 1.0,
-                chain_tumbling_window_width_ms: None,
-                raw_rows_span_ms: None,
-                raw_rows_per_ms: None,
-                folded_per_row: None,
-                raw_rows_short_of_range: None,
-                state_data_span_ms: None,
-                raw_rows_shifted_back_ms: 0,
-                states_last_merged: false,
-                state_input_rows: Some(StateInputRows {
-                    folded_rows_per_state: Some((rows_per_state) as f64),
-                    non_negative: true,
-                    value_magnitude_range: None,
-                    distinct_values: None,
-                }),
             }],
             None,
             &none,
@@ -3710,23 +3794,25 @@ fn terms_reproduce_the_formula_cpu_of_every_costed_node() {
         &[ProducerOutput {
             payload: &kll_merge.payload,
             output_schema: &kll_merge.output_schema,
-            output: EdgeStatistics {
-                rows: 1_000,
-                bytes: 56_000,
+            output_facts: OutputFacts {
+                statistics: EdgeStatistics {
+                    rows: 1_000,
+                    bytes: 56_000,
+                },
+                sources: BTreeSet::new(),
+                family: StateFamily::Exact(&ExactKind::Sum),
+                unchanged_columns: BTreeSet::new(),
+                tumbling_windows: 1.0,
+                chain_tumbling_window_width_ms: None,
+                raw_rows_span_ms: None,
+                raw_rows_per_ms: None,
+                folded_per_row: None,
+                raw_rows_short_of_range: None,
+                state_data_span_ms: None,
+                raw_rows_shifted_back_ms: 0,
+                states_last_merged: false,
+                state_input_rows: None,
             },
-            sources: BTreeSet::new(),
-            family: StateFamily::Exact(&ExactKind::Sum),
-            unchanged_columns: BTreeSet::new(),
-            tumbling_windows: 1.0,
-            chain_tumbling_window_width_ms: None,
-            raw_rows_span_ms: None,
-            raw_rows_per_ms: None,
-            folded_per_row: None,
-            raw_rows_short_of_range: None,
-            state_data_span_ms: None,
-            raw_rows_shifted_back_ms: 0,
-            states_last_merged: false,
-            state_input_rows: None,
         }],
         None,
         &none,
@@ -3802,8 +3888,8 @@ fn terms_reproduce_the_formula_cpu_of_every_costed_node() {
         }))
     };
     let mut one_second_of_rows = raw_rows(&m_scan, "m", 1_000, 1_000);
-    one_second_of_rows.output.bytes = 64_000;
-    one_second_of_rows.raw_rows_span_ms = None;
+    one_second_of_rows.output_facts.statistics.bytes = 64_000;
+    one_second_of_rows.output_facts.raw_rows_span_ms = None;
     check(
         "ingestion-time view of raw rows",
         &view,
@@ -3904,9 +3990,9 @@ fn terms_fail_where_the_node_cannot_be_costed() {
     let data = DataWorkload::default();
     let scan = node(metric_scan("m"));
     let mut one_second_of_rows = raw_rows(&scan, "m", 1_000, 1_000);
-    one_second_of_rows.output.bytes = 64_000;
-    one_second_of_rows.sources = BTreeSet::new();
-    one_second_of_rows.raw_rows_span_ms = None;
+    one_second_of_rows.output_facts.statistics.bytes = 64_000;
+    one_second_of_rows.output_facts.sources = BTreeSet::new();
+    one_second_of_rows.output_facts.raw_rows_span_ms = None;
     let view = PhysicalASAPDAGNode {
         output_state: ExecutionDataState::INGESTION_ROWS,
         lifetime: Lifetime::AcrossEvaluations(StorageMedium::Memory),
@@ -3960,23 +4046,25 @@ fn rows_of<'a>(producer: &'a PhysicalASAPDAGNode, rows: u64) -> ProducerOutput<'
     ProducerOutput {
         payload: &producer.payload,
         output_schema: &producer.output_schema,
-        output: EdgeStatistics {
-            rows,
-            bytes: rows * 16,
+        output_facts: OutputFacts {
+            statistics: EdgeStatistics {
+                rows,
+                bytes: rows * 16,
+            },
+            sources: BTreeSet::new(),
+            family: StateFamily::None,
+            unchanged_columns: BTreeSet::new(),
+            tumbling_windows: 1.0,
+            chain_tumbling_window_width_ms: None,
+            state_input_rows: None,
+            raw_rows_span_ms: None,
+            raw_rows_per_ms: None,
+            folded_per_row: None,
+            raw_rows_short_of_range: None,
+            state_data_span_ms: None,
+            raw_rows_shifted_back_ms: 0,
+            states_last_merged: false,
         },
-        sources: BTreeSet::new(),
-        family: StateFamily::None,
-        unchanged_columns: BTreeSet::new(),
-        tumbling_windows: 1.0,
-        chain_tumbling_window_width_ms: None,
-        state_input_rows: None,
-        raw_rows_span_ms: None,
-        raw_rows_per_ms: None,
-        folded_per_row: None,
-        raw_rows_short_of_range: None,
-        state_data_span_ms: None,
-        raw_rows_shifted_back_ms: 0,
-        states_last_merged: false,
     }
 }
 
@@ -4187,23 +4275,25 @@ fn counter_sketch_charges_ms(shape: &CounterSketchShape) -> CounterSketchCharges
     let rows = |count: u64| ProducerOutput {
         payload: &rows_node.payload,
         output_schema: &rows_node.output_schema,
-        output: EdgeStatistics {
-            rows: count,
-            bytes: count * 48,
+        output_facts: OutputFacts {
+            statistics: EdgeStatistics {
+                rows: count,
+                bytes: count * 48,
+            },
+            sources: BTreeSet::from(["t"]),
+            family: StateFamily::None,
+            unchanged_columns: ["g", "key", "value"].into(),
+            tumbling_windows: 1.0,
+            chain_tumbling_window_width_ms: None,
+            raw_rows_span_ms: None,
+            raw_rows_per_ms: None,
+            folded_per_row: None,
+            raw_rows_short_of_range: None,
+            state_data_span_ms: None,
+            raw_rows_shifted_back_ms: 0,
+            states_last_merged: false,
+            state_input_rows: None,
         },
-        sources: BTreeSet::from(["t"]),
-        family: StateFamily::None,
-        unchanged_columns: ["g", "key", "value"].into(),
-        tumbling_windows: 1.0,
-        chain_tumbling_window_width_ms: None,
-        raw_rows_span_ms: None,
-        raw_rows_per_ms: None,
-        folded_per_row: None,
-        raw_rows_short_of_range: None,
-        state_data_span_ms: None,
-        raw_rows_shifted_back_ms: 0,
-        states_last_merged: false,
-        state_input_rows: None,
     };
     let family = FieldDataType::Sketch(algorithm);
     let states_schema = Schema::new(vec![
@@ -4232,7 +4322,7 @@ fn counter_sketch_charges_ms(shape: &CounterSketchShape) -> CounterSketchCharges
         &settings,
     )
     .unwrap();
-    assert_eq!(build_usage.output.rows, shape.groups);
+    assert_eq!(build_usage.output_facts.statistics.rows, shape.groups);
     let readout = node(Payload::ASAP(ASAPOp::SummaryEstimate {
         summary_input: 0,
         query: statistic,
@@ -4264,7 +4354,7 @@ fn counter_sketch_charges_ms(shape: &CounterSketchShape) -> CounterSketchCharges
         &settings,
     )
     .unwrap();
-    assert_eq!(merge_usage.output.rows, 1);
+    assert_eq!(merge_usage.output_facts.statistics.rows, 1);
     // At ingestion time, one second of a 60 s window's rows.
     let mut chain = PhysicalASAPDAGNode {
         parameters: Some(shape.parameters.clone()),
@@ -4477,23 +4567,25 @@ fn a_ddsketch_build_holds_open_states_and_keeps_sealed_ones() {
     let producer_output = |rows| ProducerOutput {
         payload: &producer.payload,
         output_schema: &producer.output_schema,
-        output: EdgeStatistics {
-            rows,
-            bytes: rows * 16,
+        output_facts: OutputFacts {
+            statistics: EdgeStatistics {
+                rows,
+                bytes: rows * 16,
+            },
+            sources: BTreeSet::from(["a"]),
+            family: StateFamily::None,
+            unchanged_columns: BTreeSet::from(["ts", "value"]),
+            tumbling_windows: 1.0,
+            chain_tumbling_window_width_ms: None,
+            state_input_rows: None,
+            raw_rows_span_ms: None,
+            raw_rows_per_ms: None,
+            folded_per_row: None,
+            raw_rows_short_of_range: None,
+            state_data_span_ms: None,
+            raw_rows_shifted_back_ms: 0,
+            states_last_merged: false,
         },
-        sources: BTreeSet::from(["a"]),
-        family: StateFamily::None,
-        unchanged_columns: BTreeSet::from(["ts", "value"]),
-        tumbling_windows: 1.0,
-        chain_tumbling_window_width_ms: None,
-        state_input_rows: None,
-        raw_rows_span_ms: None,
-        raw_rows_per_ms: None,
-        folded_per_row: None,
-        raw_rows_short_of_range: None,
-        state_data_span_ms: None,
-        raw_rows_shifted_back_ms: 0,
-        states_last_merged: false,
     };
     let rows = StateInputRows {
         folded_rows_per_state: Some((600) as f64),
@@ -4527,7 +4619,11 @@ fn a_ddsketch_build_holds_open_states_and_keeps_sealed_ones() {
         &settings,
     )
     .unwrap();
-    assert_eq!(usage.output.bytes, sealed, "{}", usage.cost.detail);
+    assert_eq!(
+        usage.output_facts.statistics.bytes, sealed,
+        "{}",
+        usage.cost.detail
+    );
     assert_eq!(
         usage.cost.memory_and_disk.peak_memory_bytes, open,
         "{}",
@@ -4557,23 +4653,25 @@ fn a_measured_ddsketch_state_size_replaces_the_estimate() {
     let producer_output = ProducerOutput {
         payload: &producer.payload,
         output_schema: &producer.output_schema,
-        output: EdgeStatistics {
-            rows: 600,
-            bytes: 9_600,
+        output_facts: OutputFacts {
+            statistics: EdgeStatistics {
+                rows: 600,
+                bytes: 9_600,
+            },
+            sources: BTreeSet::from(["a"]),
+            family: StateFamily::None,
+            unchanged_columns: BTreeSet::from(["ts", "value"]),
+            tumbling_windows: 1.0,
+            chain_tumbling_window_width_ms: None,
+            state_input_rows: None,
+            raw_rows_span_ms: None,
+            raw_rows_per_ms: None,
+            folded_per_row: None,
+            raw_rows_short_of_range: None,
+            state_data_span_ms: None,
+            raw_rows_shifted_back_ms: 0,
+            states_last_merged: false,
         },
-        sources: BTreeSet::from(["a"]),
-        family: StateFamily::None,
-        unchanged_columns: BTreeSet::from(["ts", "value"]),
-        tumbling_windows: 1.0,
-        chain_tumbling_window_width_ms: None,
-        state_input_rows: None,
-        raw_rows_span_ms: None,
-        raw_rows_per_ms: None,
-        folded_per_row: None,
-        raw_rows_short_of_range: None,
-        state_data_span_ms: None,
-        raw_rows_shifted_back_ms: 0,
-        states_last_merged: false,
     };
     let build = PhysicalASAPDAGNode {
         parameters: Some(params.clone()),
@@ -4626,8 +4724,16 @@ fn a_measured_ddsketch_state_size_replaces_the_estimate() {
         &measured,
     )
     .unwrap();
-    assert_ne!(estimated.output.bytes, 900, "{}", estimated.cost.detail);
-    assert_eq!(usage.output.bytes, 900, "{}", usage.cost.detail);
+    assert_ne!(
+        estimated.output_facts.statistics.bytes, 900,
+        "{}",
+        estimated.cost.detail
+    );
+    assert_eq!(
+        usage.output_facts.statistics.bytes, 900,
+        "{}",
+        usage.cost.detail
+    );
     assert_eq!(
         usage.cost.memory_and_disk.peak_memory_bytes, 900,
         "{}",
@@ -4758,8 +4864,9 @@ fn ingestion_and_query_time_chains_over_a_fractional_rate_fold_the_same_rows() {
         )
         .unwrap();
         (
-            scan_usage.output.rows,
+            scan_usage.output_facts.statistics.rows,
             usage
+                .output_facts
                 .state_input_rows
                 .and_then(|rows| rows.rows_per_state()),
         )
@@ -4796,11 +4903,16 @@ fn a_negating_projection_drops_the_non_negative_fact() {
         child: 0,
     }));
     let summed = ProducerOutput {
-        folded_per_row: Some(StateInputRows {
-            folded_rows_per_state: Some(300.0),
-            non_negative: true,
-            ..StateInputRows::UNKNOWN
-        }),
+        output_facts: OutputFacts {
+            folded_per_row: Some(StateInputRows {
+                folded_rows_per_state: Some(300.0),
+                non_negative: true,
+                ..StateInputRows::UNKNOWN
+            }),
+            ..raw_rows(&sums, "latency", 1_000, 300_000)
+                .output_facts
+                .clone()
+        },
         ..raw_rows(&sums, "latency", 1_000, 300_000)
     };
     let projected = |expr| {
@@ -4818,6 +4930,7 @@ fn a_negating_projection_drops_the_non_negative_fact() {
             &settings,
         )
         .unwrap()
+        .output_facts
         .folded_per_row
         .unwrap()
     };

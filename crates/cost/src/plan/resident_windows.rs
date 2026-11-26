@@ -11,7 +11,7 @@
 use crate::plan::kept_results::computed_range;
 use crate::AnswerCache;
 use asap_types::ir::operator::tumbling_window_chain::cover_windows;
-use asap_types::workload::{greatest_common_divisor, QueryWorkloadEntry};
+use asap_types::workload::{least_common_multiple, QueryWorkloadEntry};
 use std::collections::HashSet;
 
 /// Which windows of a chain one read takes, at the time it reads.
@@ -172,10 +172,8 @@ fn resident_window_count(
             ranges.push((first, last));
         }
     };
-    // Every window ending in `(start, end]`.
-    let interval = |start: i64, end: i64| (start.div_euclid(width) + 1, end.div_euclid(width));
     // Written within the idle time.
-    let (first, last) = interval(idle_start, now_ms);
+    let (first, last) = windows_ending_in(idle_start, now_ms, width);
     add(first, last);
     if let Some(reader) = reader {
         if reader.read == WindowRead::Every {
@@ -201,12 +199,16 @@ fn resident_window_count(
     count
 }
 
+/// Every window ending in `(start, end]`, by index (a window ending at
+/// `k · width` has index `k`), as an inclusive range.
+fn windows_ending_in(start: i64, end: i64, width: i64) -> (i64, i64) {
+    (start.div_euclid(width) + 1, end.div_euclid(width))
+}
+
 /// The windows, by index (a window ending at `k · width` has index `k`), as
 /// inclusive ranges, that `read` takes at time `t`; none for
 /// [`WindowRead::Every`].
 fn windows_read_at(read: &WindowRead, t: i64, width: i64) -> Vec<(i64, i64)> {
-    // Every window ending in `(start, end]`.
-    let interval = |start: i64, end: i64| (start.div_euclid(width) + 1, end.div_euclid(width));
     match read {
         WindowRead::Range {
             range_ms: 0,
@@ -221,7 +223,7 @@ fn windows_read_at(read: &WindowRead, t: i64, width: i64) -> Vec<(i64, i64)> {
             offset_ms,
         } => {
             let end = t - *offset_ms as i64;
-            vec![interval(end - *range_ms as i64, end)]
+            vec![windows_ending_in(end - *range_ms as i64, end, width)]
         }
         WindowRead::Cover {
             range_ms,
@@ -305,7 +307,7 @@ fn resident_windows_over_time(
         }
         for length in lengths {
             let length = length.max(1);
-            period = period / greatest_common_divisor(period, length) * length;
+            period = least_common_multiple(period, length);
         }
     }
     const MOST_SAMPLES: u64 = 2_048;
@@ -385,14 +387,14 @@ pub fn reader_window_reads_per_second(
         ReadTimes::Query { phase_ms, .. } => phase_ms % request_period_ms,
         ReadTimes::Refresh { .. } => 0,
     };
-    let mut period = request_period_ms / greatest_common_divisor(request_period_ms, width) * width;
+    let mut period = least_common_multiple(request_period_ms, width);
     if let WindowRead::Cover {
         level_widths_ms, ..
     } = &reader.read
     {
         for &length in level_widths_ms {
             let length = length.max(1);
-            period = period / greatest_common_divisor(period, length) * length;
+            period = least_common_multiple(period, length);
         }
     }
     let width = width as i64;

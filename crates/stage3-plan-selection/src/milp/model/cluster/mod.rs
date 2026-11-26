@@ -771,7 +771,7 @@ fn query_shapes(inputs: &ClusterInputs<'_>) -> Result<Vec<QueryShape>, Selection
             let entry = selection.entries.get(query.0);
             // Its range as the data plane computes it (with an answer cache,
             // only its new steps, as `plan_cost` counts them).
-            let answer_cache = inputs.cost_inputs.data_plane_execution.answer_cache;
+            let answer_cache = selection.answer_cache;
             let range = entry.and_then(|entry| computed_range(entry, answer_cache));
             let weight = evaluation_rate(entry.map(|entry| (&entry.recurrence, range)), horizon)
                 .map_err(|error| {

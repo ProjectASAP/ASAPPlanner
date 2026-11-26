@@ -109,7 +109,7 @@ pub(crate) fn dominated_in_every_quantity(
         let properties = candidate.physical_properties;
         // Under a bound on the kept query-time results, what one keeps is
         // charged with the others' (`super::kept_results`), not alone.
-        let kept_results_bounded = costs
+        let kept_results_bounded = inputs
             .kept_query_time_results
             .is_some_and(|results| results.max_bytes.is_some())
             && costs

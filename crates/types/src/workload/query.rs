@@ -325,6 +325,13 @@ pub fn greatest_common_divisor(a: u64, b: u64) -> u64 {
     }
 }
 
+/// The least common multiple of `a` and `b`, both nonzero: the period
+/// after which two cadences in milliseconds line up again. Example: 15 s
+/// and 20 s line up every 60 s.
+pub fn least_common_multiple(a: u64, b: u64) -> u64 {
+    a / greatest_common_divisor(a, b) * b
+}
+
 /// One query submitted as part of a finite batch, including how many times it
 /// will run and, when known, its execution time.
 ///

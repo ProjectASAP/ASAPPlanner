@@ -1,7 +1,7 @@
 //! Helpers shared by the planning tests that load a workload fixture, plan it
 //! through the production stages, and compare costs, or that run PromQL or
 //! SQL workloads through Pass 2.
-use asap_cost::CostInputs;
+use asap_cost::{CostInputs, CostModel, ResourceUnitCost};
 use asap_devtools::planner_fuzz::{read_seed_file, FuzzSettings, FuzzWorkload, Planner};
 use asap_planner::{PlanSearchSettings, PlanningModels};
 use asap_planner_cli::planning_stages::{
@@ -174,4 +174,18 @@ fn pass2_of(
     )
     .unwrap();
     run.run.logical_asap_candidates.unwrap()
+}
+
+/// The default cost inputs with `cost_per_disk_byte_second` 0: for tests
+/// whose plans differ in CPU, not in the raw data a plan keeps on disk
+/// (which would make a query-time scan's twins near-equal in cost, a tie
+/// the solver may break either way).
+pub fn cost_inputs_without_disk_cost() -> CostInputs {
+    CostInputs {
+        cost_model: CostModel::UsageOverTime(ResourceUnitCost {
+            cost_per_disk_byte_second: 0.0,
+            ..ResourceUnitCost::illustrative()
+        }),
+        ..CostInputs::default()
+    }
 }
