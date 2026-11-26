@@ -4,9 +4,10 @@
 //! chain, a `TimeRange` over states) carry its θ, but a θ another θ of the
 //! same shape does at least as well, more cheaply, is in no optimal plan.
 //!
-//! The candidates linked by edges between equal θs (a build and the merges,
-//! chains and ranges over it) form a θ set; its readers are the edges out
-//! of it into candidates without θ (readouts). In one set, θ `s` is left
+//! The θ candidates of a group, together with those linked to them by edges
+//! between equal θs (a build and the merges, chains and ranges over it),
+//! form a θ set; its readers are the edges out of it into candidates
+//! without θ (readouts). In one set, θ `s` is left
 //! out when a different θ `t` of the same shape is no larger in every size
 //! field, meets every reader `s` meets, and has a candidate in every place
 //! `s` has one (same group, same operator): a plan reading `s` reads `t` in
@@ -63,8 +64,24 @@ pub(crate) fn cut_edges_of_dominated_thetas(
         let usable = |edge: &CandidateEdge| {
             edge.satisfies.is_ok() && live(&edge.producer) && live(&edge.consumer)
         };
-        // The θ sets: live θ candidates linked by edges between equal θs.
+        // The θ sets: live θ candidates of one group (alternatives of each
+        // other), linked across groups by edges between equal θs.
         let mut sets = UnionFind::default();
+        for (group, memo_group) in memo.groups().iter().enumerate() {
+            let mut first = None;
+            for index_in_group in 0..memo_group.candidates.len() {
+                let id = CandidateForMemoGroupId {
+                    group: MemoGroupId(group as u32),
+                    index_in_group,
+                };
+                if live(&id) && theta(id).is_some() {
+                    match first {
+                        None => first = Some(id),
+                        Some(first) => sets.union(first, id),
+                    }
+                }
+            }
+        }
         for edge in edges.iter().filter(|edge| usable(edge)) {
             if let (Some(produced), Some(consumed)) = (theta(edge.producer), theta(edge.consumer)) {
                 if produced == consumed {
