@@ -454,7 +454,7 @@ fn rule1_every_theta_left_is_a_reader_s_threshold() {
         live_theta_count(&unpruned)
     );
     assert!(
-        unneeded_thetas(&unpruned).len() > 0,
+        !unneeded_thetas(&unpruned).is_empty(),
         "the example lists θs above every threshold"
     );
     assert_same_cost(&pruned, &unpruned, "threshold_theta");
