@@ -15,6 +15,7 @@ use asap_types::stages::{
 use asap_types::workload::DataWorkload;
 
 use crate::generate_physical_asap_memo_candidates;
+use asap_types::stages::SearchSpacePruning;
 
 /// Stage 2 over `logical`, checking what Stage 3 relies on: the edges are
 /// grouped by (consumer, input) over emitted candidates, and every emitted
@@ -24,11 +25,15 @@ fn generate(
     data: &DataWorkload,
     capabilities: &DeploymentCapabilities,
 ) -> PhysicalASAPMemoCandidates {
+    // The unit tests check every offered (τ, ℓ) and edge: rules 4 and 5 off.
+    let mut every_alternative = SearchSpacePruning::default();
+    every_alternative.one_evaluation_by_readers = false;
+    every_alternative.context_reachability = false;
     let physical = generate_physical_asap_memo_candidates(
         logical,
         data,
         &capabilities.exclusions(),
-        Default::default(),
+        every_alternative,
     );
     let count = physical.physical_candidates.len();
     let mut consumer_inputs = Vec::new();
