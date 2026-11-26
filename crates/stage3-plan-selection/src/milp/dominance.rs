@@ -16,7 +16,7 @@ use super::accuracy::AccuracyRules;
 use super::model::SelectionInputs;
 use super::COST_RELATIVE_TOLERANCE;
 use crate::cost::ExecutionCosts;
-use crate::selectable::QueryId;
+use crate::selectable::{QueryId, SelectableExecutions};
 
 /// Per execution, by position in `SelectableExecutions::executions`,
 /// whether it is a query-time execution its twin $b$ (the same logical
@@ -41,20 +41,39 @@ use crate::selectable::QueryId;
 /// offered with $\ell$ = None (137 bytes held) and `OneEvaluation` (19 MB
 /// held) at the same time: the `OneEvaluation` execution is left out.
 pub(crate) fn dominated_by_lifetime_twin(inputs: &SelectionInputs<'_>) -> Vec<bool> {
-    dominated_in_every_quantity(inputs, &[inputs.costs], Pairing::LifetimeTwin)
+    dominated_in_every_quantity(inputs, &[inputs.costs])
 }
 
-/// Which executions [`dominated_in_every_quantity`] compares.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Pairing {
-    /// An execution with $\ell$ = None and its `OneEvaluation` twin (the
-    /// same logical candidate, context and timing), each of which may
-    /// dominate the other.
-    LifetimeTwin,
+/// Whether `cost` is no more than `than`, to rounding (to 1e-24/s when
+/// `than` is 0).
+fn no_more(cost: f64, than: f64) -> bool {
+    cost <= than + COST_RELATIVE_TOLERANCE * than.abs().max(1e-12)
 }
 
-/// Per execution, whether another execution `b` it is paired with
-/// ([`Pairing`]) dominates it in every one of `quantities`: $b$ is no more
+/// Per execution, by position in `SelectableExecutions::executions`, the
+/// query outputs it may answer.
+fn answers_per_execution(selectable: &SelectableExecutions) -> Vec<BTreeSet<QueryId>> {
+    let mut answers: Vec<BTreeSet<QueryId>> = vec![BTreeSet::new(); selectable.executions().len()];
+    for (query, answering) in selectable.answering() {
+        for &index in answering {
+            answers[index].insert(*query);
+        }
+    }
+    answers
+}
+
+/// The consumer's input that selectable edge `position` feeds.
+fn input_of(inputs: &SelectionInputs<'_>, position: usize) -> usize {
+    inputs
+        .physical
+        .edge(inputs.selectable.edges()[position].edge)
+        .input_index_of_consumer
+}
+
+/// Per execution, whether its lifetime twin `b` (an execution with $\ell$
+/// = None and its `OneEvaluation` twin: the same logical candidate,
+/// context and timing, each of which may dominate the other) dominates it
+/// in every one of `quantities`: $b$ is no more
 /// in each, reads each of its producers on the same input at no more, is
 /// read by each of its consumers on the same input at no more, answers
 /// every query output it answers and may be read by every query that may
@@ -70,7 +89,6 @@ pub(crate) enum Pairing {
 pub(crate) fn dominated_in_every_quantity(
     inputs: &SelectionInputs<'_>,
     quantities: &[&ExecutionCosts],
-    pairing: Pairing,
 ) -> Vec<bool> {
     let selectable = inputs.selectable;
     let physical = inputs.physical;
@@ -78,15 +96,7 @@ pub(crate) fn dominated_in_every_quantity(
     let executions = selectable.executions();
     let edges = selectable.edges();
     let count = executions.len();
-    // No more, to rounding (to 1e-24/s when `than` is 0).
-    let no_more =
-        |cost: f64, than: f64| cost <= than + COST_RELATIVE_TOLERANCE * than.abs().max(1e-12);
-    let mut answers: Vec<BTreeSet<QueryId>> = vec![BTreeSet::new(); count];
-    for (query, answering) in selectable.answering() {
-        for &index in answering {
-            answers[index].insert(*query);
-        }
-    }
+    let answers = answers_per_execution(selectable);
     let query_count = inputs.entries.len();
     let logical = |index: usize| {
         physical.physical_candidates[executions[index].candidate.0].logical_candidate_id
@@ -116,24 +126,19 @@ pub(crate) fn dominated_in_every_quantity(
         {
             continue;
         }
-        match pairing {
-            Pairing::LifetimeTwin => {
-                if properties.timing() != ExecutionTiming::QueryTime
-                    || matches!(properties.lifetime(), Lifetime::AcrossEvaluations(_))
-                {
-                    continue;
-                }
-                classes
-                    .entry((execution.context, candidate.logical_candidate_id))
-                    .or_default()
-                    .push(index);
-            }
+        if properties.timing() != ExecutionTiming::QueryTime
+            || matches!(properties.lifetime(), Lifetime::AcrossEvaluations(_))
+        {
+            continue;
         }
+        classes
+            .entry((execution.context, candidate.logical_candidate_id))
+            .or_default()
+            .push(index);
     }
     let value = |quantity: &ExecutionCosts, index: usize| {
         *quantity.per_execution[index].as_ref().expect("costed")
     };
-    let input_of = |position: usize| physical.edge(edges[position].edge).input_index_of_consumer;
     // Whether `b` reads each producer `a` reads on an input, and is read by
     // each consumer that reads `a` on its input, over an edge at no more of
     // `quantity`.
@@ -157,7 +162,7 @@ pub(crate) fn dominated_in_every_quantity(
         }) && selectable.edges_out_of(a).iter().all(|&position| {
             covered(position, selectable.edges_out_of(b), &|other| {
                 edges[other].consumer == edges[position].consumer
-                    && input_of(other) == input_of(position)
+                    && input_of(inputs, other) == input_of(inputs, position)
             })
         })
     };
@@ -188,18 +193,16 @@ pub(crate) fn dominated_in_every_quantity(
         for &a in members {
             dominated[a] = members.iter().any(|&b| {
                 b != a
-                    && match pairing {
-                        Pairing::LifetimeTwin => match (lifetime(a), lifetime(b)) {
-                            // `OneEvaluation` does all `None` does.
-                            (Lifetime::None, Lifetime::OneEvaluation(_)) => no_worse(a, b),
-                            // `None` does all a `OneEvaluation` read at most
-                            // once does; not when `OneEvaluation` is no
-                            // worse too, which leaves `None` out above.
-                            (Lifetime::OneEvaluation(_), Lifetime::None) => {
-                                read_at_most_once(a) && no_worse(a, b) && !no_worse(b, a)
-                            }
-                            _ => false,
-                        },
+                    && match (lifetime(a), lifetime(b)) {
+                        // `OneEvaluation` does all `None` does.
+                        (Lifetime::None, Lifetime::OneEvaluation(_)) => no_worse(a, b),
+                        // `None` does all a `OneEvaluation` read at most
+                        // once does; not when `OneEvaluation` is no worse
+                        // too, which leaves `None` out above.
+                        (Lifetime::OneEvaluation(_), Lifetime::None) => {
+                            read_at_most_once(a) && no_worse(a, b) && !no_worse(b, a)
+                        }
+                        _ => false,
                     }
             });
         }
@@ -283,16 +286,9 @@ pub(crate) fn dominated_theta_families(
                 .push(index);
         }
     }
-    let no_more =
-        |cost: f64, than: f64| cost <= than + COST_RELATIVE_TOLERANCE * than.abs().max(1e-12);
     let value =
         |costs: &ExecutionCosts, index: usize| costs.per_execution[index].as_ref().ok().copied();
-    let mut answers: Vec<BTreeSet<QueryId>> = vec![BTreeSet::new(); count];
-    for (query, answering) in selectable.answering() {
-        for &index in answering {
-            answers[index].insert(*query);
-        }
-    }
+    let answers = answers_per_execution(selectable);
     let retained = |index: usize| {
         let v = executions[index].candidate;
         quantities.iter().chain([&inputs.costs]).any(|costs| {
@@ -313,7 +309,6 @@ pub(crate) fn dominated_theta_families(
             .or_default()
             .push((by_slot, root));
     }
-    let input_of = |position: usize| physical.edge(edges[position].edge).input_index_of_consumer;
     let all_quantities: Vec<&ExecutionCosts> =
         quantities.iter().copied().chain([inputs.costs]).collect();
     let dominates = |b: &BTreeMap<String, usize>, a: &BTreeMap<String, usize>| -> bool {
@@ -350,7 +345,7 @@ pub(crate) fn dominated_theta_families(
                 let (b_consumer, b_producer) = (map(consumer), map(producer));
                 let found = selectable.edges_out_of(b_producer).iter().any(|&other| {
                     edges[other].consumer == b_consumer
-                        && input_of(other) == input_of(position)
+                        && input_of(inputs, other) == input_of(inputs, position)
                         && all_quantities.iter().all(|costs| {
                             match (costs.per_edge[other], costs.per_edge[position]) {
                                 (Some(cb), Some(ca)) => no_more(cb, ca),

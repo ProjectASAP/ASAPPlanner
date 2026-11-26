@@ -29,7 +29,9 @@
 //!   edge, only where the producer delivers on $\kappa$
 //!   (`PhysicalASAPMemoCandidates::delivers_on`).
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+
+use good_lp::Variable;
 
 use asap_types::deployment_capabilities::FinalResultsCache;
 
@@ -54,6 +56,38 @@ pub struct QueryId(pub usize);
 pub(crate) enum Reader {
     Edge(usize),
     Output(QueryId),
+}
+
+impl Reader {
+    /// The selection variable of this read of execution `execution`: the
+    /// edge's $y$ or the query output's $z_{q,e}$; `None` when the MILP has
+    /// none (the edge or output is not selectable).
+    pub(crate) fn variable(
+        self,
+        execution: usize,
+        y: &BTreeMap<usize, Variable>,
+        z: &BTreeMap<(QueryId, usize), Variable>,
+    ) -> Option<Variable> {
+        match self {
+            Reader::Edge(position) => y.get(&position).copied(),
+            Reader::Output(query) => z.get(&(query, execution)).copied(),
+        }
+    }
+
+    /// Whether this read of execution `execution` is in a selection: its
+    /// edge among `edges` (by position) or its query output among
+    /// `outputs` (query, answering execution).
+    pub(crate) fn is_selected(
+        self,
+        execution: usize,
+        edges: &HashSet<usize>,
+        outputs: &HashSet<(QueryId, usize)>,
+    ) -> bool {
+        match self {
+            Reader::Edge(position) => edges.contains(&position),
+            Reader::Output(query) => outputs.contains(&(query, execution)),
+        }
+    }
 }
 
 /// One run of candidate `candidate` in context `context`: a node of the

@@ -57,12 +57,6 @@ pub(super) fn least_latency(inputs: &ClusterInputs<'_>, kept: &[bool]) -> Vec<f6
     // Whether an execution's inputs may share executions below it (an
     // in-query diamond): their memo groups' descendants (over the
     // selectable edges) intersect. Without one, their least works add up.
-    let group_of = |index: usize| {
-        let v = selectable.executions()[index].candidate;
-        inputs.selection.physical.physical_candidates[v.0]
-            .logical_candidate_id
-            .group
-    };
     // Only query-time producers count: an ingestion-time execution's work
     // is in the freshness, which takes the largest, not a sum.
     let mut group_inputs: HashMap<_, BTreeSet<_>> = HashMap::new();
@@ -72,9 +66,9 @@ pub(super) fn least_latency(inputs: &ClusterInputs<'_>, kept: &[bool]) -> Vec<f6
         .filter(|edge| !at_ingestion(inputs, edge.producer))
     {
         group_inputs
-            .entry(group_of(edge.consumer))
+            .entry(memo_group_of(inputs, edge.consumer))
             .or_default()
-            .insert(group_of(edge.producer));
+            .insert(memo_group_of(inputs, edge.producer));
     }
     let mut below: HashMap<_, BTreeSet<_>> = HashMap::new();
     let descendants = |group, below: &mut HashMap<_, BTreeSet<_>>| -> BTreeSet<_> {
@@ -111,7 +105,9 @@ pub(super) fn least_latency(inputs: &ClusterInputs<'_>, kept: &[bool]) -> Vec<f6
             .max(share_or_zero(inputs.query_ms, index))
             .max(0.0)
             + positive_shares;
-        let entry = most_of_group.entry(group_of(index)).or_insert(0.0);
+        let entry = most_of_group
+            .entry(memo_group_of(inputs, index))
+            .or_insert(0.0);
         *entry = entry.max(most);
     }
     // Per execution, the most its inputs' least works may count twice: each
@@ -128,7 +124,7 @@ pub(super) fn least_latency(inputs: &ClusterInputs<'_>, kept: &[bool]) -> Vec<f6
                         continue;
                     }
                     reached.extend(descendants(
-                        group_of(selectable.edges()[position].producer),
+                        memo_group_of(inputs, selectable.edges()[position].producer),
                         &mut below,
                     ));
                 }

@@ -247,7 +247,7 @@ pub struct DataPlaneExecution {
     /// default 1.
     pub precompute_threads: u32,
     /// Threads running query requests; default 1. A range request's steps
-    /// split over them (`step_rounds`): its per-step work takes
+    /// split over them (`RequestFixedCost::step_rounds`): its per-step work takes
     /// ⌈steps ÷ threads⌉ rounds of latency, its CPU is unchanged. Not a
     /// limit: the report recommends how many a plan needs.
     pub query_threads: u32,

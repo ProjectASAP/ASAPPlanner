@@ -18,7 +18,8 @@ use asap_types::plan::physical_asap_dag::PhysicalASAPOperatorPayload as Payload;
 use serde_json::{json, Value};
 
 use crate::lowest_mean_latency_common::{
-    cluster, cost_inputs, data_plane, every, max_min_table, over_m, plan, planned, usage_over_time,
+    assert_close, cluster, cost_inputs, data_plane, every, max_min_table, over_m, plan, planned,
+    usage_over_time,
 };
 
 /// `max_over_time(m[5m])` every 10 s.
@@ -29,14 +30,6 @@ fn max_every_10s(max_latency_ms: Option<f64>) -> Value {
 /// Cost model 3 with `lowest_mean_latency` and no binding limit.
 fn lowest_mean_latency() -> Value {
     cluster("lowest_mean_latency", None, None, None)
-}
-
-/// Assert `actual` is within 1% of `expected` (or 1e-9 absolute).
-fn assert_close(name: &str, actual: f64, expected: f64) {
-    assert!(
-        (actual - expected).abs() <= 0.01 * expected.abs().max(1e-7),
-        "{name}: {actual} is not close to {expected}"
-    );
 }
 
 /// A1. A scan of 30 ms per run, or a chain refreshing at 10 ms of CPU and

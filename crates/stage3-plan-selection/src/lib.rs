@@ -33,8 +33,8 @@ mod retention;
 mod selectable;
 
 use asap_cost::{
-    request_overhead_cost_per_second, ClusterLimits, ClusterObjective, CostInputs, CostModel,
-    LatencyCalibration, ResourceUnitCost,
+    request_overhead_cost_per_second, ClusterObjective, CostInputs, CostModel, LatencyCalibration,
+    ResourceUnitCost,
 };
 use asap_types::deployment_capabilities::FinalResultsCache;
 use asap_types::plan::physical_asap_dag::PhysicalASAPDAG;
@@ -58,26 +58,6 @@ pub use report::{
     large_peak_memory_warning, AcceptedAccuracy, ErrorSelectingPlan, OptimalityGap, RejectionCause,
     Selection,
 };
-
-/// What the cluster offers of `limit`: its memory, disk or cores, the
-/// precompute load bound, or the query's `max_latency_ms`.
-fn available(
-    limits: &ClusterLimits,
-    cost_inputs: &CostInputs,
-    entries: &[QueryWorkloadEntry],
-    limit: ClusterLimit,
-) -> f64 {
-    match limit {
-        ClusterLimit::MemoryBytes => limits.memory_bytes as f64,
-        ClusterLimit::DiskBytes => limits.disk_bytes as f64,
-        ClusterLimit::CpuCores => limits.cpu_cores.map_or(f64::INFINITY, f64::from),
-        ClusterLimit::PrecomputeLoad => cost_inputs.data_plane_execution.max_thread_utilization,
-        ClusterLimit::QueryLatencyMs { query } => entries
-            .get(query)
-            .and_then(|entry| entry.requirements.max_latency_ms)
-            .unwrap_or(f64::INFINITY),
-    }
-}
 
 /// Stage 3, plan selection: select one plan among `physical`'s candidates
 /// (module documentation) under `cost_inputs`, and build it: one
@@ -303,15 +283,7 @@ pub fn select_plan(
             .map_err(|error| match error {
                 ClusterSelectionError::Milp(error) => milp_error(error),
                 ClusterSelectionError::OverLimits(shortfalls) => {
-                    ErrorSelectingPlan::OverClusterLimits(
-                        shortfalls
-                            .into_iter()
-                            .map(|shortfall| ClusterLimitShortfall {
-                                available: available(limits, cost_inputs, entries, shortfall.limit),
-                                ..shortfall
-                            })
-                            .collect(),
-                    )
+                    ErrorSelectingPlan::OverClusterLimits(shortfalls)
                 }
             })?;
             let mut per_query = vec![0.0; entries.len()];

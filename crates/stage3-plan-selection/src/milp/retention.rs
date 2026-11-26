@@ -14,7 +14,6 @@ use super::model::SelectionInputs;
 use crate::cost::ExecutionCosts;
 use crate::retention::ms_to_seconds;
 use crate::selectable::QueryId;
-use crate::selectable::Reader;
 
 /// $h_v$ in seconds retained (the unit keeps (R)'s coefficients near the
 /// others'), added to `problem`, for each candidate with a retention cost
@@ -75,11 +74,7 @@ pub(crate) fn retention_constraints(
         let Some(&h) = h.get(&executions[index].candidate) else {
             continue;
         };
-        let read = match reader {
-            Reader::Edge(position) => y.get(&position),
-            Reader::Output(query) => z.get(&(query, index)),
-        };
-        if let Some(&read) = read {
+        if let Some(read) = reader.variable(index, y, z) {
             let need_ms = need_ms.expect("a candidate with h_v is read within a bound");
             constraints.push(constraint!(h >= ms_to_seconds(need_ms) * read));
         }
@@ -119,10 +114,7 @@ pub(crate) fn least_retention_ms(
         .selectable
         .reads_back(&inputs.costs.retention_need_ms_per_edge)
     {
-        let selected = match reader {
-            Reader::Edge(position) => edges.contains(&position),
-            Reader::Output(query) => outputs.contains(&(query, index)),
-        };
+        let selected = reader.is_selected(index, &edges, &outputs);
         let v = executions[index].candidate;
         if let (true, Some(need_ms), true) = (selected, need_ms, retaining.contains_key(&v)) {
             let need_ms = inputs.costs.retention_ms_for_need(v, need_ms);
@@ -157,11 +149,7 @@ pub(crate) fn resident_window_terms(
         let Some(&per_window) = costs.per_resident_window.get(&v) else {
             continue;
         };
-        let read_variable = match read.reader {
-            Reader::Edge(position) => y.get(&position),
-            Reader::Output(query) => z.get(&(query, read.execution)),
-        };
-        let Some(&read_variable) = read_variable else {
+        let Some(read_variable) = read.reader.variable(read.execution, y, z) else {
             continue;
         };
         let windows = match costs.resident_at_most {
@@ -197,11 +185,7 @@ pub(crate) fn resident_windows_quantity(
     let outputs: HashSet<(QueryId, usize)> = outputs.iter().copied().collect();
     let mut most: HashMap<PhysicalCandidateId, f64> = HashMap::new();
     for read in &costs.resident_reads {
-        let selected = match read.reader {
-            Reader::Edge(position) => edges.contains(&position),
-            Reader::Output(query) => outputs.contains(&(query, read.execution)),
-        };
-        if !selected {
+        if !read.reader.is_selected(read.execution, &edges, &outputs) {
             continue;
         }
         let v = selectable.executions()[read.execution].candidate;

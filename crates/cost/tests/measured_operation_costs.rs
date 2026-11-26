@@ -1,10 +1,10 @@
-//! The measured cost table: [`lookup`] (exact match, interpolation in log
+//! The measured cost table: [`lookup_at_scale`] (exact match, interpolation in log
 //! size, phase shadowing, no extrapolation), its JSON round trip and the
 //! formats the `asap_run` design deletes. Every expected price is
 //! computed by hand from the entries below.
 
 use asap_cost::{
-    lookup, CostInputs, MeasuredOperationCosts, OperatorCost, OperatorKind, StateFamily,
+    lookup_at_scale, CostInputs, MeasuredOperationCosts, OperatorCost, OperatorKind, StateFamily,
 };
 use asap_types::ir::properties::ExecutionTiming;
 use asap_types::summary_type::{ExactKind, SketchParams};
@@ -62,12 +62,13 @@ struct Price {
 }
 
 fn kll_price_at(table: &MeasuredOperationCosts, phase: ExecutionTiming, k: u32) -> Option<Price> {
-    lookup(
+    lookup_at_scale(
         table,
         OperatorKind::SummaryAgg,
         phase,
         StateFamily::Sketch(&SketchParams::Kll { k }),
         size_of,
+        None,
     )
     .map(|price| Price {
         ns_per_unit: price.ns_per_unit,
@@ -154,12 +155,13 @@ fn lookup_memory_needs_both_neighbours() {
 /// KLL entries do not price a DDSketch node.
 #[test]
 fn lookup_other_algorithm_misses() {
-    let price = lookup(
+    let price = lookup_at_scale(
         &kll_table(),
         OperatorKind::SummaryAgg,
         ExecutionTiming::QueryTime,
         StateFamily::Sketch(&SketchParams::DDSketch { alpha: 0.01 }),
         size_of,
+        None,
     );
     assert!(price.is_none());
 }

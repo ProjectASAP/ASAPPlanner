@@ -32,7 +32,7 @@ mod resources;
 pub use asap_types::plan::time_window::read_back_ms;
 pub(crate) use measured::aggregate_lookup;
 pub use measured::{
-    lookup, lookup_at_scale, MeasuredOperationCosts, NodeCostSource, OperatorCost, OperatorKind,
+    lookup_at_scale, MeasuredOperationCosts, NodeCostSource, OperatorCost, OperatorKind,
     RefreshIoWait, StateFamily,
 };
 pub use model::{
@@ -50,8 +50,8 @@ pub use node::usage::{
 };
 pub use plan::cost::{
     close_together, ingest_decode_cpu_core_seconds_per_second, ingest_threads_building_copies,
-    partial_copy_merge_ms, plan_cost, raw_data_disk_cost_per_second,
-    request_overhead_cost_per_second, step_rounds, PlanCost, QueryLatency, RecommendedThreads,
-    RoleThreads,
+    partial_copy_merge_ms, plan_cost, raw_data_disk_cost_per_second, refresh_queue,
+    request_fixed_cost, request_overhead_cost_per_second, requests_per_second, PlanCost,
+    QueryLatency, RecommendedThreads, RequestFixedCost, RoleThreads,
 };
 pub use resources::ResourceUsage;

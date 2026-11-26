@@ -3,9 +3,6 @@
 
 use super::*;
 
-/// The largest objective coefficient once scaled, as cost model 1's.
-pub(super) const LARGEST_SCALED_COEFFICIENT: f64 = 1e6;
-
 /// The relative slack a lexicographic solve keeps on an earlier optimum.
 pub(super) const LEXICOGRAPHIC_SLACK: f64 = 1e-9;
 
@@ -15,8 +12,8 @@ pub(super) enum Objective {
     MeanLatency,
     /// The mean latency's LP relaxation (a measurement).
     Relaxation,
-    Memory,
-    Disk,
+    /// The quantity of one limit: peak memory and disk for the tie-breaks,
+    /// each limit's own when diagnosing which limits block every plan.
     Limit(ClusterLimit),
 }
 
@@ -141,17 +138,12 @@ pub(super) fn freshness_big_m(
     (0..windows.len())
         .map(|group| {
             let mut bound = refresh_bound[group];
-            for (other, (&other_bound, &other_window)) in
-                refresh_bound.iter().zip(windows).enumerate()
-            {
-                if other == group {
-                    continue;
-                }
-                if reads[group].contains(&other) {
-                    bound += other_bound;
-                } else if close_together(windows[group], other_window) {
-                    bound += other_bound / threads;
-                }
+            for (other, waits_whole_refresh) in refresh_queue(group, windows, &reads[group]) {
+                bound += if waits_whole_refresh {
+                    refresh_bound[other]
+                } else {
+                    refresh_bound[other] / threads
+                };
             }
             bound
         })
@@ -172,65 +164,19 @@ pub(super) fn quantity_expression(
 ) -> Expression {
     let selectable = inputs.selection.selectable;
     let mut expression = Expression::default();
-    for (index, &x) in variables.x.iter().enumerate() {
-        if kept[index] {
-            expression += share_or_zero(costs, index) * x;
-        }
+    // Per source, the most raw data a selected scan keeps.
+    let mut most_of_source: BTreeMap<&Source, Variable> = BTreeMap::new();
+    let (terms, raw_data_rows) =
+        selection_cost_terms(selectable, costs, variables, kept, |source| {
+            *most_of_source
+                .entry(source)
+                .or_insert_with(|| problem.add(variable().min(0)))
+        });
+    for (share, variable) in terms {
+        expression += share * variable;
     }
-    for (&position, &y) in &variables.y {
-        expression += costs.per_edge[position].unwrap_or(0.0) * y;
-    }
-    for (v, &h) in &variables.h {
-        if !costs.raw_data_source.contains_key(v) {
-            let share = costs
-                .retention_cost_per_retained_second
-                .get(v)
-                .copied()
-                .unwrap_or(0.0);
-            expression += share * h;
-        }
-    }
-    let mut executions_of: HashMap<PhysicalCandidateId, Vec<usize>> = HashMap::new();
-    for (index, execution) in selectable.executions().iter().enumerate() {
-        if kept[index] {
-            executions_of
-                .entry(execution.candidate)
-                .or_default()
-                .push(index);
-        }
-    }
-    let mut most_of_source: BTreeMap<String, Variable> = BTreeMap::new();
-    let mut scans: Vec<_> = costs.raw_data_source.iter().collect();
-    scans.sort_unstable_by_key(|(v, _)| **v);
-    for (v, source) in scans {
-        let r = *most_of_source
-            .entry(format!("{source:?}"))
-            .or_insert_with(|| problem.add(variable().min(0)));
-        if let Some(&h) = variables.h.get(v) {
-            let share = costs
-                .retention_cost_per_retained_second
-                .get(v)
-                .copied()
-                .unwrap_or(0.0);
-            if share > 0.0 {
-                rows.push(constraint!(r >= share * h));
-            }
-        } else if let Some(&kept_bytes) = costs.unbounded_raw_data_on_disk_cost_per_second.get(v) {
-            for &index in executions_of.get(v).into_iter().flatten() {
-                rows.push(constraint!(r >= kept_bytes * variables.x[index]));
-            }
-        }
-    }
-    for read in &costs.raw_data_reads {
-        if let (Some(reader), true) = (
-            super::super::raw_data_read_variable(read, &variables.y, &variables.z),
-            read.raw_data_kept > 0.0,
-        ) {
-            let r = *most_of_source
-                .entry(format!("{:?}", read.source))
-                .or_insert_with(|| problem.add(variable().min(0)));
-            rows.push(constraint!(r >= read.raw_data_kept * reader));
-        }
+    for (r, share, variable) in raw_data_rows {
+        rows.push(constraint!(r >= share * variable));
     }
     for r in most_of_source.into_values() {
         expression += r;
@@ -287,29 +233,18 @@ pub(super) fn build_and_solve(
     let selectable = selection.selectable;
     let execution = &inputs.cost_inputs.data_plane_execution;
     let rules = AccuracyRules::of(selection);
-    let components = Components::of(selection);
-    let shared = copies_in_equivalent_contexts(selection, kept, rules.as_ref());
     let mut problem = ProblemVariables::new();
-    let variables = selection_variables(selection, kept, &shared, &components, &mut problem);
+    let SelectionModel {
+        variables,
+        components,
+        accuracy_rows,
+        selection_variable_count,
+    } = selection_model(selection, kept, rules.as_ref(), &mut problem);
     // Variable counts by family, for the solver log (`log_solver`).
-    let mut families: Vec<(&str, usize)> = vec![("selection (x, y, z, t, h, r, a)", problem.len())];
-    let accuracy_rows = rules
-        .as_ref()
-        .map(|rules| {
-            let error_model = ErrorModel::new(selection, rules, &variables.y, &shared);
-            let accuracy = AccuracyVariables::new(&error_model, &mut problem);
-            accuracy_constraints(
-                selection,
-                &error_model,
-                &accuracy,
-                &variables.y,
-                &variables.z,
-                &shared,
-                &mut problem,
-            )
-        })
-        .unwrap_or_default();
-    families.push(("accuracy", problem.len()));
+    let mut families: Vec<(&str, usize)> = vec![
+        ("selection (x, y, z, t, h, r, a)", selection_variable_count),
+        ("accuracy", problem.len()),
+    ];
     let mut rows: Vec<Constraint> = Vec::new();
     // The quantities' expressions.
     let memory = quantity_expression(
@@ -381,17 +316,14 @@ pub(super) fn build_and_solve(
     let freshness: Vec<Expression> = (0..groups.windows.len())
         .map(|group| {
             let mut expression = Expression::from(lateness) + refresh[group].clone();
-            for (other, (other_refresh, &other_window)) in
-                refresh.iter().zip(&groups.windows).enumerate()
+            for (other, waits_whole_refresh) in
+                refresh_queue(group, &groups.windows, &groups.reads[group])
             {
-                if other == group {
-                    continue;
-                }
-                if groups.reads[group].contains(&other) {
-                    expression += other_refresh.clone();
-                } else if close_together(groups.windows[group], other_window) {
-                    expression += other_refresh.clone() * (1.0 / threads);
-                }
+                expression += if waits_whole_refresh {
+                    refresh[other].clone()
+                } else {
+                    refresh[other].clone() * (1.0 / threads)
+                };
             }
             expression
         })
@@ -537,17 +469,9 @@ pub(super) fn build_and_solve(
     let fixed_cores: f64 = shapes
         .iter()
         .map(|shape| {
-            let requests_per_second = selection
-                .entries
-                .get(shape.query.0)
-                .and_then(|entry| {
-                    evaluation_rate(
-                        [(&entry.recurrence, None)],
-                        inputs.cost_inputs.non_repeating_query_horizon_seconds,
-                    )
-                    .ok()
-                })
-                .unwrap_or(0.0);
+            let requests_per_second =
+                requests_per_second(selection.entries.get(shape.query.0), inputs.cost_inputs)
+                    .unwrap_or(0.0);
             shape.request_cpu_ms * requests_per_second / 1_000.0
         })
         .sum::<f64>()
@@ -596,8 +520,8 @@ pub(super) fn build_and_solve(
     }
     let goal: Expression = match objective {
         Objective::MeanLatency | Objective::Relaxation => weighted,
-        Objective::Memory | Objective::Limit(ClusterLimit::MemoryBytes) => memory.clone(),
-        Objective::Disk | Objective::Limit(ClusterLimit::DiskBytes) => disk.clone(),
+        Objective::Limit(ClusterLimit::MemoryBytes) => memory.clone(),
+        Objective::Limit(ClusterLimit::DiskBytes) => disk.clone(),
         Objective::Limit(ClusterLimit::CpuCores) => cpu,
         Objective::Limit(ClusterLimit::PrecomputeLoad) => load,
         Objective::Limit(ClusterLimit::QueryLatencyMs { query }) => shapes
@@ -605,32 +529,11 @@ pub(super) fn build_and_solve(
             .position(|shape| shape.query.0 == query)
             .map_or_else(Expression::default, |at| Expression::from(latencies[at])),
     };
-    let largest = largest_coefficient(&goal);
-    let scale = match largest > 0.0 && largest.is_finite() {
-        true => LARGEST_SCALED_COEFFICIENT / largest,
-        false => 1.0,
-    };
+    let scale = objective_scale(largest_coefficient(&goal));
     let accuracy_count = accuracy_rows.len();
     let rows_total = rows.len();
     let constraints: Vec<Constraint> = [
-        input_satisfaction_constraints(selection, &variables),
-        producer_selection_constraints(selection, &variables),
-        query_coverage_constraints(selection, &variables),
-        acyclicity_constraints(selection, &variables, &components),
-        use_constraints(selection, &variables),
-        retention_constraints(
-            selection,
-            &variables.h,
-            &variables.x,
-            &variables.y,
-            &variables.z,
-        ),
-        exact_only_constraints(
-            selection,
-            &variables.read_by_query,
-            &variables.y,
-            &variables.z,
-        ),
+        structure_constraints(selection, &variables, &components),
         accuracy_rows,
         rows,
     ]
@@ -638,11 +541,7 @@ pub(super) fn build_and_solve(
     .flatten()
     .collect();
     let variable_count = problem.len();
-    let column_of: HashMap<Variable, usize> = problem
-        .iter_variables_with_def()
-        .enumerate()
-        .map(|(column, (variable, _))| (variable, column))
-        .collect();
+    let column_of = column_of(&problem);
     let constraint_count = constraints.len();
     let goal_scaled = goal.clone() * scale;
     let builder = problem
@@ -708,21 +607,16 @@ pub(super) fn build_and_solve(
         .try_solve()
         .map_err(|status| SelectionMilpError::Solver(format!("{status:?}")))?;
     let solve_ms = started.elapsed().as_millis() as u64;
-    use highs::{HighsModelStatus, HighsSolutionStatus};
-    let columns: Vec<f64> = match solved.status() {
-        HighsModelStatus::ModelEmpty => vec![0.0; variable_count],
-        HighsModelStatus::Optimal | HighsModelStatus::ReachedSolutionLimit
-            if solved.primal_solution_status() == HighsSolutionStatus::Feasible =>
-        {
-            solved.get_solution().columns().to_vec()
-        }
-        HighsModelStatus::Infeasible | HighsModelStatus::UnboundedOrInfeasible => {
+    use highs::HighsModelStatus;
+    let columns: Vec<f64> = match solution_columns(&solved, variable_count) {
+        Ok(columns) => columns,
+        Err(HighsModelStatus::Infeasible | HighsModelStatus::UnboundedOrInfeasible) => {
             return Err(SelectionMilpError::Infeasible)
         }
-        HighsModelStatus::ReachedSolutionLimit if improve_below.is_none() => {
+        Err(HighsModelStatus::ReachedSolutionLimit) if improve_below.is_none() => {
             return Err(SelectionMilpError::Solver(NO_PLAN_IN_NODES.to_string()))
         }
-        other => return Err(SelectionMilpError::Solver(format!("{other:?}"))),
+        Err(other) => return Err(SelectionMilpError::Solver(format!("{other:?}"))),
     };
     // The lower bound HiGHS proved, unscaled; at a proved optimum (or an
     // empty model, or the LP relaxation) the objective itself.
@@ -737,30 +631,12 @@ pub(super) fn build_and_solve(
         .map(|bound| bound / scale + goal.constant());
     let value = |variable: Variable| columns.get(column_of[&variable]).copied().unwrap_or(0.0);
     let chosen = |variable: Variable| value(variable) > 0.5;
-    let selected: Vec<usize> = (0..variables.x.len())
-        .filter(|&index| chosen(variables.x[index]))
-        .collect();
-    let edges: Vec<usize> = variables
-        .y
-        .iter()
-        .filter(|&(_, &y)| chosen(y))
-        .map(|(&position, _)| position)
-        .collect();
+    let (selected, edges) = selected_executions_and_edges(&variables, chosen);
     // The LP relaxation answers fractionally: no plan to read off.
-    let relaxed = objective == Objective::Relaxation;
-    let answering: Vec<(QueryId, usize)> = selectable
-        .answering()
-        .iter()
-        .filter(|_| !relaxed)
-        .map(|(query, answering)| {
-            let execution = answering
-                .iter()
-                .copied()
-                .find(|&execution| chosen(variables.z[&(*query, execution)]))
-                .expect("(C): one output per query output reference");
-            (*query, execution)
-        })
-        .collect();
+    let answering: Vec<(QueryId, usize)> = match objective {
+        Objective::Relaxation => Vec::new(),
+        _ => answering_executions(selectable, &variables, chosen),
+    };
     let evaluate = |expression: &Expression| {
         expression
             .linear_coefficients()
@@ -801,6 +677,7 @@ pub(super) fn build_and_solve(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use asap_cost::close_together;
 
     fn window(width_ms: u64, phase_ms: u64) -> RefreshWindow {
         RefreshWindow { width_ms, phase_ms }
