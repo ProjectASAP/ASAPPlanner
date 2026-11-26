@@ -7,8 +7,8 @@
 use asap_types::ir::schema::Schema;
 use asap_types::ir::{ASAPOp, Operator};
 use asap_types::stages::{
-    listed_build_parameters, CandidateForMemoGroup, Memo, MemoGroupId,
-    OriginOfCandidateForMemoGroup,
+    listed_build_parameters, CandidateForMemoGroup, GroupProperties, Memo, MemoGroupId,
+    OriginOfCandidateForMemoGroup, ValueSign,
 };
 use asap_types::summary_type::{SketchAlgorithm, SketchParams};
 
