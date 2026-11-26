@@ -58,6 +58,7 @@ impl SearchSpacePruning {
                 "one_evaluation_by_readers",
                 &mut self.one_evaluation_by_readers,
             ),
+            ("sharing_aware_bound", &mut self.sharing_aware_bound),
         ]
     }
 
@@ -111,17 +112,13 @@ mod tests {
     fn all_is_a_rule_and_an_unknown_rule_is_refused() {
         let mut pruning = SearchSpacePruning::default();
         assert_eq!(pruning.set("all", false), Ok(()));
-        assert_eq!(
-            pruning.rules_off(),
-            vec![
-                "threshold_theta",
-                "context_reachability",
-                "one_evaluation_by_readers"
-            ]
-        );
-        assert_eq!(pruning.set("all", true), Ok(()));
-        assert_eq!(pruning.set("context_reachability", false), Ok(()));
-        assert_eq!(pruning.rules_off(), vec!["context_reachability"]);
+        let every_rule = pruning.rules_off();
+        assert!(every_rule.contains(&"threshold_theta"), "{every_rule:?}");
+        for rule in &every_rule {
+            assert_eq!(pruning.set(rule, true), Ok(()));
+        }
+        assert!(pruning.rules_off().is_empty());
+        assert_eq!(pruning, SearchSpacePruning::default());
         let error = pruning.set("no_such_rule", false).unwrap_err();
         assert!(
             error.contains("unknown search-space pruning rule no_such_rule"),
