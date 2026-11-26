@@ -30,7 +30,7 @@ type TreeInputs = Vec<Option<(usize, usize)>>;
 
 /// Per execution, by position in `SelectableExecutions::executions`,
 /// whether it costs more than a feasible plan
-/// ([`feasible_plan_cost_per_second`]): its own cost, plus the least
+/// ([`feasible_plan`]): its own cost, plus the least
 /// retention $\pi_v h_v$ (R) makes it pay, plus the most its input edges
 /// can take off ($\min(0, c_{\kappa,u,v,i})$ per input) is over the
 /// bound. Such an execution is in no optimal plan, as long as every

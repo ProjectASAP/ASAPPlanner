@@ -48,9 +48,7 @@ use crate::cost::{execution_costs, execution_quantities, Quantity};
 use crate::milp::model::cluster::{
     solve_cluster_selection, ClusterInputs, ClusterSelectionError, FeasiblePlan,
 };
-use crate::milp::model::{
-    solve_selection, solve_selection_with, SelectionInputs, SelectionMilpError,
-};
+use crate::milp::model::{solve_selection_with, SelectionInputs, SelectionMilpError};
 use crate::plan::plan_of;
 use crate::report::{accepted_accuracy, excluded_by_deployment, infeasible};
 use crate::selectable::{Execution, QueryId, SelectableExecutions};
@@ -249,35 +247,38 @@ pub fn select_plan(
             );
             // A feasible plan's executions for T8: cost model 1's
             // optimum (when it is solved), by position.
-            let feasible_plan = solve_selection(&selection_inputs).ok().map(|solved| {
-                let executions = selectable.executions();
-                let position =
-                    |execution: &Execution| executions.iter().position(|e| e == execution);
-                FeasiblePlan {
-                    executions: solved.executions.iter().filter_map(position).collect(),
-                    edges: selectable
-                        .edges()
-                        .iter()
-                        .enumerate()
-                        .filter(|(_, edge)| {
-                            solved.edges.iter().any(|selected| {
-                                selected.edge == edge.edge
-                                    && selected.consumer == executions[edge.consumer]
-                                    && selected.producer == executions[edge.producer]
-                            })
-                        })
-                        .map(|(position, _)| position)
-                        .collect(),
-                    answering: selectable
-                        .answering()
-                        .iter()
-                        .zip(&solved.outputs)
-                        .filter_map(|((query, _), output)| {
-                            position(output).map(|index| (*query, index))
-                        })
-                        .collect(),
-                }
-            });
+            let feasible_plan =
+                solve_selection_with(&selection_inputs, false, search_space_pruning)
+                    .ok()
+                    .map(|solved| {
+                        let executions = selectable.executions();
+                        let position =
+                            |execution: &Execution| executions.iter().position(|e| e == execution);
+                        FeasiblePlan {
+                            executions: solved.executions.iter().filter_map(position).collect(),
+                            edges: selectable
+                                .edges()
+                                .iter()
+                                .enumerate()
+                                .filter(|(_, edge)| {
+                                    solved.edges.iter().any(|selected| {
+                                        selected.edge == edge.edge
+                                            && selected.consumer == executions[edge.consumer]
+                                            && selected.producer == executions[edge.producer]
+                                    })
+                                })
+                                .map(|(position, _)| position)
+                                .collect(),
+                            answering: selectable
+                                .answering()
+                                .iter()
+                                .zip(&solved.outputs)
+                                .filter_map(|((query, _), output)| {
+                                    position(output).map(|index| (*query, index))
+                                })
+                                .collect(),
+                        }
+                    });
             let solved = solve_cluster_selection(&ClusterInputs {
                 selection: selection_inputs,
                 query_ms: &query_ms,

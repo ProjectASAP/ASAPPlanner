@@ -687,6 +687,7 @@ pub(super) fn objective_scale(largest: f64) -> f64 {
 /// target is solved once more at [`LEAST_HIGHS_FEASIBILITY_TOLERANCE`],
 /// and if that one misses too, or finds no plan at all, the error is
 /// [`SelectionMilpError::TargetBelowSolverPrecision`].
+#[cfg(test)]
 pub(crate) fn solve_selection(
     inputs: &SelectionInputs<'_>,
 ) -> Result<SolvedSelection, SelectionMilpError> {
