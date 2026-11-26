@@ -35,6 +35,15 @@ pub(super) struct Member {
 impl Member {
     pub(super) fn of(memo: &Memo, group: MemoGroupId) -> Option<Self> {
         let memo_group = &memo.groups()[group.0 as usize];
+        // A Count-Min state over weights not proven non-negative has no
+        // build (`GroupProperties::count_min_weights_not_proven_non_negative`),
+        // so it rolls up into none.
+        if memo_group
+            .group_properties
+            .count_min_weights_not_proven_non_negative()
+        {
+            return None;
+        }
         let (rows, by) = match &memo_group.expression {
             Operator::ASAP(ASAPOp::SummaryAgg {
                 child,

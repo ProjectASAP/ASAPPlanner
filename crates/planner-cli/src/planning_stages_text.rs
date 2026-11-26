@@ -911,6 +911,7 @@ fn root_prune_reason_name(reason: &RootPruneReason) -> &'static str {
         RootPruneReason::ChainWidthDoesNotDivideEvaluationGrid { .. } => {
             "ChainWidthDoesNotDivideEvaluationGrid"
         }
+        RootPruneReason::InputGroupHasNoCandidate { .. } => "InputGroupHasNoCandidate",
         RootPruneReason::NoConsumer => "NoConsumer",
     }
 }
@@ -1023,6 +1024,9 @@ pub fn root_prune_reason_text(reason: &RootPruneReason) -> String {
         RootPruneReason::HeapSmallerThanTopK { k, .. } => {
             format!("the producer's heap is smaller than the top-{k}")
         }
+        RootPruneReason::InputGroupHasNoCandidate { .. } => {
+            "the input group has no candidate".to_owned()
+        }
         RootPruneReason::NoConsumer => "no consumer, and not a query output".to_owned(),
     }
 }
@@ -1085,7 +1089,8 @@ fn write_pass2_pruned(out: &mut String, logical: &LogicalASAPMemoCandidates, ver
                 | RootPruneReason::ChainWidthDoesNotDivideEvaluationGrid {
                     consumer, input, ..
                 }
-                | RootPruneReason::NoGuarantee { consumer, input } => {
+                | RootPruneReason::NoGuarantee { consumer, input }
+                | RootPruneReason::InputGroupHasNoCandidate { consumer, input } => {
                     let _ = write!(line, "at {} input {input}: ", candidate_id_text(*consumer));
                 }
                 RootPruneReason::ValuesPerEvaluationUnknown { consumer, .. } => {

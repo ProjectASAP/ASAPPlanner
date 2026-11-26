@@ -27,6 +27,39 @@ fn non_negative_m() -> DataWorkload {
     }
 }
 
+/// The same top-k over a gauge with no declared sign: its `CmsWithHeap`
+/// state lists no build (its weights are not proven non-negative), while
+/// the Count Sketch heap, which needs no sign, lists every θ.
+#[test]
+fn a_count_min_heap_over_weights_of_unknown_sign_lists_no_build() {
+    let mut memo = Memo::new(&DataWorkload::default());
+    let rows = selector(&mut memo, TimeRangeKind::Range, "m", &["job"]);
+    let per_series = aggregate_group(&mut memo, rows, Reduction::PerEntity, vec![sum()], None);
+    let by_job = aggregate_group(
+        &mut memo,
+        per_series,
+        Reduction::by(vec![2]),
+        vec![sum()],
+        None,
+    );
+    let ranked = aggregate_group(
+        &mut memo,
+        by_job,
+        Reduction::by(vec![]),
+        vec![topk(5)],
+        None,
+    );
+    query(&mut memo, ranked, None);
+    let memo = pass1_memo(memo, &[]).unwrap();
+    let (count_min, _) = state_group(&memo, SketchAlgorithm::CmsWithHeap);
+    assert!(candidates_of(&memo, count_min).is_empty());
+    let (count_sketch, _) = state_group(&memo, SketchAlgorithm::CountSketchWithHeap);
+    assert_eq!(
+        candidates_of(&memo, count_sketch).len(),
+        parameter_list(SketchAlgorithm::CountSketchWithHeap).len()
+    );
+}
+
 /// `topk(5, sum by (job) (sum_over_time(m[5m])))`: the top-k gets heaps
 /// over the range's raw data samples, keyed by `job` (the ranked item),
 /// weighted by the sample value (non-negative here: the state group's
