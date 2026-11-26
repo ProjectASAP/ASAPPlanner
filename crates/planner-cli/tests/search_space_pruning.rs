@@ -597,7 +597,7 @@ fn rule2_a_sharing_aware_bound_is_tighter_at_the_same_optimum() {
 /// `ASAP_STAGE3_ROOT_LP=1`) is strictly higher, still no higher than the
 /// optimum, which is the same.
 #[test]
-fn rule3_mandatory_group_costs_tighten_the_lp_bound_at_the_same_optimum() {
+fn rule3_cover_rows_tighten_the_lp_bound_at_the_same_optimum() {
     let workload = promql(
         vec![
             repeating_at_rank("quantile_over_time(0.9, m[10m])", 60_000, 0.01),
