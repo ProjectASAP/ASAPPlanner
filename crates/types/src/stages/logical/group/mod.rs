@@ -120,6 +120,23 @@ impl GroupProperties {
         self.column_signs.get(state).copied()
     }
 
+    /// Whether the group outputs a Count-Min state (`Cms`, `CmsWithHeap`,
+    /// `HydraCms`) whose weights are not proven non-negative: its state
+    /// column, which records the sign of the weights it is updated with,
+    /// is not `NonNegative`. Its estimates are bounds only for
+    /// non-negative weights, so no plan builds it: Pass 1 and Pass 2 list
+    /// no build of it, and Stage 2 prunes any that is left
+    /// (`PruneReason::CountMinWeightsNotProvenNonNegative`).
+    ///
+    /// Example: `topk(5, sum by (host) (m))` over a gauge `m` with no
+    /// declared sign: true for its `CmsWithHeap` state group.
+    pub fn count_min_weights_not_proven_non_negative(&self) -> bool {
+        matches!(
+            self.sketch_algorithm_of_state(),
+            Some(SketchAlgorithm::Cms | SketchAlgorithm::CmsWithHeap | SketchAlgorithm::HydraCms)
+        ) && self.state_column_sign() != Some(ValueSign::NonNegative)
+    }
+
     /// The sketch algorithm of the state the group outputs; `None` for
     /// rows, values and exact states.
     pub fn sketch_algorithm_of_state(&self) -> Option<SketchAlgorithm> {

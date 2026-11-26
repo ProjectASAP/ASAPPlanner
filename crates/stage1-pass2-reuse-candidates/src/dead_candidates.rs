@@ -150,10 +150,21 @@ impl<'a> EdgeGraph<'a> {
             // A candidate cut off from an input is traced to its producers,
             // any other to its consumers.
             let edges = match dead[&at] {
-                Some(input) => self
-                    .by_consumer_input
-                    .get(&(at, input))
-                    .map_or(&[][..], Vec::as_slice),
+                Some(input) => match self.by_consumer_input.get(&(at, input)) {
+                    Some(edges) => edges.as_slice(),
+                    // The input group has no candidate at all (e.g. a
+                    // Count-Min state no build is listed for).
+                    None => {
+                        causes.push(PruneCause {
+                            through_pruned_candidates: path,
+                            root: RootPruneReason::InputGroupHasNoCandidate {
+                                consumer: at,
+                                input,
+                            },
+                        });
+                        continue;
+                    }
+                },
                 None => match self.by_producer.get(&at) {
                     Some(edges) => edges.as_slice(),
                     None => {

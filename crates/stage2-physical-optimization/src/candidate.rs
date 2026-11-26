@@ -16,10 +16,8 @@ use asap_types::plan::physical_asap_dag::{
     PhysicalASAPDAG, PhysicalASAPDAGNode, PhysicalASAPNodeId,
 };
 use asap_types::stages::{
-    CandidateForMemoGroupId, Lifetime, Memo, MemoGroupId, PhysicalProperties, PruneReason,
-    StorageMedium, ValueSign,
+    CandidateForMemoGroupId, Lifetime, Memo, PhysicalProperties, PruneReason, StorageMedium,
 };
-use asap_types::summary_type::SketchAlgorithm;
 use asap_types::workload::bounds::source_name;
 use asap_types::workload::{AssumedDataFact, DataFactAssumption, DataWorkload};
 
@@ -93,9 +91,10 @@ pub(super) fn offered_physical_properties(
             ingestion_row_order(summary_type, scanned_sources.iter(), data)
                 != IngestionRowOrder::Unordered
         });
-    let count_min_weights_not_proven_non_negative = build.is_some_and(|(summary_type, _)| {
-        count_min_weights_not_proven_non_negative(memo, candidate.group, summary_type)
-    });
+    let count_min_weights_not_proven_non_negative = build.is_some()
+        && memo.groups()[candidate.group.0 as usize]
+            .group_properties
+            .count_min_weights_not_proven_non_negative();
     let has_ingestion_pipeline = data.arrival.rows_per_second().is_some();
     let builds_summary =
         build.is_some() || matches!(operator, Operator::ASAP(ASAPOp::MaintainPopulation { .. }));
@@ -272,27 +271,4 @@ pub fn assumed_in_order_arrival(
             .collect(),
         assumption: DataFactAssumption::InOrderArrival,
     })
-}
-
-/// Whether a build of `summary_type` in group `group` is a Count-Min state
-/// (`Cms`, `CmsWithHeap`, `HydraCms`) whose weights are not proven
-/// non-negative: the state column of its group, which records the sign of
-/// the weights it is updated with (`column_signs`), is not `NonNegative`.
-fn count_min_weights_not_proven_non_negative(
-    memo: &Memo,
-    group: MemoGroupId,
-    summary_type: &FieldDataType,
-) -> bool {
-    if !matches!(
-        summary_type,
-        FieldDataType::Sketch(
-            SketchAlgorithm::Cms | SketchAlgorithm::CmsWithHeap | SketchAlgorithm::HydraCms
-        )
-    ) {
-        return false;
-    }
-    let weight_sign = memo.groups()[group.0 as usize]
-        .group_properties
-        .state_column_sign();
-    weight_sign != Some(ValueSign::NonNegative)
 }

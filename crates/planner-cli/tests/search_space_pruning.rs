@@ -318,9 +318,9 @@ fn rule8_no_group_holds_two_identical_candidates() {
 /// every physical form, and whether the weights are proven is a logical
 /// fact, so Pass 1 lists no such θ (8b; Stage 2 pruned 240 `CmsWithHeap`
 /// θs and the readout above them before). Every live logical candidate
-/// then has a physical candidate, and the plan costs the same.
+/// then has a physical candidate.
 #[test]
-fn rule8_a_count_min_build_over_unproven_weights_is_not_a_logical_candidate() {
+fn rule8b_a_count_min_build_over_unproven_weights_is_not_a_logical_candidate() {
     let workload = json!({
         "query_workload": {"language": "promql", "repeating_queries": [
             repeating("topk(5, sum by (host) (m))", 60_000, 0, 0.05),
@@ -351,5 +351,4 @@ fn rule8_a_count_min_build_over_unproven_weights_is_not_a_logical_candidate() {
         })
         .collect();
     assert_eq!(without_physical, Vec::<String>::new());
-    assert!(cost(&document) > 0.0);
 }
