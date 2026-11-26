@@ -22,6 +22,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use asap_types::deployment_capabilities::DeploymentExclusion;
 use asap_types::stages::{CandidateForMemoGroupId, Memo, MemoGroupId, RootPruneReason};
 use asap_types::summary_type::{HydraParams, SketchParams};
 
@@ -31,8 +32,29 @@ use crate::edges::CandidateEdge;
 /// Cuts every satisfied edge from a θ above the reader's threshold
 /// (module doc), repeating with dead-candidate elimination until nothing
 /// changes: a threshold is the least θ among the producers still alive.
+/// A group one of whose θs a deployment exclusion's θ range matches
+/// (`CandidateExclusion::sketch_parameter_range`) is left as it is:
+/// Stage 2 may prune its threshold and the plan then needs a larger θ.
 /// Returns how many edges were cut.
-pub(crate) fn cut_edges_above_thresholds(memo: &Memo, edges: &mut [CandidateEdge]) -> usize {
+///
+/// Example: with `{"sketch_parameter_range": {"kll_k": {"at_most": 1403}}}`
+/// a KLL group keeps k = 1404 and 2863 for Stage 2 to choose from.
+pub(crate) fn cut_edges_above_thresholds(
+    memo: &Memo,
+    edges: &mut [CandidateEdge],
+    exclusions: &[DeploymentExclusion],
+) -> usize {
+    let ranges: Vec<_> = exclusions
+        .iter()
+        .filter_map(|exclusion| exclusion.exclusion.sketch_parameter_range)
+        .collect();
+    let excluded_by_range = |group: MemoGroupId| {
+        memo.groups()[group.0 as usize]
+            .candidates
+            .iter()
+            .filter_map(|candidate| candidate.logical_properties.parameters())
+            .any(|theta| ranges.iter().any(|range| range.contains(theta)))
+    };
     let mut cut = 0;
     loop {
         let dead: BTreeSet<CandidateForMemoGroupId> = eliminate_dead_candidates(memo, edges)
@@ -50,6 +72,7 @@ pub(crate) fn cut_edges_above_thresholds(memo: &Memo, edges: &mut [CandidateEdge
                 && live(&edge.consumer)
                 && live(&edge.producer)
                 && theta(edge.producer).is_some()
+                && !excluded_by_range(edge.producer.group)
             {
                 readers
                     .entry((edge.consumer, edge.input))

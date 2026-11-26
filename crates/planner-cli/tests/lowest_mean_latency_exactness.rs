@@ -276,6 +276,10 @@ fn dominated_theta_families_are_left_out() {
                 "--cost-inputs",
                 "tools/dag-viewer/cost-inputs/cluster-lowest-mean-latency.json",
                 "--ignore-accuracy-guarantees",
+                // Every listed θ, so θ-family dominance has families to
+                // leave out.
+                "--search-space-pruning",
+                "threshold_theta=off",
                 "--format",
                 "json",
             ])

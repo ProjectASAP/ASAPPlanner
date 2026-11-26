@@ -22,6 +22,7 @@ use asap_types::workload::{
 };
 
 use crate::generate_logical_asap_memo_candidates;
+use asap_types::stages::SearchSpacePruning;
 
 /// An exact accumulator state of `kind` over `window` grouped by
 /// `reduction`, read by a `FinalizeExactAccumulator` group (the query
@@ -72,7 +73,18 @@ pub fn pass2_with_evidence(
     entries: &[QueryWorkloadEntry],
     evidence: &dyn AccuracyEvidence,
 ) -> LogicalASAPMemoCandidates {
-    generate_logical_asap_memo_candidates(memo, entries, evidence, Default::default()).unwrap()
+    generate_logical_asap_memo_candidates(
+        memo,
+        entries,
+        evidence,
+        &[],
+        // The unit tests check every θ's edges and chains: rule 1 off.
+        SearchSpacePruning {
+            threshold_theta: false,
+            ..Default::default()
+        },
+    )
+    .unwrap()
 }
 
 /// The edges into input `input` of `consumer`: each producer and α^log.
