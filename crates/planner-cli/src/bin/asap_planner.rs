@@ -111,7 +111,8 @@
 //     second), `milp_upper_bound_cost_per_second` (the greedy feasible
 //     plan's, which bounds it from above) and, with
 //     `ASAP_STAGE3_ROOT_LP=1`, `milp_lp_bound_cost_per_second` (the LP
-//     relaxation's, which bounds it from below); `error` when no plan was selected. `sharing_summary`: each
+//     relaxation's, which bounds it from below); `error` when no plan was
+//     selected. `sharing_summary`: each
 //     plan node two or more queries read, by what it computes (`operator`,
 //     `parameters`, `timing`, `lifetime`) and the `queries` reading it.
 //     `materialized_views` are the plan's materialized views as

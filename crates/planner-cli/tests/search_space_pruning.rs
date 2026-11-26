@@ -12,36 +12,11 @@
 //! code.
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
 use std::process::Command;
 
 use serde_json::{json, Value};
 
-/// A file under the system temp directory, removed when dropped.
-struct TempFile(PathBuf);
-
-impl TempFile {
-    fn json(value: &Value) -> Self {
-        static CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-        let call = CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let path = std::env::temp_dir().join(format!(
-            "asap_search_space_pruning_{}_{call}.json",
-            std::process::id()
-        ));
-        std::fs::write(&path, value.to_string()).unwrap();
-        Self(path)
-    }
-
-    fn path(&self) -> &str {
-        self.0.to_str().unwrap()
-    }
-}
-
-impl Drop for TempFile {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0);
-    }
-}
+use super::asap_planner::TempFile;
 
 /// Raw data retained, query-time results not retained.
 fn raw_retained() -> Value {
@@ -275,7 +250,7 @@ fn stage3_reports_the_greedy_and_lp_bounds() {
         lower <= optimum * (1.0 + 1e-9),
         "lower {lower:e} > optimum {optimum:e}"
     );
-    assert_eq!(cost(&plain), optimum);
+    assert_same_cost(&plain, &reported, "bounds");
 }
 
 // Rule 8a: identical candidates (fixed on main; a regression guard).

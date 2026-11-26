@@ -194,9 +194,10 @@ fn pruning_keeps_every_snapshot_optimum() {
         let mut off = args.clone();
         off.extend(["--search-space-pruning".to_owned(), "all=off".to_owned()]);
         let unpruned = asap_planner(&off, &scratch);
+        let error = |document: &Value| document["stage3_plan_selection"]["error"].clone();
         match (cost(&pruned), cost(&unpruned)) {
             (Some(a), Some(b)) if (a - b).abs() <= 1e-9 * a.abs().max(b.abs()) => {}
-            (None, None) => {}
+            (None, None) if error(&pruned) == error(&unpruned) => {}
             (a, b) => failures.push(format!("{id}: {a:?}/s with the rules, {b:?}/s without")),
         }
     }

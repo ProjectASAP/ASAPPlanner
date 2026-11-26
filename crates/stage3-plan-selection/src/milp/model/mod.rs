@@ -810,21 +810,9 @@ pub(crate) fn solve_selection_reporting_lp_bound(
     model.set_option("output_flag", false);
     model.set_option("threads", 1);
     let construction_ms = started.elapsed().as_millis() as u64;
-    // The LP relaxation's optimum, unscaled, when asked for: the
-    // formulation's bound, a measurement. The model is solved again as a
-    // MILP afterwards.
+    // The LP relaxation's optimum, unscaled, when asked for: solved after
+    // the MILP, on its model, so the measurement cannot change the plan.
     let mut lp_bound_per_second = None;
-    if report_lp_bound {
-        model.set_option("solve_relaxation", true);
-        let relaxed = model
-            .try_solve()
-            .map_err(|status| SelectionMilpError::Solver(format!("{status:?}")))?;
-        if relaxed.status() == highs::HighsModelStatus::Optimal {
-            lp_bound_per_second = Some(relaxed.objective_value() / scale);
-        }
-        model = relaxed.into();
-        model.set_option("solve_relaxation", false);
-    }
     let selectable = inputs.selectable;
     let executions = selectable.executions();
     let mut solve_ms = 0;
@@ -880,6 +868,9 @@ pub(crate) fn solve_selection_reporting_lp_bound(
             .as_ref()
             .map(|rules| rules.selection_meets_targets(inputs, &selected_edges, &answering))
         else {
+            if report_lp_bound {
+                lp_bound_per_second = lp_relaxation_objective(solved.into()).map(|lp| lp / scale);
+            }
             break (selected, selected_edges, answering);
         };
         if solve_count == 2 {
@@ -930,6 +921,17 @@ pub(crate) fn solve_selection_reporting_lp_bound(
         solve_ms,
         solve_count,
     })
+}
+
+/// The LP relaxation's objective of `model` (scaled as the model is), a
+/// measurement: `None` when HiGHS fails or does not reach the optimum.
+/// The executions left out before the model was built are left out
+/// exactly ([`dearer_than_a_feasible_plan`], [`dominated_by_lifetime_twin`]),
+/// so it still bounds the MILP's optimum from below.
+fn lp_relaxation_objective(mut model: highs::Model) -> Option<f64> {
+    model.set_option("solve_relaxation", true);
+    let relaxed = model.try_solve().ok()?;
+    (relaxed.status() == highs::HighsModelStatus::Optimal).then(|| relaxed.objective_value())
 }
 
 /// The cost per second of a selection, less the request overhead every
