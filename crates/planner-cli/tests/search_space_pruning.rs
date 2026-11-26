@@ -23,6 +23,18 @@ fn raw_retained() -> Value {
     json!({"raw_data_retained": true, "query_time_results_retained": false})
 }
 
+/// Raw data not retained (the MVP deployment).
+fn raw_not_retained() -> Value {
+    json!({"raw_data_retained": false, "query_time_results_retained": false})
+}
+
+/// [`repeating`] at rank error `max_error`.
+fn repeating_at_rank(query: &str, interval_ms: u64, max_error: f64) -> Value {
+    let mut entry = repeating(query, interval_ms, 0, max_error);
+    entry["requirements"]["accuracy"] = json!({"max_error": max_error, "accuracy_metric": "rank"});
+    entry
+}
+
 /// One repeating PromQL query: `query` every `interval_ms` at phase
 /// `phase_ms`, at relative error `max_error` (failure probability 0.01
 /// over the whole result).
@@ -571,6 +583,55 @@ fn rule2_a_sharing_aware_bound_is_tighter_at_the_same_optimum() {
         milp_variables(&pruned),
         milp_variables(&unpruned)
     );
+}
+
+// Rule 3: a cover row per mandatory group (Stage 3).
+
+/// `quantile_over_time(0.9, m[10m])` and `quantile_over_time(0.5, m[5m])`
+/// every 60 s at rank 0.01 over 1,000 series, raw data not retained (the
+/// measurement's n14): every plan executes each query's output group and
+/// the groups below it that all its executions read. Measured on main,
+/// those groups' least costs add up to 1.70/s against an LP bound of
+/// 1.14/s and an optimum of 2.72/s; with a cover row per group the LP
+/// relaxation's bound (`milp_lp_bound_cost_per_second`,
+/// `ASAP_STAGE3_ROOT_LP=1`) is strictly higher, still no higher than the
+/// optimum, which is the same.
+#[test]
+fn rule3_mandatory_group_costs_tighten_the_lp_bound_at_the_same_optimum() {
+    let workload = promql(
+        vec![
+            repeating_at_rank("quantile_over_time(0.9, m[10m])", 60_000, 0.01),
+            repeating_at_rank("quantile_over_time(0.5, m[5m])", 60_000, 0.01),
+        ],
+        1_000,
+        1_000,
+    );
+    let lp_bound = [("ASAP_STAGE3_ROOT_LP", "1")];
+    let pruned = plan_with(&workload, &raw_not_retained(), &[], &lp_bound);
+    let unpruned = plan_with(
+        &workload,
+        &raw_not_retained(),
+        &["mandatory_group_cover"],
+        &lp_bound,
+    );
+    assert_same_cost(&pruned, &unpruned, "mandatory_group_cover");
+    let lp = |document: &Value| {
+        document["stage3_plan_selection"]["milp_lp_bound_cost_per_second"]
+            .as_f64()
+            .expect("the LP relaxation's bound is reported")
+    };
+    let optimum = |document: &Value| {
+        document["stage3_plan_selection"]["milp_objective_cost_per_second"]
+            .as_f64()
+            .unwrap()
+    };
+    assert!(
+        lp(&pruned) > lp(&unpruned) * (1.0 + 1e-6),
+        "LP bound {:e}/s with the rule, {:e}/s without",
+        lp(&pruned),
+        lp(&unpruned)
+    );
+    assert!(lp(&pruned) <= optimum(&pruned) * (1.0 + 1e-9));
 }
 
 // Rule 8a: identical candidates (fixed on main; a regression guard).

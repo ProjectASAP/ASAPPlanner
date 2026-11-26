@@ -39,6 +39,7 @@ use super::equivalent_contexts::{copies_in_equivalent_contexts, SharedVariables}
 use super::exact_only::{exact_only_constraints, exact_only_variables};
 use super::graph::Components;
 use super::kept_results::{kept_result_terms, kept_results_quantity, KeptResultVariables};
+use super::mandatory_groups::mandatory_group_rows;
 use super::retention::{
     least_retention_ms, resident_window_terms, resident_windows_quantity, retention_constraints,
     retention_variables,
@@ -700,7 +701,8 @@ pub(crate) fn solve_selection(
 /// of `search_space_pruning`: with `sharing_aware_bound`, the greedy
 /// feasible plan is sharing-aware, bounds the executions left out with
 /// the other query outputs' least costs ([`dearer_than_a_feasible_plan`]),
-/// and is the MILP's starting solution.
+/// and is the MILP's starting solution; with `mandatory_group_cover`, each
+/// group every plan executes gets a cover row ([`mandatory_group_rows`]).
 pub(crate) fn solve_selection_with(
     inputs: &SelectionInputs<'_>,
     report_lp_bound: bool,
@@ -784,6 +786,11 @@ pub(crate) fn solve_selection_with(
     let scale = objective_scale(largest);
     let constraints: Vec<Constraint> = [
         structure_constraints(inputs, &variables, &components),
+        if search_space_pruning.mandatory_group_cover {
+            mandatory_group_rows(inputs, &kept, &variables.x)
+        } else {
+            Vec::new()
+        },
         // The objective's scale is in the raw-data rows, so $r_s$ is the
         // scaled cost and its objective coefficient is 1.
         raw_data_rows

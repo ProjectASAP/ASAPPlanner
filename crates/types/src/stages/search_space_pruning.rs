@@ -35,6 +35,10 @@ pub struct SearchSpacePruning {
     /// least cost plus the other query outputs' least costs is over that
     /// bound, and the plan is the MILP's starting solution.
     pub sharing_aware_bound: bool,
+    /// Rule 3, Stage 3: a row $\sum_{e \in G} x_e \ge 1$ for each memo
+    /// group every plan executes, which every integer solution meets and
+    /// which raises the LP relaxation's bound.
+    pub mandatory_group_cover: bool,
 }
 
 impl Default for SearchSpacePruning {
@@ -44,6 +48,7 @@ impl Default for SearchSpacePruning {
             one_evaluation_by_readers: true,
             context_reachability: true,
             sharing_aware_bound: true,
+            mandatory_group_cover: true,
         }
     }
 }

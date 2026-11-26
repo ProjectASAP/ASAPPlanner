@@ -14,6 +14,7 @@ mod equivalent_contexts;
 pub(crate) mod exact_only;
 mod graph;
 mod kept_results;
+mod mandatory_groups;
 pub(crate) mod model;
 mod retention;
 mod upper_bound;
