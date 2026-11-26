@@ -918,7 +918,7 @@ fn the_bound_leaves_out_of_each_query_only_what_it_must_not_read() {
         kept_query_time_results: None,
         answer_cache: None,
     };
-    let left_out = dearer_than_a_feasible_plan(&inputs, None);
+    let (_, left_out) = dearer_than_a_feasible_plan(&inputs, None);
     let unused: Vec<bool> = selectable
         .executions()
         .iter()
@@ -952,7 +952,7 @@ fn the_bound_counts_the_least_retention_an_execution_pays() {
     let entries = every_10s(1);
     let (selectable, costs) =
         selection_inputs(&physical, &entries, &[1.0, 2.0, 1.0], &[], &[(1, 1e6)]);
-    let left_out = dearer_than_a_feasible_plan(
+    let (_, left_out) = dearer_than_a_feasible_plan(
         &SelectionInputs {
             physical: &physical,
             entries: &entries,

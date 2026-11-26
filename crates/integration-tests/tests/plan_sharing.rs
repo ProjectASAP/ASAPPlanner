@@ -364,6 +364,7 @@ fn per_series_states_over_different_labels_add_no_shared_chain() {
         &entries,
         &w.data,
         asap_planner::PlanningModels::builtin(),
+        Default::default(),
         asap_planner_cli::planning_stages::RunUntil::Pass2,
     )
     .unwrap();

@@ -35,15 +35,16 @@ type TreeInputs = Vec<Option<(usize, usize)>>;
 /// bound. Such an execution is in no optimal plan, as long as every
 /// other selected execution costs at least 0 with its selected inputs.
 /// None is ruled out when no feasible plan is found, the accuracy
-/// constraint (K) (`rules`) included.
+/// constraint (K) (`rules`) included. Also returns the bound: the feasible
+/// plan's cost per second, `None` without one.
 pub(crate) fn dearer_than_a_feasible_plan(
     inputs: &SelectionInputs<'_>,
     rules: Option<&AccuracyRules>,
-) -> Vec<bool> {
+) -> (Option<f64>, Vec<bool>) {
     let selectable = inputs.selectable;
     let count = selectable.executions().len();
     let Some(bound) = feasible_plan_cost_per_second(inputs, rules) else {
-        return vec![false; count];
+        return (None, vec![false; count]);
     };
     let costs = inputs.costs;
     let executions = selectable.executions();
@@ -83,7 +84,7 @@ pub(crate) fn dearer_than_a_feasible_plan(
     // is left out only when it is clearly dearer (by 1e-9 of the bound;
     // 1e-21/s when the bound is 0).
     let tolerance = 1e-9 * bound.abs().max(1e-12);
-    (0..count)
+    let dearer = (0..count)
         .map(|index| {
             let Ok(own) = &costs.per_execution[index] else {
                 return false;
@@ -101,7 +102,8 @@ pub(crate) fn dearer_than_a_feasible_plan(
                     .sum::<f64>();
             least > bound + tolerance
         })
-        .collect()
+        .collect();
+    (Some(bound), dearer)
 }
 
 /// The cost per second (less the request overhead every plan pays) of a

@@ -16,6 +16,7 @@ use asap_types::deployment_capabilities::DeploymentCapabilitiesError;
 use asap_types::ir::schema::series_identity::{with_promql_series_identity, SeriesIdentityError};
 use asap_types::ir::{OperatorNode, QueryRoot};
 use asap_types::plan::physical_asap_dag::PhysicalASAPDAG;
+use asap_types::stages::SearchSpacePruning;
 use asap_types::stages::{LogicalASAPMemoCandidates, Memo, PhysicalASAPMemoCandidates};
 use asap_types::workload::{DataWorkload, QueryWorkloadEntry};
 
@@ -30,6 +31,9 @@ pub struct PlanSearchSettings {
     /// [`PlanningRun::pass1_memo`]. Default off:
     /// production planning copies no memo.
     pub inspect: bool,
+    /// The exact search-space pruning rules the stages apply; default
+    /// every rule.
+    pub search_space_pruning: SearchSpacePruning,
 }
 
 /// Why the facade selected no plan.

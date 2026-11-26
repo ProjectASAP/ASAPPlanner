@@ -4,3 +4,4 @@
 mod asap_planner;
 mod asap_planner_acceptance;
 mod lowest_mean_latency_exactness;
+mod search_space_pruning;

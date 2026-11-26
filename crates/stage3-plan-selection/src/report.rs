@@ -201,6 +201,15 @@ pub struct Selection {
     /// Under `lowest_mean_latency` with `report_root_lp_bound`, the LP
     /// relaxation's mean latency in ms: the formulation's bound.
     pub milp_root_lp_mean_latency_ms: Option<f64>,
+    /// Under cost model 1, the cost per second of the greedy feasible plan
+    /// whose cost bounds the optimum from above (executions dearer than it
+    /// are left out before the MILP), request overhead included; `None`
+    /// when no feasible plan was found that way, and under cost model 3.
+    pub milp_upper_bound_cost_per_second: Option<f64>,
+    /// Under cost model 1 with `report_root_lp_bound`, the LP relaxation's
+    /// cost per second, request overhead included: the formulation's lower
+    /// bound on the optimum; `None` otherwise.
+    pub milp_lp_bound_cost_per_second: Option<f64>,
     /// Under `lowest_mean_latency`, how far the selected plan may be from
     /// the optimum: the solve stops at a relative gap of 1 % or after 10,000
     /// branch-and-bound nodes

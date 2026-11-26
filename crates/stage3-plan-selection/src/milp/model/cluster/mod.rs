@@ -629,6 +629,8 @@ pub(crate) fn solve_cluster_selection(
         retention_ms,
         cost_per_second_without_request_overhead: 0.0,
         milp_optimum_per_second: None,
+        upper_bound_per_second: None,
+        lp_bound_per_second: None,
         variable_count: last.variable_count,
         constraint_count: last.constraint_count,
         construction_ms: (started.elapsed().as_millis() as u64).saturating_sub(solve_ms),
