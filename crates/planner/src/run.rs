@@ -215,6 +215,7 @@ pub fn run_planning_until(
             pass1,
             entries,
             models.evidence,
+            &exclusions,
             settings.search_space_pruning,
         );
         report.pass2_ms = elapsed_ms(started);

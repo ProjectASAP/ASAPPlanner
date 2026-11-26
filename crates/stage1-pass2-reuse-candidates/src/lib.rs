@@ -31,6 +31,7 @@ mod threshold_theta;
 use std::collections::BTreeSet;
 
 use asap_accuracy::{AccuracyEvidence, ErrorMetricsOfMemo};
+use asap_types::deployment_capabilities::DeploymentExclusion;
 use asap_types::stages::{
     CandidateError, CandidateForMemoGroupId, LogicalASAPMemoCandidates, LogicalEdge, Memo,
     MemoGroupError, PrunedLogicalCandidate, SearchSpacePruning,
@@ -82,11 +83,14 @@ pub enum Pass2RuleError {
 /// whose bound Stage 3 checks
 /// (`LogicalASAPMemoCandidates::readout_values_of_query`).
 ///
-/// `entries[i]` is query `i`'s workload entry (its evaluation grid).
+/// `entries[i]` is query `i`'s workload entry (its evaluation grid);
+/// `exclusions` are the deployment's (`DeploymentCapabilities::exclusions`),
+/// which rule 1 reads for θ ranges.
 pub fn generate_logical_asap_memo_candidates(
     pass1: Memo,
     entries: &[QueryWorkloadEntry],
     evidence: &dyn AccuracyEvidence,
+    exclusions: &[DeploymentExclusion],
     search_space_pruning: SearchSpacePruning,
 ) -> Result<LogicalASAPMemoCandidates, Pass2RuleError> {
     let mut memo = pass1;
@@ -113,7 +117,7 @@ pub fn generate_logical_asap_memo_candidates(
         evidence,
     );
     if search_space_pruning.threshold_theta {
-        cut_edges_above_thresholds(&memo, &mut edges_before_chains);
+        cut_edges_above_thresholds(&memo, &mut edges_before_chains, exclusions);
     }
     let before_chains = eliminate_dead_candidates(&memo, &edges_before_chains);
     chains::add_chain_groups(
@@ -135,7 +139,7 @@ pub fn generate_logical_asap_memo_candidates(
         evidence,
     );
     if search_space_pruning.threshold_theta {
-        cut_edges_above_thresholds(&memo, &mut candidate_edges);
+        cut_edges_above_thresholds(&memo, &mut candidate_edges, exclusions);
     }
     let pruned = eliminate_dead_candidates(&memo, &candidate_edges);
     let dead = candidates_of(&pruned);

@@ -18,14 +18,14 @@
 use std::collections::BTreeSet;
 
 use asap_cost::CostInputs;
+use asap_planner::PlanSearchSettings;
 use asap_planner::{DeploymentCapabilities, PlanningModels};
-use asap_planner_cli::planning_stages::{
-    lower_promql_roots, run_planning_stages_over, PlanningStagesRun,
-};
+use asap_planner_cli::planning_stages::{lower_promql_roots, run_search_over, PlanningStagesRun};
 use asap_types::ir::properties::ExecutionTiming;
 use asap_types::ir::schema::FieldDataType;
 use asap_types::ir::{ASAPOp, Operator};
 use asap_types::plan::physical_asap_dag::{PhysicalASAPDAG, PhysicalASAPOperatorPayload};
+use asap_types::stages::SearchSpacePruning;
 use asap_types::workload::PlanningWorkload;
 
 use crate::planning_common::cost_inputs_without_disk_cost;
@@ -102,6 +102,15 @@ fn without_wider_levels() -> Vec<asap_planner::CandidateExclusion> {
 /// The planning stages' run over `workload` under the default cost inputs,
 /// with raw data kept or not.
 fn planning_run(workload: &PlanningWorkload, raw_data_retained: bool) -> PlanningStagesRun {
+    planning_run_with(workload, raw_data_retained, SearchSpacePruning::default())
+}
+
+/// [`planning_run`] under the pruning rules `search_space_pruning`.
+fn planning_run_with(
+    workload: &PlanningWorkload,
+    raw_data_retained: bool,
+    search_space_pruning: SearchSpacePruning,
+) -> PlanningStagesRun {
     let settings = cost_inputs_without_disk_cost();
     // The stored plans were measured with one tumbling-window chain per
     // range, before wider levels and covers: a deployment without both
@@ -117,7 +126,11 @@ fn planning_run(workload: &PlanningWorkload, raw_data_retained: bool) -> Plannin
     let entries: Vec<_> = workload.query_workload.entries().collect();
     let data = workload.data_workload.clone().unwrap();
     let roots = lower_promql_roots(workload).unwrap();
-    run_planning_stages_over(roots, &entries, &data, models).unwrap()
+    let settings = PlanSearchSettings {
+        inspect: true,
+        search_space_pruning,
+    };
+    run_search_over(roots, &entries, &data, models, settings).unwrap()
 }
 
 /// The plan Stage 3 selects for `workload` under the default cost inputs,
@@ -432,7 +445,12 @@ fn quantile_rank_without_raw_data_charges_the_larger_kll_more() {
     use asap_types::summary_type::SketchParams;
     for setting in [ONE_HZ_EVERY_10_S, ONE_HZ_EVERY_60_S] {
         let w = workload(QUANTILE_RANK, setting);
-        let run = planning_run(&w, false);
+        // Every listed k (rule 1 off): the test compares the costs of two.
+        let every_theta = SearchSpacePruning {
+            threshold_theta: false,
+            ..Default::default()
+        };
+        let run = planning_run_with(&w, false, every_theta);
         // The `k`s of the stored KLL windows (tumbling-window chains)
         // Stage 1 offers, smallest first.
         let offered_kll_ks: Vec<u32> = run
