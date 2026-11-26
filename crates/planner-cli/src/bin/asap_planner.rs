@@ -70,6 +70,11 @@
 //     `InstallablePlan::from_json`. When Stage 3 selects no plan, no file is
 //     written (a file already at the path is left as it is) and the run
 //     exits 1 after writing the stage output.
+//   - `--search-space-pruning <rule>=on|off` (repeatable): switches one
+//     exact search-space pruning rule (`asap_types::stages::SearchSpacePruning`),
+//     or `all` of them; every rule is on by default. A plan selected with
+//     a rule off costs what it costs with it on; the switch is for
+//     verifying that and measuring what the rule saves.
 //
 // With a selected plan, the run also compiles it on the Planner's executor
 // (`InstallablePlan::check_compiles`) and reports the result: the document's
@@ -101,9 +106,13 @@
 //     `PhysicalASAPDAG`), its `cost` (`asap_cost::plan_cost`:
 //     `cost_per_second`, `source`, `usage` and each node's charge), and its
 //     `Selection`: `accepted_accuracy_per_query`, `pruned_candidates` (as
-//     Stage 2's), `milp_variables`, `milp_constraints` and
+//     Stage 2's), `milp_variables`, `milp_constraints`,
 //     `milp_objective_cost_per_second` (the selected plan's cost per
-//     second); `error` when no plan was selected. `sharing_summary`: each
+//     second), `milp_upper_bound_cost_per_second` (the greedy feasible
+//     plan's, which bounds it from above) and, with
+//     `ASAP_STAGE3_ROOT_LP=1`, `milp_lp_bound_cost_per_second` (the LP
+//     relaxation's, which bounds it from below); `error` when no plan was
+//     selected. `sharing_summary`: each
 //     plan node two or more queries read, by what it computes (`operator`,
 //     `parameters`, `timing`, `lifetime`) and the `queries` reading it.
 //     `materialized_views` are the plan's materialized views as
@@ -138,7 +147,8 @@
 //     `satisfies_logical_requirement` and `rejection`, why
 //     $\alpha^{\log} = 0$ as Pass 2 recorded it). With a selected plan, `selected_candidates`
 //     maps each group the plan uses to the indices of its candidates there;
-//   - `search`, `accuracy_guarantees` (`"enforced"` or `"ignored"`),
+//   - `search`, `search_space_pruning_off` (the pruning rules switched
+//     off; absent when none is), `accuracy_guarantees` (`"enforced"` or `"ignored"`),
 //     `deployment_capabilities` (as planned with) and `run_until`.
 // A section of a stage after `--run-until` is null.
 //
@@ -180,6 +190,7 @@ use asap_types::plan::physical_asap_dag::PhysicalASAPNodeId;
 use asap_types::stages::{
     CandidateForMemoGroup, CandidateForMemoGroupId, LogicalASAPMemoCandidates, Memo, MemoGroupId,
     PhysicalASAPMemoCandidates, PhysicalCandidate, PhysicalCandidateId, PrunedCandidate,
+    SearchSpacePruning,
 };
 use asap_types::workload::{
     DataArrival, DataWorkload, PlanningWorkload, QueryLanguage, QueryWorkloadEntry,
@@ -189,7 +200,8 @@ use serde_json::{json, Value};
 const USAGE: &str = "usage: asap_planner (--workload <file>)... \
 --run-until stage0|stage1_pass1|stage1_pass2|stage2|stage3 [--format text|json] [--verbose] [--out <file>] \
 [--sql-catalog-table <json>]... [--cost-inputs <file>] [--deployment-capabilities <file>] \
-[--ignore-accuracy-guarantees] [--plan-file <file>] [--report-file <file>] [--price-plan <file>]";
+[--ignore-accuracy-guarantees] [--plan-file <file>] [--report-file <file>] [--price-plan <file>] \
+[--search-space-pruning <rule>=on|off]...";
 
 fn main() {
     match run(std::env::args().skip(1).collect()) {
@@ -237,6 +249,7 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
     let mut plan_file = None;
     let mut report_file = None;
     let mut price_plan = None;
+    let mut search_space_pruning = SearchSpacePruning::default();
     let mut args = args.into_iter();
     while let Some(flag) = args.next() {
         let mut value = || {
@@ -269,6 +282,21 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
             "--plan-file" => plan_file = Some(value()?),
             "--report-file" => report_file = Some(value()?),
             "--price-plan" => price_plan = Some(value()?),
+            "--search-space-pruning" => {
+                let setting = value()?;
+                let (rule, on) = match setting.split_once('=') {
+                    Some((rule, "on")) => (rule, true),
+                    Some((rule, "off")) => (rule, false),
+                    _ => {
+                        return Err(Failure::Usage(format!(
+                            "--search-space-pruning {setting}: expected <rule>=on or <rule>=off"
+                        )))
+                    }
+                };
+                search_space_pruning
+                    .set(rule, on)
+                    .map_err(|e| Failure::Usage(format!("--search-space-pruning: {e}")))?;
+            }
             other => return Err(Failure::Usage(format!("unknown argument {other}"))),
         }
     }
@@ -302,7 +330,7 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
     // crates read none): `ASAP_STAGE3_THETA_DOMINANCE=off`,
     // `ASAP_STAGE3_FEASIBLE_PLAN_BOUND=off`, `ASAP_STAGE3_TIE_BREAKS=full`
     // and `ASAP_STAGE3_PATH_READS=off` turn a speed-up off;
-    // `ASAP_STAGE3_ROOT_LP=1` reports the LP bound;
+    // `ASAP_STAGE3_ROOT_LP=1` reports the LP bound (cost models 1 and 3);
     // `ASAP_STAGE3_SOLVER_LOG=1` prints the solver's log;
     // `ASAP_STAGE3_NODE_LIMIT=<n>` sets the default stop rule's node limit.
     // `ASAP_STAGE3_EXACT=1` sets the cost inputs' `latency_selection.exact_solve`.
@@ -356,7 +384,14 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
         .with_cost_inputs(&cost_inputs)
         .with_deployment_capabilities(&deployment_capabilities)
         .with_ignore_accuracy_guarantees(ignore_accuracy_guarantees);
-    let result = run_stages_until(roots.clone(), &entries, &data, models, run_until);
+    let result = run_stages_until(
+        roots.clone(),
+        &entries,
+        &data,
+        models,
+        search_space_pruning,
+        run_until,
+    );
     // The selected plan's cost, as `plan_installable` reports it.
     let plan_cost = result
         .as_ref()
@@ -453,6 +488,12 @@ fn run(args: Vec<String>) -> Result<(), Failure> {
         document["workload"]["data_workload"] =
             serde_json::to_value(&data).map_err(|e| e.to_string())?;
         document["search"] = json!("candidate-connections");
+        // Only when some rule is off, so documents of default runs (the
+        // goldens) keep their shape.
+        let rules_off = search_space_pruning.rules_off();
+        if !rules_off.is_empty() {
+            document["search_space_pruning_off"] = json!(rules_off);
+        }
         document["accuracy_guarantees"] = json!(if ignore_accuracy_guarantees {
             "ignored"
         } else {
@@ -1094,6 +1135,8 @@ fn selection_json(
         "milp_objective_mean_latency_ms": selection.selected_plan_mean_latency_ms,
         "milp_latency_ms_per_query": selection.selected_plan_latency_ms_per_query,
         "milp_root_lp_mean_latency_ms": selection.milp_root_lp_mean_latency_ms,
+        "milp_upper_bound_cost_per_second": selection.milp_upper_bound_cost_per_second,
+        "milp_lp_bound_cost_per_second": selection.milp_lp_bound_cost_per_second,
         "milp_optimality_gap": selection.optimality_gap,
         "executions_pruned_by_latency_bound": selection.executions_pruned_by_latency_bound,
     })

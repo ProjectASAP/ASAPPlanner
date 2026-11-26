@@ -12,6 +12,7 @@
 mod logical;
 mod physical;
 mod pruning;
+mod search_space_pruning;
 
 pub use logical::{
     listed_build_parameters, ranked_column_of_group, AggregateCoverage, AggregateDefinition,
@@ -30,3 +31,4 @@ pub use physical::{
 pub use pruning::{
     PruneCause, PruneReason, PrunedCandidate, PrunedLogicalCandidate, RootPruneReason,
 };
+pub use search_space_pruning::SearchSpacePruning;

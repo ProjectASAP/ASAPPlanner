@@ -10,6 +10,7 @@ use asap_stage1_pass1_per_computation_candidates::PerComputationCandidateError;
 use asap_types::ir::schema::series_identity::with_promql_series_identity;
 use asap_types::ir::schema::{DataType, Field, Schema};
 use asap_types::ir::QueryRoot;
+use asap_types::stages::SearchSpacePruning;
 use asap_types::workload::{DataWorkload, PlanningWorkload, QueryWorkloadEntry};
 use serde_json::Value;
 
@@ -112,7 +113,10 @@ pub fn run_planning_stages_over(
         entries,
         data,
         models,
-        PlanSearchSettings { inspect: true },
+        PlanSearchSettings {
+            inspect: true,
+            ..PlanSearchSettings::default()
+        },
     )
 }
 
@@ -128,16 +132,21 @@ pub fn run_search_over(
 }
 
 /// The stages over `roots` up to and including `until`, as the facade runs
-/// them (`run_planning_until`), each stage's output kept. A failure after
+/// them (`run_planning_until`), each stage's output kept, under the
+/// search-space pruning rules `search_space_pruning`. A failure after
 /// Pass 1 is reported in the run, as the facade does.
 pub fn run_stages_until(
     roots: Vec<QueryRoot>,
     entries: &[QueryWorkloadEntry],
     data: &DataWorkload,
     models: PlanningModels<'_>,
+    search_space_pruning: SearchSpacePruning,
     until: RunUntil,
 ) -> Result<PlanningStagesRun, PlanningStagesError> {
-    let settings = PlanSearchSettings { inspect: true };
+    let settings = PlanSearchSettings {
+        inspect: true,
+        search_space_pruning,
+    };
     run_until(roots, entries, data, models, settings, until)
 }
 

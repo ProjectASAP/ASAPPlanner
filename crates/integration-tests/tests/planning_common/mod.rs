@@ -170,6 +170,7 @@ fn pass2_of(
         &entries,
         &data,
         PlanningModels::builtin(),
+        Default::default(),
         RunUntil::Pass2,
     )
     .unwrap();

@@ -14,12 +14,12 @@ use asap_types::workload::PlanningWorkload;
 use serde_json::{json, Value};
 
 /// A file under the system temp directory, removed when dropped.
-struct TempFile(PathBuf);
+pub(super) struct TempFile(PathBuf);
 
 impl TempFile {
     /// A new file holding `contents`. Tests run as threads of one process,
     /// so the name needs a per-call counter.
-    fn new(contents: &str) -> Self {
+    pub(super) fn new(contents: &str) -> Self {
         static CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
         let call = CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let path = std::env::temp_dir().join(format!(
@@ -30,11 +30,11 @@ impl TempFile {
         Self(path)
     }
 
-    fn json(value: &Value) -> Self {
+    pub(super) fn json(value: &Value) -> Self {
         Self::new(&value.to_string())
     }
 
-    fn path(&self) -> &str {
+    pub(super) fn path(&self) -> &str {
         self.0.to_str().unwrap()
     }
 }

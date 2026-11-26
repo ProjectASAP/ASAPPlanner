@@ -582,6 +582,15 @@ pub(crate) struct SolvedSelection {
     /// `asap_cost::plan_cost` of the selected plan. `None` under cost model
     /// 3, whose objective is latency.
     pub(crate) milp_optimum_per_second: Option<f64>,
+    /// The greedy feasible plan's cost per second, less the request
+    /// overhead, under cost model 1 ([`dearer_than_a_feasible_plan`]): an
+    /// upper bound on the optimum; `None` without a feasible plan found
+    /// that way, and under cost model 3.
+    pub(crate) upper_bound_per_second: Option<f64>,
+    /// The LP relaxation's optimum, less the request overhead, under cost
+    /// model 1 when asked for: a lower bound on the optimum; `None`
+    /// otherwise.
+    pub(crate) lp_bound_per_second: Option<f64>,
     /// The MILP's variables and constraint rows.
     pub(crate) variable_count: usize,
     pub(crate) constraint_count: usize,
@@ -679,10 +688,21 @@ pub(super) fn objective_scale(largest: f64) -> f64 {
 pub(crate) fn solve_selection(
     inputs: &SelectionInputs<'_>,
 ) -> Result<SolvedSelection, SelectionMilpError> {
+    solve_selection_reporting_lp_bound(inputs, false)
+}
+
+/// [`solve_selection`], first solving the LP relaxation of the same model
+/// when `report_lp_bound` (`LatencySelectionChecks::report_root_lp_bound`),
+/// for [`SolvedSelection::lp_bound_per_second`].
+pub(crate) fn solve_selection_reporting_lp_bound(
+    inputs: &SelectionInputs<'_>,
+    report_lp_bound: bool,
+) -> Result<SolvedSelection, SelectionMilpError> {
     let started = Instant::now();
     let costs = inputs.costs;
     let rules = AccuracyRules::of(inputs);
-    let kept: Vec<bool> = dearer_than_a_feasible_plan(inputs, rules.as_ref())
+    let (upper_bound_per_second, dearer) = dearer_than_a_feasible_plan(inputs, rules.as_ref());
+    let kept: Vec<bool> = dearer
         .iter()
         .zip(dominated_by_lifetime_twin(inputs))
         .zip(&costs.per_execution)
@@ -790,6 +810,9 @@ pub(crate) fn solve_selection(
     model.set_option("output_flag", false);
     model.set_option("threads", 1);
     let construction_ms = started.elapsed().as_millis() as u64;
+    // The LP relaxation's optimum, unscaled, when asked for: solved after
+    // the MILP, on its model, so the measurement cannot change the plan.
+    let mut lp_bound_per_second = None;
     let selectable = inputs.selectable;
     let executions = selectable.executions();
     let mut solve_ms = 0;
@@ -845,6 +868,9 @@ pub(crate) fn solve_selection(
             .as_ref()
             .map(|rules| rules.selection_meets_targets(inputs, &selected_edges, &answering))
         else {
+            if report_lp_bound {
+                lp_bound_per_second = lp_relaxation_objective(solved.into()).map(|lp| lp / scale);
+            }
             break (selected, selected_edges, answering);
         };
         if solve_count == 2 {
@@ -887,12 +913,25 @@ pub(crate) fn solve_selection(
         retention_ms,
         cost_per_second_without_request_overhead,
         milp_optimum_per_second: Some(optimum_per_second),
+        upper_bound_per_second,
+        lp_bound_per_second,
         variable_count,
         constraint_count,
         construction_ms,
         solve_ms,
         solve_count,
     })
+}
+
+/// The LP relaxation's objective of `model` (scaled as the model is), a
+/// measurement: `None` when HiGHS fails or does not reach the optimum.
+/// The executions left out before the model was built are left out
+/// exactly ([`dearer_than_a_feasible_plan`], [`dominated_by_lifetime_twin`]),
+/// so it still bounds the MILP's optimum from below.
+fn lp_relaxation_objective(mut model: highs::Model) -> Option<f64> {
+    model.set_option("solve_relaxation", true);
+    let relaxed = model.try_solve().ok()?;
+    (relaxed.status() == highs::HighsModelStatus::Optimal).then(|| relaxed.objective_value())
 }
 
 /// The cost per second of a selection, less the request overhead every

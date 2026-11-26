@@ -48,7 +48,9 @@ use crate::cost::{execution_costs, execution_quantities, Quantity};
 use crate::milp::model::cluster::{
     solve_cluster_selection, ClusterInputs, ClusterSelectionError, FeasiblePlan,
 };
-use crate::milp::model::{solve_selection, SelectionInputs, SelectionMilpError};
+use crate::milp::model::{
+    solve_selection, solve_selection_reporting_lp_bound, SelectionInputs, SelectionMilpError,
+};
 use crate::plan::plan_of;
 use crate::report::{accepted_accuracy, excluded_by_deployment, infeasible};
 use crate::selectable::{Execution, QueryId, SelectableExecutions};
@@ -214,7 +216,11 @@ pub fn select_plan(
         optimality_gap,
     ) = match cluster_limits {
         None => (
-            solve_selection(&selection_inputs).map_err(milp_error)?,
+            solve_selection_reporting_lp_bound(
+                &selection_inputs,
+                cost_inputs.latency_selection_checks.report_root_lp_bound,
+            )
+            .map_err(milp_error)?,
             None,
             None,
             0,
@@ -395,6 +401,12 @@ pub fn select_plan(
         selected_plan_mean_latency_ms: mean_latency_ms,
         selected_plan_latency_ms_per_query: latency_ms_per_query,
         milp_root_lp_mean_latency_ms: root_lp,
+        milp_upper_bound_cost_per_second: solved
+            .upper_bound_per_second
+            .map(|bound| bound + request_overhead_cost_per_second),
+        milp_lp_bound_cost_per_second: solved
+            .lp_bound_per_second
+            .map(|bound| bound + request_overhead_cost_per_second),
         optimality_gap,
         executions_pruned_by_latency_bound: pruned_by_latency_bound,
     };

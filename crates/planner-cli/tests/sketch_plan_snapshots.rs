@@ -169,6 +169,42 @@ fn sketch_plans_match_snapshots() {
     );
 }
 
+/// The search-space pruning rules keep every optimum: each manifest
+/// workload, planned with every rule on (the default) and with every rule
+/// off (`--search-space-pruning all=off`), selects plans of the same cost
+/// (to 1e-9 relative), or fails the same way.
+#[test]
+#[ignore = "runs the release planner twice over the sketch workloads: see the module docs"]
+fn pruning_keeps_every_snapshot_optimum() {
+    let _serial = super::SERIAL
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let scratch = std::env::temp_dir().join(format!("pruning_equality_{}", std::process::id()));
+    std::fs::create_dir_all(&scratch).unwrap();
+    let dir = snapshots_dir();
+    let manifest: Value =
+        serde_json::from_str(&std::fs::read_to_string(dir.join("manifest.json")).unwrap()).unwrap();
+    let cost =
+        |document: &Value| document["stage3_plan_selection"]["cost"]["cost_per_second"].as_f64();
+    let mut failures = Vec::new();
+    for entry in manifest["workloads"].as_array().unwrap() {
+        let id = entry["id"].as_str().unwrap();
+        let args = arguments(&manifest, entry);
+        let pruned = asap_planner(&args, &scratch);
+        let mut off = args.clone();
+        off.extend(["--search-space-pruning".to_owned(), "all=off".to_owned()]);
+        let unpruned = asap_planner(&off, &scratch);
+        let error = |document: &Value| document["stage3_plan_selection"]["error"].clone();
+        match (cost(&pruned), cost(&unpruned)) {
+            (Some(a), Some(b)) if (a - b).abs() <= 1e-9 * a.abs().max(b.abs()) => {}
+            (None, None) if error(&pruned) == error(&unpruned) => {}
+            (a, b) => failures.push(format!("{id}: {a:?}/s with the rules, {b:?}/s without")),
+        }
+    }
+    std::fs::remove_dir_all(&scratch).unwrap();
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
 /// Each manifest entry names a known deployment and an existing input, and
 /// builds its arguments.
 #[test]
