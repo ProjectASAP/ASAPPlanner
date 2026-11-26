@@ -1,31 +1,34 @@
 //! Search-space pruning rule 1, threshold θ only
-//! (`SearchSpacePruning::threshold_theta`): a state group lists every θ of
-//! its algorithm, but a reader needs only the least θ that meets its
-//! requirement, its threshold, and two readers sharing one state need
-//! only the least θ at least both thresholds. An edge from any other θ is
-//! cut, with [`RootPruneReason::AboveReaderThreshold`], and dead-candidate
+//! (`SearchSpacePruning::threshold_theta`): a state is listed at every θ of
+//! its algorithm, and the candidates that pass a state on (a merge, a
+//! chain, a `TimeRange` over states) carry its θ, but a θ another θ of the
+//! same shape does at least as well, more cheaply, is in no optimal plan.
+//!
+//! The candidates linked by edges between equal θs (a build and the merges,
+//! chains and ranges over it) form a θ set; its readers are the edges out
+//! of it into candidates without θ (readouts). In one set, θ `s` is left
+//! out when a different θ `t` of the same shape is no larger in every size
+//! field, meets every reader `s` meets, and has a candidate in every place
+//! `s` has one (same group, same operator): a plan reading `s` reads `t` in
+//! its place, at no more cost, whatever readers share it. Its edges are
+//! cut with [`RootPruneReason::AboveReaderThreshold`], and dead-candidate
 //! elimination removes the candidates left without a consumer.
 //!
-//! Example: `topk(5, sum by (host) (m))` reads a `CmsWithHeap` state
-//! listed at 240 θs (width × depth × heap size). Of the θs whose edge
-//! meets the readout's requirement, only the least ones (no other meeting
-//! θ is no larger in every field) keep their edges; the other builds are
-//! dead.
+//! Example: `topk(5, sum by (host) (m))` reads a `CmsWithHeap` state listed
+//! at 240 θs (width × depth × heap size). Every θ that a smaller θ meeting
+//! the same readers matches in every place is left out.
 //!
-//! Exactness: a θ no smaller than another in every size field (a larger
-//! KLL `k`, a wider or deeper Count-Min, a smaller DDSketch α) meets every
-//! requirement the smaller one meets and costs at least as much, so a plan
-//! reading a larger θ through a cut edge reads the threshold θ in its
-//! place at no more cost; a θ two readers share is the least listed θ at
-//! least both their thresholds, kept. θs of different shapes do not
-//! compare and are each kept.
-//!
-//! Sketches that keep up to `k` items (KLL, KMV, Hydra over KLL) are left
-//! as they are: once `k` reaches the values a state holds they keep every
-//! value and stop compacting, so a larger `k` can cost less (a stored KLL
-//! window at k = 1,404 costs less than one at k = 547 in the
-//! `deployment_exclusions` example), and the least θ meeting a reader is
-//! not the cheapest.
+//! Exactness rests on a larger θ never costing less (the cost model's size
+//! and operation counts grow with every size field: counters, depth, heap
+//! rows, DDSketch buckets, HLL registers, UnivMon layers; a measured
+//! operation-cost table must be monotone the same way) and never meeting
+//! fewer requirements. Sketches that keep up to `k` items (KLL, KMV, Hydra
+//! over KLL) are left as they are: once `k` reaches the values a state
+//! holds they keep every value and stop compacting, so a larger `k` can
+//! cost less (a stored KLL window at k = 1,404 costs less than one at
+//! k = 547 in the `deployment_exclusions` example). A set one of whose θs a
+//! deployment exclusion's θ range matches is left as it is too: Stage 2 may
+//! prune the smaller θ.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -36,125 +39,171 @@ use asap_types::summary_type::{HydraParams, SketchParams};
 use crate::dead_candidates::eliminate_dead_candidates;
 use crate::edges::CandidateEdge;
 
-/// Cuts every satisfied edge from a θ above the reader's threshold
+/// Cuts every satisfied edge out of a θ another θ of its set does as well
 /// (module doc), repeating with dead-candidate elimination until nothing
-/// changes: a threshold is the least θ among the producers still alive.
-/// A group one of whose θs a deployment exclusion's θ range matches
-/// (`CandidateExclusion::sketch_parameter_range`) is left as it is:
-/// Stage 2 may prune its threshold and the plan then needs a larger θ.
-/// Returns how many edges were cut.
-///
-/// Example: with `{"sketch_parameter_range": {"kll_k": {"at_most": 1403}}}`
-/// a KLL group keeps k = 1404 and 2863 for Stage 2 to choose from.
-pub(crate) fn cut_edges_above_thresholds(
+/// changes.
+pub(crate) fn cut_edges_of_dominated_thetas(
     memo: &Memo,
     edges: &mut [CandidateEdge],
     exclusions: &[DeploymentExclusion],
-) -> usize {
+) {
     let ranges: Vec<_> = exclusions
         .iter()
         .filter_map(|exclusion| exclusion.exclusion.sketch_parameter_range)
         .collect();
-    let excluded_by_range = |group: MemoGroupId| {
-        memo.groups()[group.0 as usize]
-            .candidates
-            .iter()
-            .filter_map(|candidate| candidate.logical_properties.parameters())
-            .any(|theta| ranges.iter().any(|range| range.contains(theta)))
+    let theta = |candidate: CandidateForMemoGroupId| {
+        memo.candidate(candidate).logical_properties.parameters()
     };
-    let mut cut = 0;
     loop {
         let dead: BTreeSet<CandidateForMemoGroupId> = eliminate_dead_candidates(memo, edges)
             .into_iter()
             .map(|pruned| pruned.candidate)
             .collect();
         let live = |candidate: &CandidateForMemoGroupId| !dead.contains(candidate);
-        let theta = |candidate: CandidateForMemoGroupId| {
-            memo.candidate(candidate).logical_properties.parameters()
+        let usable = |edge: &CandidateEdge| {
+            edge.satisfies.is_ok() && live(&edge.producer) && live(&edge.consumer)
         };
-        // Per live reader input, its satisfied edges from live θ producers.
-        let mut readers: BTreeMap<(CandidateForMemoGroupId, usize), Vec<usize>> = BTreeMap::new();
-        for (position, edge) in edges.iter().enumerate() {
-            if edge.satisfies.is_ok()
-                && live(&edge.consumer)
-                && live(&edge.producer)
-                && theta(edge.producer).is_some_and(costs_grow_with_every_field)
-                && !excluded_by_range(edge.producer.group)
-            {
-                readers
-                    .entry((edge.consumer, edge.input))
-                    .or_default()
-                    .push(position);
-            }
-        }
-        // Per group, each reader's thresholds, then the least θs at least
-        // two thresholds of one shape (two readers sharing the state).
-        let mut needed: BTreeMap<MemoGroupId, Vec<SizeVector>> = BTreeMap::new();
-        for positions in readers.values() {
-            let sizes: Vec<SizeVector> = positions
-                .iter()
-                .filter_map(|&p| theta(edges[p].producer).map(size_vector))
-                .collect();
-            let group = edges[positions[0]].producer.group;
-            let thresholds = needed.entry(group).or_default();
-            for threshold in least(&sizes) {
-                if !thresholds.contains(&threshold) {
-                    thresholds.push(threshold);
+        // The θ sets: live θ candidates linked by edges between equal θs.
+        let mut sets = UnionFind::default();
+        for edge in edges.iter().filter(|edge| usable(edge)) {
+            if let (Some(produced), Some(consumed)) = (theta(edge.producer), theta(edge.consumer)) {
+                if produced == consumed {
+                    sets.union(edge.producer, edge.consumer);
                 }
             }
         }
-        for (group, thresholds) in needed.iter_mut() {
-            let present: Vec<SizeVector> = memo.groups()[group.0 as usize]
-                .candidates
+        // Per set and θ: the places it has candidates in (group, operator)
+        // and the readers it meets (consumer inputs without θ).
+        let mut values: BTreeMap<CandidateForMemoGroupId, Vec<ThetaInSet>> = BTreeMap::new();
+        let position_of = |values: &mut BTreeMap<CandidateForMemoGroupId, Vec<ThetaInSet>>,
+                           set: CandidateForMemoGroupId,
+                           theta: &SketchParams| {
+            let entries = values.entry(set).or_default();
+            match entries.iter().position(|entry| entry.theta == *theta) {
+                Some(position) => position,
+                None => {
+                    entries.push(ThetaInSet::new(theta.clone()));
+                    entries.len() - 1
+                }
+            }
+        };
+        for (group, memo_group) in memo.groups().iter().enumerate() {
+            for (index_in_group, candidate) in memo_group.candidates.iter().enumerate() {
+                let id = CandidateForMemoGroupId {
+                    group: MemoGroupId(group as u32),
+                    index_in_group,
+                };
+                let Some(parameters) = candidate.logical_properties.parameters() else {
+                    continue;
+                };
+                if !live(&id) {
+                    continue;
+                }
+                let set = sets.find(id);
+                let position = position_of(&mut values, set, parameters);
+                let place = (id.group, format!("{:?}", candidate.expression.operator));
+                values.get_mut(&set).expect("a set")[position]
+                    .places
+                    .insert(place);
+            }
+        }
+        for edge in edges.iter().filter(|edge| usable(edge)) {
+            if let (Some(produced), None) = (theta(edge.producer), theta(edge.consumer)) {
+                let set = sets.find(edge.producer);
+                let position = position_of(&mut values, set, produced);
+                values.get_mut(&set).expect("a set")[position]
+                    .readers
+                    .insert((edge.consumer, edge.input));
+            }
+        }
+        // The θs another θ of their set does as well.
+        let mut dominated: BTreeMap<CandidateForMemoGroupId, Vec<bool>> = BTreeMap::new();
+        for (set, entries) in &values {
+            let applies = entries.iter().all(|entry| {
+                costs_grow_with_every_field(&entry.theta)
+                    && !ranges.iter().any(|range| range.contains(&entry.theta))
+            });
+            let flags = entries
                 .iter()
-                .enumerate()
-                .filter(|&(index, _)| {
-                    live(&CandidateForMemoGroupId {
-                        group: *group,
-                        index_in_group: index,
-                    })
+                .map(|s| {
+                    applies
+                        && entries.iter().any(|t| {
+                            t.theta != s.theta
+                                && size_vector(&t.theta).no_larger_than(&size_vector(&s.theta))
+                                && t.readers.is_superset(&s.readers)
+                                && t.places.is_superset(&s.places)
+                        })
                 })
-                .filter_map(|(_, candidate)| candidate.logical_properties.parameters())
-                .map(size_vector)
                 .collect();
-            let mut covers = Vec::new();
-            for (i, a) in thresholds.iter().enumerate() {
-                for b in &thresholds[i + 1..] {
-                    let Some(join) = a.join(b) else {
-                        continue;
-                    };
-                    let covering: Vec<SizeVector> = present
-                        .iter()
-                        .filter(|size| join.no_larger_than(size))
-                        .cloned()
-                        .collect();
-                    covers.extend(least(&covering));
-                }
-            }
-            for cover in covers {
-                if !thresholds.contains(&cover) {
-                    thresholds.push(cover);
-                }
-            }
+            dominated.insert(*set, flags);
         }
-        let mut cut_now = 0;
-        for positions in readers.values() {
-            for &position in positions {
-                let producer = edges[position].producer;
-                let size = size_vector(theta(producer).expect("a θ producer"));
-                if !needed[&producer.group].contains(&size) {
-                    edges[position].satisfies = Err(RootPruneReason::AboveReaderThreshold {
-                        consumer: edges[position].consumer,
-                        input: edges[position].input,
-                    });
-                    cut_now += 1;
-                }
+        let mut cut = 0;
+        for edge in edges.iter_mut() {
+            if !(edge.satisfies.is_ok() && live(&edge.producer) && live(&edge.consumer)) {
+                continue;
+            }
+            let Some(produced) = theta(edge.producer) else {
+                continue;
+            };
+            let set = sets.find(edge.producer);
+            let position = values[&set]
+                .iter()
+                .position(|entry| entry.theta == *produced)
+                .expect("a θ of the set");
+            if dominated[&set][position] {
+                edge.satisfies = Err(RootPruneReason::AboveReaderThreshold {
+                    consumer: edge.consumer,
+                    input: edge.input,
+                });
+                cut += 1;
             }
         }
-        if cut_now == 0 {
-            return cut;
+        if cut == 0 {
+            return;
         }
-        cut += cut_now;
+    }
+}
+
+/// One θ of a θ set: the places it has candidates in and the readers it
+/// meets.
+struct ThetaInSet {
+    theta: SketchParams,
+    places: BTreeSet<(MemoGroupId, String)>,
+    readers: BTreeSet<(CandidateForMemoGroupId, usize)>,
+}
+
+impl ThetaInSet {
+    fn new(theta: SketchParams) -> Self {
+        Self {
+            theta,
+            places: BTreeSet::new(),
+            readers: BTreeSet::new(),
+        }
+    }
+}
+
+/// Disjoint sets of candidates, each named by a representative.
+#[derive(Default)]
+struct UnionFind {
+    parent: BTreeMap<CandidateForMemoGroupId, CandidateForMemoGroupId>,
+}
+
+impl UnionFind {
+    fn find(&mut self, candidate: CandidateForMemoGroupId) -> CandidateForMemoGroupId {
+        let parent = *self.parent.entry(candidate).or_insert(candidate);
+        if parent == candidate {
+            return candidate;
+        }
+        let root = self.find(parent);
+        self.parent.insert(candidate, root);
+        root
+    }
+
+    fn union(&mut self, a: CandidateForMemoGroupId, b: CandidateForMemoGroupId) {
+        let (a, b) = (self.find(a), self.find(b));
+        if a != b {
+            self.parent.insert(b, a);
+        }
     }
 }
 
@@ -169,112 +218,86 @@ fn costs_grow_with_every_field(theta: &SketchParams) -> bool {
     )
 }
 
-/// A θ's shape and its size fields, each oriented so larger is larger
-/// (a DDSketch's `1 / α`). Two θs compare only within one shape.
+/// A θ's shape and its size fields, each oriented so larger is larger (a
+/// DDSketch's `1 / α`). Two θs compare only within one shape.
 #[derive(Debug, Clone, PartialEq)]
 struct SizeVector {
-    shape: u8,
+    shape: std::mem::Discriminant<SketchParams>,
+    hydra: Option<std::mem::Discriminant<HydraParams>>,
     sizes: Vec<f64>,
 }
 
 impl SizeVector {
     /// Whether every size of `self` is at most `other`'s, in one shape.
     fn no_larger_than(&self, other: &SizeVector) -> bool {
-        self.shape == other.shape && self.sizes.iter().zip(&other.sizes).all(|(a, b)| a <= b)
+        self.shape == other.shape
+            && self.hydra == other.hydra
+            && self.sizes.iter().zip(&other.sizes).all(|(a, b)| a <= b)
     }
-
-    /// The componentwise largest of both, in one shape; `None` across
-    /// shapes.
-    fn join(&self, other: &SizeVector) -> Option<SizeVector> {
-        (self.shape == other.shape).then(|| SizeVector {
-            shape: self.shape,
-            sizes: self
-                .sizes
-                .iter()
-                .zip(&other.sizes)
-                .map(|(a, b)| a.max(*b))
-                .collect(),
-        })
-    }
-}
-
-/// The minimal elements of `sizes`: no other one of its shape is no
-/// larger and different.
-fn least(sizes: &[SizeVector]) -> Vec<SizeVector> {
-    let mut least: Vec<SizeVector> = Vec::new();
-    for size in sizes {
-        let dominated = sizes
-            .iter()
-            .any(|other| other != size && other.no_larger_than(size));
-        if !dominated && !least.contains(size) {
-            least.push(size.clone());
-        }
-    }
-    least
 }
 
 fn size_vector(theta: &SketchParams) -> SizeVector {
-    let v = |shape: u8, sizes: &[f64]| SizeVector {
-        shape,
-        sizes: sizes.to_vec(),
-    };
     let f = f64::from;
-    match *theta {
+    let (hydra, sizes) = match *theta {
         SketchParams::UnivMon {
             heap_size,
             sketch_rows,
             sketch_cols,
             layers,
-        } => v(
-            0,
-            &[
+        } => (
+            None,
+            vec![
                 f(heap_size),
                 f(sketch_rows),
                 f(sketch_cols),
                 f64::from(layers),
             ],
         ),
-        SketchParams::Kll { k } => v(1, &[f(k)]),
-        SketchParams::Cms { width, depth } => v(2, &[f(width), f(depth)]),
-        SketchParams::Hll { precision } => v(3, &[f64::from(precision)]),
-        SketchParams::DDSketch { alpha } => v(4, &[1.0 / alpha.max(f64::MIN_POSITIVE)]),
+        SketchParams::Kll { k } | SketchParams::Kmv { k } => (None, vec![f(k)]),
+        SketchParams::Cms { width, depth } | SketchParams::CountSketch { width, depth } => {
+            (None, vec![f(width), f(depth)])
+        }
+        SketchParams::Hll { precision } => (None, vec![f64::from(precision)]),
+        SketchParams::DDSketch { alpha } => (None, vec![1.0 / alpha.max(f64::MIN_POSITIVE)]),
         SketchParams::CmsWithHeap {
             width,
             depth,
             heap_size,
-        } => v(5, &[f(width), f(depth), f(heap_size)]),
-        SketchParams::Kmv { k } => v(6, &[f(k)]),
-        SketchParams::CountSketch { width, depth } => v(7, &[f(width), f(depth)]),
-        SketchParams::CountSketchWithHeap {
+        }
+        | SketchParams::CountSketchWithHeap {
             width,
             depth,
             heap_size,
-        } => v(8, &[f(width), f(depth), f(heap_size)]),
-        SketchParams::Hydra(HydraParams::HydraKll { k, shared_buckets }) => {
-            v(9, &[f(k), f(shared_buckets)])
+        } => (None, vec![f(width), f(depth), f(heap_size)]),
+        SketchParams::Hydra(ref hydra) => {
+            let sizes = match *hydra {
+                HydraParams::HydraKll { k, shared_buckets } => vec![f(k), f(shared_buckets)],
+                HydraParams::HydraCms {
+                    width,
+                    depth,
+                    shared_rows,
+                    shared_columns,
+                }
+                | HydraParams::HydraCountSketch {
+                    width,
+                    depth,
+                    shared_rows,
+                    shared_columns,
+                } => vec![f(width), f(depth), f(shared_rows), f(shared_columns)],
+            };
+            (Some(std::mem::discriminant(hydra)), sizes)
         }
-        SketchParams::Hydra(HydraParams::HydraCms {
-            width,
-            depth,
-            shared_rows,
-            shared_columns,
-        }) => v(10, &[f(width), f(depth), f(shared_rows), f(shared_columns)]),
-        SketchParams::Hydra(HydraParams::HydraCountSketch {
-            width,
-            depth,
-            shared_rows,
-            shared_columns,
-        }) => v(11, &[f(width), f(depth), f(shared_rows), f(shared_columns)]),
+    };
+    SizeVector {
+        shape: std::mem::discriminant(theta),
+        hydra,
+        sizes,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn kll(k: u32) -> SizeVector {
-        size_vector(&SketchParams::Kll { k })
-    }
 
     fn heap(width: u32, depth: u32, heap_size: u32) -> SizeVector {
         size_vector(&SketchParams::CmsWithHeap {
@@ -284,22 +307,26 @@ mod tests {
         })
     }
 
-    /// One-parameter θs: the least is the smallest; a smaller DDSketch α
-    /// is the larger state.
+    /// A smaller DDSketch α is the larger state; θs of two shapes do not
+    /// compare.
     #[test]
-    fn the_least_one_parameter_theta_is_the_smallest() {
-        assert_eq!(least(&[kll(547), kll(132), kll(1404)]), vec![kll(132)]);
+    fn sizes_compare_within_one_shape_only() {
         let alpha = |alpha| size_vector(&SketchParams::DDSketch { alpha });
-        assert_eq!(least(&[alpha(0.01), alpha(0.05)]), vec![alpha(0.05)]);
+        assert!(alpha(0.05).no_larger_than(&alpha(0.01)));
+        assert!(!alpha(0.01).no_larger_than(&alpha(0.05)));
+        let count_sketch = size_vector(&SketchParams::CountSketchWithHeap {
+            width: 55,
+            depth: 7,
+            heap_size: 10,
+        });
+        assert!(!heap(55, 7, 10).no_larger_than(&count_sketch));
     }
 
-    /// Multi-parameter θs that do not compare are each least; the join of
-    /// two is their componentwise largest, and θs of two shapes have none.
+    /// Multi-field θs that do not compare dominate neither way.
     #[test]
-    fn incomparable_thetas_are_each_least_and_join_componentwise() {
+    fn incomparable_thetas_dominate_neither_way() {
         let (a, b) = (heap(55, 7, 10), heap(28, 12, 10));
-        assert_eq!(least(&[a.clone(), b.clone()]), vec![a.clone(), b.clone()]);
-        assert_eq!(a.join(&b), Some(heap(55, 12, 10)));
-        assert_eq!(a.join(&kll(132)), None);
+        assert!(!a.no_larger_than(&b) && !b.no_larger_than(&a));
+        assert!(heap(28, 7, 10).no_larger_than(&a));
     }
 }

@@ -42,7 +42,7 @@ use edges::candidate_edges;
 use evaluation_grids::{evaluation_grids, evaluation_period_ms_per_query};
 use readout_requirements::set_readout_requirements;
 use rules::{chains, rollup, topk};
-use threshold_theta::cut_edges_above_thresholds;
+use threshold_theta::cut_edges_of_dominated_thetas;
 
 /// Why Pass 2 failed on a memo: a rule built an expression the node rules
 /// reject (a bug in the rule), or the memo's reads form a cycle.
@@ -74,10 +74,9 @@ pub enum Pass2RuleError {
 ///    groups each query may read only exactly
 ///    (`ErrorMetricsOfMemo::exact_only_groups_of_query`).
 ///
-/// Under `search_space_pruning.threshold_theta`, steps 4 and 5 first cut
-/// each edge from a θ above its reader's threshold
-/// (`threshold_theta`'s module doc), so dead-candidate elimination removes
-/// the θs no reader needs before chain groups are built for them.
+/// Under `search_space_pruning.threshold_theta`, step 5 first cuts each
+/// edge out of a θ another θ of its set does as well (`threshold_theta`'s
+/// module doc), so the final dead-candidate elimination removes them.
 ///
 /// Step 3 also records the readout values each query's δ is split over,
 /// whose bound Stage 3 checks
@@ -109,16 +108,13 @@ pub fn generate_logical_asap_memo_candidates(
     };
     let evaluation_period_ms = evaluation_period_ms_per_query(&memo, entries);
     let evaluation_grids_before_chains = evaluation_grids(&evaluation_period_ms);
-    let mut edges_before_chains = candidate_edges(
+    let edges_before_chains = candidate_edges(
         &memo,
         &ErrorMetricsOfMemo::of(&memo, &order),
         &evaluation_grids_before_chains,
         &readout_requirements.readouts_without_per_value_failure_probability,
         evidence,
     );
-    if search_space_pruning.threshold_theta {
-        cut_edges_above_thresholds(&memo, &mut edges_before_chains, exclusions);
-    }
     let before_chains = eliminate_dead_candidates(&memo, &edges_before_chains);
     chains::add_chain_groups(
         &mut memo,
@@ -139,7 +135,7 @@ pub fn generate_logical_asap_memo_candidates(
         evidence,
     );
     if search_space_pruning.threshold_theta {
-        cut_edges_above_thresholds(&memo, &mut candidate_edges, exclusions);
+        cut_edges_of_dominated_thetas(&memo, &mut candidate_edges, exclusions);
     }
     let pruned = eliminate_dead_candidates(&memo, &candidate_edges);
     let dead = candidates_of(&pruned);

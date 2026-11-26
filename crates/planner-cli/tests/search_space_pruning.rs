@@ -157,174 +157,6 @@ fn live_candidates(document: &Value) -> BTreeMap<CandidateKey, &Value> {
         .collect()
 }
 
-/// θ's family (`Kll`, `CmsWithHeap`, ...) and its fields.
-fn theta_family(theta: &Value) -> (&str, &Value) {
-    let (family, fields) = theta.as_object().unwrap().iter().next().unwrap();
-    (family.as_str(), fields)
-}
-
-/// Whether θ `a` is no larger than θ `b`: the same family and every
-/// numeric field no larger (`alpha` no smaller: a smaller α is a larger
-/// DDSketch), other fields equal.
-fn theta_no_larger(a: &Value, b: &Value) -> bool {
-    let ((fa, va), (fb, vb)) = (theta_family(a), theta_family(b));
-    if fa != fb {
-        return false;
-    }
-    let Some(va) = va.as_object() else {
-        return va == vb;
-    };
-    va.iter()
-        .all(|(field, x)| match (x.as_f64(), vb[field].as_f64()) {
-            (Some(x), Some(y)) if field.contains("alpha") => x >= y,
-            (Some(x), Some(y)) => x <= y,
-            _ => *x == vb[field],
-        })
-}
-
-/// The componentwise least θ no smaller than both `a` and `b` (one
-/// family).
-fn theta_join(a: &Value, b: &Value) -> Value {
-    let ((family, va), (_, vb)) = (theta_family(a), theta_family(b));
-    let Some(va) = va.as_object() else {
-        return a.clone();
-    };
-    let joined: serde_json::Map<String, Value> = va
-        .iter()
-        .map(|(field, x)| {
-            let value = match (x.as_f64(), vb[field].as_f64()) {
-                (Some(x), Some(y)) if field.contains("alpha") => json!(x.min(y)),
-                (Some(x), Some(y)) if x >= y => x_value(x, &va[field]),
-                (Some(_), Some(y)) => x_value(y, &vb[field]),
-                _ => x.clone(),
-            };
-            (field.clone(), value)
-        })
-        .collect();
-    json!({ family: joined })
-}
-
-/// `value` with `like`'s JSON number kind.
-fn x_value(value: f64, like: &Value) -> Value {
-    if like.is_u64() {
-        json!(value as u64)
-    } else {
-        json!(value)
-    }
-}
-
-/// The minimal θs of `thetas` (no other one of the same family is no
-/// larger and different).
-fn minimal_thetas(thetas: &[&Value]) -> Vec<Value> {
-    thetas
-        .iter()
-        .filter(|a| !thetas.iter().any(|b| b != *a && theta_no_larger(b, a)))
-        .map(|a| (*a).clone())
-        .collect()
-}
-
-/// Per θ-carrying group, the θs some optimal plan may need: per live
-/// reader input, the minimal θs among the live producers whose edge
-/// satisfies it (its thresholds), and per two thresholds of one family,
-/// the minimal live θs no smaller than their join (two readers sharing
-/// one state).
-fn needed_thetas(document: &Value) -> BTreeMap<u64, Vec<Value>> {
-    let live = live_candidates(document);
-    let mut needed: BTreeMap<u64, Vec<Value>> = BTreeMap::new();
-    for candidate in live.values() {
-        for input in candidate["inputs"].as_array().into_iter().flatten() {
-            let group = input["group"].as_u64().unwrap();
-            let satisfying: Vec<&Value> = input["edges"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .filter(|edge| edge["satisfies_logical_requirement"] == json!(true))
-                .filter_map(|edge| live.get(&(group, edge["producer"].as_u64().unwrap())))
-                .map(|producer| &producer["parameters"])
-                .filter(|theta| !theta.is_null() && rule1_applies(theta))
-                .collect();
-            let entry = needed.entry(group).or_default();
-            for theta in minimal_thetas(&satisfying) {
-                if !entry.contains(&theta) {
-                    entry.push(theta);
-                }
-            }
-        }
-    }
-    for (group, thresholds) in needed.iter_mut() {
-        let present: Vec<&Value> = live
-            .iter()
-            .filter(|((g, _), _)| g == group)
-            .map(|(_, candidate)| &candidate["parameters"])
-            .filter(|theta| !theta.is_null())
-            .collect();
-        let mut joins = Vec::new();
-        for (i, a) in thresholds.iter().enumerate() {
-            for b in &thresholds[i + 1..] {
-                if theta_family(a).0 != theta_family(b).0 {
-                    continue;
-                }
-                let join = theta_join(a, b);
-                let covering: Vec<&Value> = present
-                    .iter()
-                    .copied()
-                    .filter(|theta| theta_no_larger(&join, theta))
-                    .collect();
-                joins.extend(minimal_thetas(&covering));
-            }
-        }
-        for theta in joins {
-            if !thresholds.contains(&theta) {
-                thresholds.push(theta);
-            }
-        }
-    }
-    needed
-}
-
-/// Whether rule 1 applies to `theta`'s shape: not to the sketches that keep
-/// up to `k` items (KLL, KMV, Hydra over KLL), for which a larger `k` can
-/// cost less.
-fn rule1_applies(theta: &Value) -> bool {
-    let (family, fields) = theta_family(theta);
-    !matches!(family, "Kll" | "Kmv") && !(family == "Hydra" && fields.get("HydraKll").is_some())
-}
-
-/// The live θ candidates no reader needs ([`needed_thetas`]): group label,
-/// index and θ.
-fn unneeded_thetas(document: &Value) -> Vec<String> {
-    let needed = needed_thetas(document);
-    let labels: BTreeMap<u64, &str> = pass2_groups(document)
-        .iter()
-        .map(|group| {
-            (
-                group["id"].as_u64().unwrap(),
-                group["label"].as_str().unwrap(),
-            )
-        })
-        .collect();
-    live_candidates(document)
-        .iter()
-        .filter(|(_, candidate)| {
-            !candidate["parameters"].is_null() && rule1_applies(&candidate["parameters"])
-        })
-        .filter(|((group, _), candidate)| {
-            !needed
-                .get(group)
-                .is_some_and(|thetas| thetas.contains(&candidate["parameters"]))
-                // A θ group no live candidate reads (a query output) keeps
-                // every θ.
-                && needed.contains_key(group)
-        })
-        .map(|((group, index), candidate)| {
-            format!(
-                "G{group}[{index}] {} θ={}",
-                labels[group], candidate["parameters"]
-            )
-        })
-        .collect()
-}
-
 /// The number of live θ candidates.
 fn live_theta_count(document: &Value) -> usize {
     live_candidates(document)
@@ -438,14 +270,26 @@ fn stage3_reports_the_greedy_and_lp_bounds() {
 
 // Rule 1: threshold θ only (Pass 2).
 
+/// Plans `workload` with rule 1 on and off: the rule leaves out θ
+/// candidates, and the plans cost the same.
+fn assert_rule1_keeps_the_optimum(workload: &Value) {
+    let pruned = plan(workload, &raw_retained(), &[]);
+    let unpruned = plan(workload, &raw_retained(), &["threshold_theta"]);
+    assert!(
+        live_theta_count(&pruned) < live_theta_count(&unpruned),
+        "the rule leaves θ candidates out: {} with it, {} without",
+        live_theta_count(&pruned),
+        live_theta_count(&unpruned)
+    );
+    assert_same_cost(&pruned, &unpruned, "threshold_theta");
+}
+
 /// `quantile_over_time(0.99, m[5m])` every 60 s at relative 0.05 over 100
-/// series, raw data retained: every DDSketch θ left is the least that
-/// meets the readout's requirement (KLL keeps every k, see
-/// [`rule1_applies`]), and the plan costs what it costs with every listed
-/// θ.
+/// series: the DDSketch θs a larger α meets as well are left out (KLL keeps
+/// every k: a larger k can cost less), at the same cost.
 #[test]
-fn rule1_every_theta_left_is_a_reader_s_threshold() {
-    let workload = promql(
+fn rule1_one_quantile_keeps_the_optimum() {
+    assert_rule1_keeps_the_optimum(&promql(
         vec![repeating(
             "quantile_over_time(0.99, m[5m])",
             60_000,
@@ -454,62 +298,54 @@ fn rule1_every_theta_left_is_a_reader_s_threshold() {
         )],
         100,
         1_000,
-    );
-    let pruned = plan(&workload, &raw_retained(), &[]);
-    assert_eq!(unneeded_thetas(&pruned), Vec::<String>::new());
-    let unpruned = plan(&workload, &raw_retained(), &["threshold_theta"]);
-    assert!(
-        live_theta_count(&pruned) < live_theta_count(&unpruned),
-        "the rule removes θ candidates: {} of {}",
-        live_theta_count(&pruned),
-        live_theta_count(&unpruned)
-    );
-    assert!(
-        !unneeded_thetas(&unpruned).is_empty(),
-        "the example lists θs above every threshold"
-    );
-    assert_same_cost(&pruned, &unpruned, "threshold_theta");
+    ));
 }
 
 /// The review's strict/loose pair: `quantile_over_time(0.99, m[1h])` at
 /// relative 0.05 every 15 s and at 0.005 every 60 s, 10,000 series sampled
-/// every 100 ms. Each reader keeps its own threshold, and a state both read
-/// keeps the stricter one (the join of one-parameter θs is the larger).
+/// every 100 ms: the two readers share chains whose θ must meet both.
 #[test]
-fn rule1_two_readers_keep_both_thresholds() {
-    let workload = promql(
+fn rule1_two_readers_of_one_chain_keep_the_optimum() {
+    assert_rule1_keeps_the_optimum(&promql(
         vec![
             repeating("quantile_over_time(0.99, m[1h])", 15_000, 0, 0.05),
             repeating("quantile_over_time(0.99, m[1h])", 60_000, 0, 0.005),
         ],
         10_000,
         100,
-    );
-    let pruned = plan(&workload, &raw_retained(), &[]);
-    assert_eq!(unneeded_thetas(&pruned), Vec::<String>::new());
-    let unpruned = plan(&workload, &raw_retained(), &["threshold_theta"]);
-    assert_same_cost(&pruned, &unpruned, "threshold_theta");
+    ));
 }
 
-/// Two top-k queries over one `sum by (host)`: k = 5 at relative 0.05 and
-/// k = 10 at 0.01, 1,000 series. A CMS-with-heap state both read needs at
-/// least the larger heap and the wider sketch, a θ that may be neither
-/// reader's threshold: the least listed θ no smaller than the join of the
-/// two thresholds is kept.
+/// Three top-k readers of one `sum by (host)` with different k and errors
+/// (k = 5 at 0.05, k = 10 at 0.01, k = 20 at 0.02), 1,000 series: a
+/// `CmsWithHeap` state all three share needs a θ at least each one's in
+/// every field (width, depth, heap), which may be no reader's threshold.
 #[test]
-fn rule1_a_multi_parameter_state_two_readers_share_keeps_the_join() {
-    let workload = promql(
+fn rule1_three_readers_of_one_multi_parameter_state_keep_the_optimum() {
+    assert_rule1_keeps_the_optimum(&promql(
         vec![
             repeating("topk(5, sum by (host) (m))", 60_000, 0, 0.05),
             repeating("topk(10, sum by (host) (m))", 60_000, 0, 0.01),
+            repeating("topk(20, sum by (host) (m))", 60_000, 0, 0.02),
         ],
         1_000,
         1_000,
-    );
-    let pruned = plan(&workload, &raw_retained(), &[]);
-    assert_eq!(unneeded_thetas(&pruned), Vec::<String>::new());
-    let unpruned = plan(&workload, &raw_retained(), &["threshold_theta"]);
-    assert_same_cost(&pruned, &unpruned, "threshold_theta");
+    ));
+}
+
+/// Two quantiles over different ranges and errors of one metric
+/// (`[5m]` at 0.05, `[1h]` at 0.01, every 60 s): their states are built
+/// from shared chain windows, so a θ set spans several groups.
+#[test]
+fn rule1_two_ranges_sharing_windows_keep_the_optimum() {
+    assert_rule1_keeps_the_optimum(&promql(
+        vec![
+            repeating("quantile_over_time(0.99, m[5m])", 60_000, 0, 0.05),
+            repeating("quantile_over_time(0.9, m[1h])", 60_000, 0, 0.01),
+        ],
+        1_000,
+        1_000,
+    ));
 }
 
 // Rule 8a: identical candidates (fixed on main; a regression guard).
