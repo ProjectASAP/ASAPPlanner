@@ -98,6 +98,14 @@ impl PhysicalProperties {
     /// Consumers in one context that share a result read a `OneEvaluation`
     /// or a materialized producer; the consumers of one ingestion run share
     /// its rows.
+    /// Whether a result is stored at ingestion time, its windows anchored
+    /// at the epoch (IngestionTime, AcrossEvaluations): the only producer
+    /// an input read off its consumer's evaluation grid can read
+    /// (`Operator::reads_input_off_the_grid`).
+    pub fn is_stored_at_ingestion_time(&self) -> bool {
+        self.timing == ExecutionTiming::IngestionTime && self.is_across_evaluations()
+    }
+
     pub fn has_one_reader_per_context(&self) -> bool {
         self.lifetime == Lifetime::None && self.timing == ExecutionTiming::QueryTime
     }

@@ -167,11 +167,14 @@ pub fn generate_physical_asap_memo_candidates(
     )
 }
 
-/// Per logical candidate, how many readers may read it in one evaluation:
-/// each satisfied logical edge into a consumer input (two candidates of
-/// one consumer group count twice, as readout copies may both be
-/// selected), plus each query whose output its group is. A candidate with
-/// at most one reader needs no `OneEvaluation` form
+/// Per logical candidate, an upper bound on how many readers may read it
+/// in one evaluation context: each satisfied logical edge into a consumer
+/// input (two candidates of one consumer group count twice, as readout
+/// copies may both be selected; an edge into a consumer anchored with
+/// `@ end()` or `@ start()` counts twice, as Stage 3 runs that consumer's
+/// inputs in one request context for every query grid it serves), plus
+/// each query whose output its group is. A candidate with at most one
+/// reader needs no `OneEvaluation` form
 /// (`SearchSpacePruning::one_evaluation_by_readers`).
 ///
 /// Example: in `sum(rate(m[5m])) / count(rate(m[5m]))` the one `rate`
@@ -179,13 +182,19 @@ pub fn generate_physical_asap_memo_candidates(
 fn readers_per_candidate(
     logical: &LogicalASAPMemoCandidates,
 ) -> HashMap<CandidateForMemoGroupId, usize> {
+    let memo = &logical.memo;
     let mut reads: HashMap<CandidateForMemoGroupId, usize> = HashMap::new();
     for edge in &logical.edges {
         if edge.satisfies_logical_requirement {
-            *reads.entry(edge.producer_candidate_id).or_default() += 1;
+            let anchored = memo
+                .candidate(edge.consumer_candidate_id)
+                .expression
+                .operator
+                .request_anchor()
+                .is_some();
+            *reads.entry(edge.producer_candidate_id).or_default() += if anchored { 2 } else { 1 };
         }
     }
-    let memo = &logical.memo;
     for group in memo.root_groups() {
         let queries = memo.queries_rooted_at(group).len();
         for index_in_group in 0..memo.groups()[group.0 as usize].candidates.len() {

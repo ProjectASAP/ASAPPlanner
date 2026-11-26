@@ -119,7 +119,9 @@ fn planned(workload: &PlanningWorkload, capabilities: &DeploymentCapabilities) -
     // Every lifetime offered (rule 5 off): these tests count the
     // alternatives each exclusion prunes.
     let mut every_lifetime = SearchSpacePruning::default();
-    every_lifetime.one_evaluation_by_readers = false;
+    every_lifetime
+        .set("one_evaluation_by_readers", false)
+        .expect("a pruning rule");
     let settings = PlanSearchSettings {
         inspect: true,
         search_space_pruning: every_lifetime,
