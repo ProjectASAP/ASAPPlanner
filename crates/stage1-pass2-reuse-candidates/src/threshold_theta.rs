@@ -6,11 +6,11 @@
 //! cut, with [`RootPruneReason::AboveReaderThreshold`], and dead-candidate
 //! elimination removes the candidates left without a consumer.
 //!
-//! Example: `topk(5, sum by (host) (m))` at relative 0.05 reads a
-//! `CmsWithHeap` state listed at 240 θs; its readout's edges are satisfied
-//! by the θs at least (width 55, depth 7, heap 10) in some field
-//! combination, and only the least of those (the thresholds) keep their
-//! edges, so the other builds are dead.
+//! Example: `topk(5, sum by (host) (m))` reads a `CmsWithHeap` state
+//! listed at 240 θs (width × depth × heap size). Of the θs whose edge
+//! meets the readout's requirement, only the least ones (no other meeting
+//! θ is no larger in every field) keep their edges; the other builds are
+//! dead.
 //!
 //! Exactness: a θ no smaller than another in every size field (a larger
 //! KLL `k`, a wider or deeper Count-Min, a smaller DDSketch α) meets every

@@ -241,7 +241,7 @@ fn needed_thetas(document: &Value) -> BTreeMap<u64, Vec<Value>> {
                 .filter(|edge| edge["satisfies_logical_requirement"] == json!(true))
                 .filter_map(|edge| live.get(&(group, edge["producer"].as_u64().unwrap())))
                 .map(|producer| &producer["parameters"])
-                .filter(|theta| !theta.is_null())
+                .filter(|theta| !theta.is_null() && rule1_applies(theta))
                 .collect();
             let entry = needed.entry(group).or_default();
             for theta in minimal_thetas(&satisfying) {
@@ -282,6 +282,14 @@ fn needed_thetas(document: &Value) -> BTreeMap<u64, Vec<Value>> {
     needed
 }
 
+/// Whether rule 1 applies to `theta`'s shape: not to the sketches that keep
+/// up to `k` items (KLL, KMV, Hydra over KLL), for which a larger `k` can
+/// cost less.
+fn rule1_applies(theta: &Value) -> bool {
+    let (family, fields) = theta_family(theta);
+    !matches!(family, "Kll" | "Kmv") && !(family == "Hydra" && fields.get("HydraKll").is_some())
+}
+
 /// The live θ candidates no reader needs ([`needed_thetas`]): group label,
 /// index and θ.
 fn unneeded_thetas(document: &Value) -> Vec<String> {
@@ -297,7 +305,9 @@ fn unneeded_thetas(document: &Value) -> Vec<String> {
         .collect();
     live_candidates(document)
         .iter()
-        .filter(|(_, candidate)| !candidate["parameters"].is_null())
+        .filter(|(_, candidate)| {
+            !candidate["parameters"].is_null() && rule1_applies(&candidate["parameters"])
+        })
         .filter(|((group, _), candidate)| {
             !needed
                 .get(group)
@@ -429,9 +439,10 @@ fn stage3_reports_the_greedy_and_lp_bounds() {
 // Rule 1: threshold θ only (Pass 2).
 
 /// `quantile_over_time(0.99, m[5m])` every 60 s at relative 0.05 over 100
-/// series, raw data retained: every θ left is the least θ of its family
-/// that meets the readout's requirement, and the plan costs what it costs
-/// with every listed θ.
+/// series, raw data retained: every DDSketch θ left is the least that
+/// meets the readout's requirement (KLL keeps every k, see
+/// [`rule1_applies`]), and the plan costs what it costs with every listed
+/// θ.
 #[test]
 fn rule1_every_theta_left_is_a_reader_s_threshold() {
     let workload = promql(
