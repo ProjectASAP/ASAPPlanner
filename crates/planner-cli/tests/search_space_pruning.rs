@@ -505,6 +505,24 @@ fn rule5_a_result_two_consumers_read_keeps_its_one_evaluation_twin() {
     assert_same_cost(&pruned, &unpruned, "one_evaluation_by_readers");
 }
 
+/// `sum(sum_over_time(m[5m] @ end()))` as a 10 min range request every
+/// 60 s at phases 0 and 30 s: Stage 3 runs the `@ end()` shift's input in
+/// one request context for both grids, so the input is read twice there
+/// and keeps its `OneEvaluation` twin; the plan costs what it costs with
+/// every twin.
+#[test]
+fn rule5_an_anchored_consumer_on_two_grids_keeps_the_optimum() {
+    let ranged = |phase_ms: u64| {
+        let mut entry = repeating("sum(sum_over_time(m[5m] @ end()))", 60_000, phase_ms, 0.05);
+        entry["range_evaluation"] = json!({"step_ms": 15_000, "span_ms": 600_000});
+        entry
+    };
+    let workload = promql(vec![ranged(0), ranged(30_000)], 100, 1_000);
+    let pruned = plan(&workload, &raw_retained(), &[]);
+    let unpruned = plan(&workload, &raw_retained(), &["one_evaluation_by_readers"]);
+    assert_same_cost(&pruned, &unpruned, "one_evaluation_by_readers");
+}
+
 // Rule 8a: identical candidates (fixed on main; a regression guard).
 
 /// No group holds two live candidates with the same operator, inputs, θ
