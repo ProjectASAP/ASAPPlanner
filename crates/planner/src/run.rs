@@ -234,7 +234,12 @@ pub fn run_planning_until(
         }
         // Stage 2.
         let started = Instant::now();
-        let physical = generate_physical_asap_memo_candidates(logical, data, &exclusions);
+        let physical = generate_physical_asap_memo_candidates(
+            logical,
+            data,
+            &exclusions,
+            settings.search_space_pruning,
+        );
         report.stage2_ms = elapsed_ms(started);
         let physical = physical_asap_candidates.insert(physical);
         report.physical_candidates = physical.physical_candidates.len();

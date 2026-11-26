@@ -56,7 +56,10 @@ pub(super) struct OfferedPhysicalProperties {
 ///   `MaintainPopulation`): fed at ingestion time, it keeps its state
 ///   between batches, so it is materialized;
 /// - for a `SummaryMergeWindows`, only (IngestionTime, AcrossEvaluations):
-///   it is a chain built from a narrower chain as each window ends.
+///   it is a chain built from a narrower chain as each window ends;
+/// - `OneEvaluation` only when `one_evaluation_offered` (two readers may
+///   read the candidate in one evaluation,
+///   `SearchSpacePruning::one_evaluation_by_readers`).
 ///
 /// A value not offered is not returned, and neither is the invalid
 /// (IngestionTime, OneEvaluation). The prune rules, in order: a Count-Min
@@ -68,6 +71,7 @@ pub(super) fn offered_physical_properties(
     candidate: CandidateForMemoGroupId,
     ingestion_time_offered_for_group: bool,
     across_evaluations_offered_for_group: bool,
+    one_evaluation_offered: bool,
     data: &DataWorkload,
     exclusions: &[DeploymentExclusion],
 ) -> Vec<OfferedPhysicalProperties> {
@@ -110,6 +114,9 @@ pub(super) fn offered_physical_properties(
         for lifetime in LIFETIMES {
             let across_evaluations = matches!(lifetime, Lifetime::AcrossEvaluations(_));
             if across_evaluations && !across_evaluations_offered_for_group {
+                continue;
+            }
+            if matches!(lifetime, Lifetime::OneEvaluation(_)) && !one_evaluation_offered {
                 continue;
             }
             if builds_summary
