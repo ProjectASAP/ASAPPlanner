@@ -634,6 +634,49 @@ fn rule3_cover_rows_tighten_the_lp_bound_at_the_same_optimum() {
     assert!(lp(&pruned) <= optimum(&pruned) * (1.0 + 1e-9));
 }
 
+// Rule 7: single-reader groups by dynamic programming (Stage 3).
+
+/// One exact sum over a 5 min window, accuracy not enforced: every
+/// execution below the output has one reader and no coupling term, so
+/// only each input's cheapest tree reaches the MILP (decided 2026-11-26:
+/// groups an accuracy or retention term couples stay in the MILP, so the
+/// MILP is smaller, not empty); the plan costs the same.
+#[test]
+fn rule7_a_single_reader_region_keeps_only_its_cheapest_tree() {
+    let workload = promql(
+        vec![repeating(
+            "quantile_over_time(0.99, m[5m])",
+            60_000,
+            0,
+            0.05,
+        )],
+        100,
+        1_000,
+    );
+    let pruned = plan(&workload, &raw_retained(), &[]);
+    let unpruned = plan(&workload, &raw_retained(), &["single_reader_dp"]);
+    assert_same_cost(&pruned, &unpruned, "single_reader_dp");
+    assert_eq!(milp_variables(&pruned), 0);
+}
+
+/// A quantile and a sum over one 5 min window share the scan; each query's
+/// own groups are solved alone and only the shared part reaches the MILP.
+#[test]
+fn rule7_only_the_shared_core_reaches_the_milp() {
+    let workload = promql(
+        vec![
+            repeating("quantile_over_time(0.99, m[5m])", 60_000, 0, 0.05),
+            repeating("sum(sum_over_time(m[5m]))", 60_000, 0, 0.05),
+        ],
+        100,
+        1_000,
+    );
+    let pruned = plan(&workload, &raw_retained(), &[]);
+    let unpruned = plan(&workload, &raw_retained(), &["single_reader_dp"]);
+    assert_same_cost(&pruned, &unpruned, "single_reader_dp");
+    assert!(milp_variables(&pruned) < milp_variables(&unpruned));
+}
+
 // Rule 8a: identical candidates (fixed on main; a regression guard).
 
 /// No group holds two live candidates with the same operator, inputs, θ

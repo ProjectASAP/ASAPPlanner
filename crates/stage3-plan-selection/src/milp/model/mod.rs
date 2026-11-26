@@ -40,6 +40,7 @@ use super::exact_only::{exact_only_constraints, exact_only_variables};
 use super::graph::Components;
 use super::kept_results::{kept_result_terms, kept_results_quantity, KeptResultVariables};
 use super::mandatory_groups::mandatory_group_rows;
+use super::private_trees::dearer_private_trees;
 use super::retention::{
     least_retention_ms, resident_window_terms, resident_windows_quantity, retention_constraints,
     retention_variables,
@@ -702,7 +703,9 @@ pub(crate) fn solve_selection(
 /// feasible plan is sharing-aware, bounds the executions left out with
 /// the other query outputs' least costs ([`dearer_than_a_feasible_plan`]),
 /// and is the MILP's starting solution; with `mandatory_group_cover`, each
-/// group every plan executes gets a cover row ([`mandatory_group_rows`]).
+/// group every plan executes gets a cover row ([`mandatory_group_rows`]);
+/// with `single_reader_dp`, the dearer trees of single-reader regions are
+/// left out ([`dearer_private_trees`]).
 pub(crate) fn solve_selection_with(
     inputs: &SelectionInputs<'_>,
     report_lp_bound: bool,
@@ -715,12 +718,18 @@ pub(crate) fn solve_selection_with(
     let (feasible_plan, dearer) =
         dearer_than_a_feasible_plan(inputs, rules.as_ref(), sharing_aware);
     let upper_bound_per_second = feasible_plan.as_ref().map(|plan| plan.cost_per_second);
-    let kept: Vec<bool> = dearer
+    let mut kept: Vec<bool> = dearer
         .iter()
         .zip(dominated_by_lifetime_twin(inputs))
         .zip(&costs.per_execution)
         .map(|((&dearer, dominated), cost)| cost.is_ok() && !dearer && !dominated)
         .collect();
+    if search_space_pruning.single_reader_dp {
+        let dearer_private = dearer_private_trees(inputs, rules.is_some(), &kept);
+        for (kept, dearer_private) in kept.iter_mut().zip(dearer_private) {
+            *kept &= !dearer_private;
+        }
+    }
     let mut problem = ProblemVariables::new();
     // (K), only when some query has an accuracy target.
     let SelectionModel {

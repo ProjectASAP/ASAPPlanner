@@ -39,6 +39,11 @@ pub struct SearchSpacePruning {
     /// group every plan executes, which every integer solution meets and
     /// which raises the LP relaxation's bound.
     pub mandatory_group_cover: bool,
+    /// Rule 7, Stage 3: a region only one reader can read, with no
+    /// accuracy, retention or cache term coupling it to the rest, keeps
+    /// only its cheapest tree (dynamic programming); the shared core and
+    /// the coupled groups stay in the MILP.
+    pub single_reader_dp: bool,
 }
 
 impl Default for SearchSpacePruning {
@@ -49,6 +54,7 @@ impl Default for SearchSpacePruning {
             context_reachability: true,
             sharing_aware_bound: true,
             mandatory_group_cover: true,
+            single_reader_dp: true,
         }
     }
 }

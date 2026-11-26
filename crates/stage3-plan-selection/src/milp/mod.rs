@@ -16,6 +16,7 @@ mod graph;
 mod kept_results;
 mod mandatory_groups;
 pub(crate) mod model;
+mod private_trees;
 mod retention;
 mod upper_bound;
 
