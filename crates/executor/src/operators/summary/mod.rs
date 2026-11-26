@@ -948,12 +948,8 @@ async fn merge_summary(
                 .map(|(row, group)| (index, row, group)),
         );
     }
-    // A global SQL aggregate's one row over no input rows: one empty state.
     if let (true, Some(parameters)) = (entries.is_empty(), shape.empty_global) {
-        table.add_empty_group()?;
-        let mut updater = StateColumnUpdater::new(family, parameters)?;
-        updater.add_group()?;
-        return grouped_states(&table, updater.seal(), input_schema, output);
+        return empty_global_state(&mut table, family, parameters, input_schema, output);
     }
     let columns = batches
         .iter()
@@ -993,13 +989,7 @@ async fn merge_summary(
                 let StateStorage::Exact(records) = states.storage() else {
                     unreachable!("all exact")
                 };
-                let slot = &mut merged[entry.2 as usize];
-                *slot = Some(match slot.take() {
-                    None => records.get(index),
-                    Some(existing) => existing
-                        .merge(&records.get(index))
-                        .map_err(|e| Error::Operator(e.to_string()))?,
-                });
+                fold_record(&mut merged[entry.2 as usize], records.get(index))?;
             }
             work.checkpoint_rows(chunk.len()).await?;
         }
@@ -1014,46 +1004,53 @@ async fn merge_summary(
             output,
         );
     }
-    let merged = merge_objects(
-        &entries,
-        &state_of,
-        table.len(),
-        table.memory_bytes(),
-        context,
-        &mut work,
-    )
-    .await?;
+    // Kernel-object states merged per group, in `entries` order. A state
+    // passed through unchanged keeps its input's held-outside-the-run bit
+    // (a stored state is shared by pointer, not charged again); a merged
+    // state is new.
+    let mut merger = ObjectMerger::new(table.memory_bytes(), context)?;
+    for &entry in &entries {
+        work.checkpoint().await?;
+        let (states, index) = state_of(entry);
+        // Counter states are records or objects, never mapped sketches: no
+        // KLL accumulator is seeded here.
+        merger.add(states, index, entry.2 as usize, table.len(), &|| 0)?;
+    }
     grouped_states(
         &table,
-        StateColumn::from_objects_of(family.clone(), merged),
+        StateColumn::from_objects_of(family.clone(), merger.finish()),
         input_schema,
         output,
     )
 }
 
-/// Merge kernel-object states per group, in `entries` order. Each distinct
-/// pair of Hydra grids merges once, and every group of the pair reads the
-/// one merged grid. Each output state comes with whether something outside
-/// the run holds it: a state passed through unchanged keeps its input's
-/// bit (a stored state is shared by pointer, not charged again); a merged
-/// state is new.
-async fn merge_objects<'b>(
-    entries: &[(usize, usize, u32)],
-    state_of: &dyn Fn((usize, usize, u32)) -> (&'b StateColumn, usize),
-    group_count: usize,
-    table_memory_bytes: usize,
-    context: &RunContext,
-    work: &mut Cooperative,
-) -> Result<Vec<(Arc<dyn crate::AggregateCore>, bool)>, Error> {
-    let mut merger = ObjectMerger::new(table_memory_bytes, context)?;
-    for &entry in entries {
-        work.checkpoint().await?;
-        let (states, index) = state_of(entry);
-        // Counter states are records or objects, never mapped sketches: no
-        // KLL accumulator is seeded here.
-        merger.add(states, index, entry.2 as usize, group_count, &|| 0)?;
-    }
-    Ok(merger.finish())
+/// Folds exact `record` into a group's merged record `slot`.
+fn fold_record(
+    slot: &mut Option<crate::summary_kernels::exact::ScalarState>,
+    record: crate::summary_kernels::exact::ScalarState,
+) -> Result<(), Error> {
+    *slot = Some(match slot.take() {
+        None => record,
+        Some(existing) => existing
+            .merge(&record)
+            .map_err(|e| Error::Operator(e.to_string()))?,
+    });
+    Ok(())
+}
+
+/// A global SQL aggregate's one row over no input rows: one empty state of
+/// `family` with θ `parameters`, the only group of `table`.
+fn empty_global_state(
+    table: &mut GroupTable,
+    family: &SummaryFamilyType,
+    parameters: Option<&SketchParams>,
+    input_schema: &SchemaRef,
+    output: &SchemaRef,
+) -> Result<Batch, Error> {
+    table.add_empty_group()?;
+    let mut updater = StateColumnUpdater::new(family, parameters)?;
+    updater.add_group()?;
+    grouped_states(table, updater.seal(), input_schema, output)
 }
 
 /// The input pair of a merged Hydra grid, kept so their addresses stay
@@ -1314,15 +1311,7 @@ async fn merge_summary_streaming(
                     .cloned(),
             };
             match (record, as_objects[group]) {
-                (Some(record), false) => {
-                    let slot = &mut exact[group];
-                    *slot = Some(match slot.take() {
-                        None => record,
-                        Some(existing) => existing
-                            .merge(&record)
-                            .map_err(|e| Error::Operator(e.to_string()))?,
-                    });
-                }
+                (Some(record), false) => fold_record(&mut exact[group], record)?,
                 _ => {
                     // A keyed state: this group merges as objects from now
                     // on, starting from the records merged so far.
@@ -1341,11 +1330,7 @@ async fn merge_summary_streaming(
     }
     if table.len() == 0 {
         if let Some(parameters) = shape.empty_global {
-            // A global SQL aggregate's one row over no input rows: one empty state.
-            table.add_empty_group()?;
-            let mut updater = StateColumnUpdater::new(family, parameters)?;
-            updater.add_group()?;
-            return grouped_states(&table, updater.seal(), input_schema, output);
+            return empty_global_state(&mut table, family, parameters, input_schema, output);
         }
     }
     let states = if exact_family && !as_objects.contains(&true) {
@@ -1516,11 +1501,8 @@ fn evaluate_states(
                     }
                 }
             }
-            (SummaryEvaluation::Sketch(query), storage) => {
-                let summary = match storage {
-                    StateStorage::Objects(objects) => objects[index].clone(),
-                    StateStorage::Exact(_) | StateStorage::Mapped(_) => states.state(index),
-                };
+            (SummaryEvaluation::Sketch(query), _) => {
+                let summary = states.state(index);
                 // A filtered or NULL-only group's quantile is SQL NULL.
                 if nullable && summary.is_empty() {
                     None

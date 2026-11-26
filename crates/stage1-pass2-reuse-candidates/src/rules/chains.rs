@@ -15,7 +15,7 @@ use asap_types::ir::operator::arguments::{AtModifier, Reduction, TimeShift};
 use asap_types::ir::schema::FieldDataType;
 use asap_types::ir::{ASAPOp, NonASAPOp, Operator, Predicate, TimeRangeKind};
 use asap_types::stages::{
-    CandidateForMemoGroupId, Memo, MemoGroupId, OriginOfCandidateForMemoGroup,
+    CandidateForMemoGroupId, EvaluationGrid, Memo, MemoGroupId, OriginOfCandidateForMemoGroup,
 };
 use asap_types::summary_type::{SketchParams, SummaryTypeCapability, SummaryUpdate};
 use asap_types::workload::greatest_common_divisor;
@@ -34,6 +34,10 @@ use asap_types::workload::greatest_common_divisor;
 /// queries reaching S whose evaluation period at S, $g_q$, is known
 /// (`evaluation_period_ms_per_query`: below a subquery, its resolution),
 /// with the offsets $o_j$ on S's path; no query with a period, no chain.
+/// The wider levels (`add_wider_levels`) read S's evaluation grid from
+/// `evaluation_grid_of_group`, each group's grid as
+/// [`evaluation_grids`](crate::evaluation_grids::evaluation_grids)
+/// computes it over the memo before the chains are added.
 /// The edges from a chain whose width does not divide the evaluation grid
 /// of the group reading it (the gcd over all its readers) fail with
 /// `ChainWidthDoesNotDivideEvaluationGrid` (`candidate_edges`), so the
@@ -45,6 +49,7 @@ use asap_types::workload::greatest_common_divisor;
 pub(crate) fn add_chain_groups(
     memo: &mut Memo,
     evaluation_period_ms_per_query: &[BTreeMap<usize, Option<u64>>],
+    evaluation_grid_of_group: &[Option<EvaluationGrid>],
     pruned: &BTreeSet<CandidateForMemoGroupId>,
     edges: &[CandidateEdge],
 ) -> Result<(), Pass2RuleError> {
@@ -112,8 +117,7 @@ pub(crate) fn add_chain_groups(
         chains_of_states.push((state, path, chain_groups, parameters));
     }
     for (state, path, chain_groups, parameters) in chains_of_states {
-        let state_grid_ms =
-            state_evaluation_grid_ms(&evaluation_period_ms_per_query[state.0 as usize]);
+        let state_grid_ms = evaluation_grid_of_group[state.0 as usize].map(|grid| grid.period_ms);
         let level_parameters = &smallest_parameters_per_reader(memo, state, &parameters, edges);
         add_wider_levels(
             memo,
@@ -217,7 +221,8 @@ fn smallest_parameters_per_reader(
             .find(|(known_reader, known)| known_reader == reader && same_type(known, theta))
         {
             Some((_, known)) => {
-                if smaller_of_one_type(theta, known) {
+                // `same_type` above: the two sizes compare.
+                if nominal_state_size(theta.as_ref()) < nominal_state_size(known.as_ref()) {
                     *known = theta.clone();
                 }
             }
@@ -243,17 +248,11 @@ fn same_type(a: &Option<SketchParams>, b: &Option<SketchParams>) -> bool {
     }
 }
 
-/// Whether `a` is a smaller state than `b`, both of one type; `false`
-/// across types, whose sizes do not compare.
-fn smaller_of_one_type(a: &Option<SketchParams>, b: &Option<SketchParams>) -> bool {
-    same_type(a, b) && nominal_state_size(a.as_ref()) < nominal_state_size(b.as_ref())
-}
-
 /// A θ's state size, to order θs of one type smallest first: its counters
 /// or items (a KLL's `k`, a Count-Min's width × depth, an HLL's 2^p
 /// registers, a DDSketch's buckets per unit of log range, `1 / α`). An
 /// exact state (`None`) is 0. Sizes of different types do not compare
-/// ([`smaller_of_one_type`]); a Hydra structure has no order (every one 0).
+/// ([`same_type`]); a Hydra structure has no order (every one 0).
 fn nominal_state_size(parameters: Option<&SketchParams>) -> f64 {
     let Some(parameters) = parameters else {
         return 0.0;
@@ -286,17 +285,6 @@ fn nominal_state_size(parameters: Option<&SketchParams>) -> f64 {
         }
         SketchParams::Hydra(_) => 0.0,
     }
-}
-
-/// A state group's evaluation grid, the gcd of its readers' periods
-/// (`evaluation_period_ms_per_query`); `None` when one reader's is unknown
-/// or none reads it.
-fn state_evaluation_grid_ms(periods_ms: &BTreeMap<usize, Option<u64>>) -> Option<u64> {
-    let mut grid_ms = 0;
-    for period_ms in periods_ms.values() {
-        grid_ms = greatest_common_divisor(grid_ms, (*period_ms)?);
-    }
-    (grid_ms > 0).then_some(grid_ms)
 }
 
 /// Wider chain levels for state group `state` (design doc
@@ -559,13 +547,11 @@ mod tests {
                 shared_columns: 1_000,
             },
         ));
-        assert!(smaller_of_one_type(&cms(100), &cms(1_000)));
-        assert!(!smaller_of_one_type(&cms(1_000), &cms(100)));
-        assert!(!smaller_of_one_type(&cms(100), &count_sketch(1_000)));
-        assert!(!smaller_of_one_type(&count_sketch(100), &cms(1_000)));
-        assert!(!smaller_of_one_type(&cms(100), &hydra));
-        assert!(!smaller_of_one_type(&hydra, &cms(100)));
-        assert!(!smaller_of_one_type(&None, &cms(100)));
+        let size = |theta: &Option<SketchParams>| nominal_state_size(theta.as_ref());
+        assert!(size(&cms(100)) < size(&cms(1_000)));
+        assert!(!same_type(&cms(100), &count_sketch(1_000)));
+        assert!(!same_type(&cms(100), &hydra) && !same_type(&hydra, &cms(100)));
+        assert!(!same_type(&None, &cms(100)));
         assert!(same_type(&cms(1), &cms(2)) && !same_type(&cms(1), &count_sketch(1)));
     }
 }

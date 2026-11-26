@@ -195,3 +195,55 @@ pub fn promql_matrix_schema() -> SchemaRef {
         time_index: Some(1),
     })
 }
+
+/// The samples of the `latency` time series in the tumbling-window chain
+/// tests: `job`, `ts` (the time index) and `value`.
+pub fn samples_schema() -> planner_types::ir::schema::Schema {
+    use planner_types::ir::schema::{DataType, Field, Schema};
+    Schema::with_time_index(
+        vec![
+            Field::plain("job", DataType::Utf8, false),
+            Field::plain("ts", DataType::Timestamp, false),
+            Field::plain("value", DataType::Float64, false),
+        ],
+        1,
+        vec![],
+    )
+}
+
+/// The `latency` time series the chain tests read.
+pub fn source() -> planner_types::ir::operator::Source {
+    planner_types::ir::operator::Source::TimeSeries {
+        metric: "latency".into(),
+    }
+}
+
+/// `operator` as a shared plan node.
+pub fn node(operator: planner_types::ir::Operator) -> Rc<OperatorNode> {
+    OperatorNode::new_shared(operator).unwrap()
+}
+
+/// Every root's rows in one run of `dag` ([`run_roots`]), in `roots` order.
+pub fn run(
+    dag: &asap_executor::plan::PhysicalDAG<'static, Batch, SchemaRef>,
+    roots: &[u64],
+    context: RunContext,
+) -> Vec<Vec<Vec<asap_executor::values::Value>>> {
+    run_roots(dag, roots, context)
+        .unwrap()
+        .into_iter()
+        .map(|batches| batches.iter().flat_map(Batch::to_rows).collect())
+        .collect()
+}
+
+/// The id of the node of a DAG compiled from `nodes` (each node's index)
+/// that is `operator`.
+pub fn id_of(
+    nodes: &[Rc<OperatorNode>],
+    operator: &Rc<OperatorNode>,
+) -> planner_types::plan::physical_asap_dag::PhysicalASAPNodeId {
+    nodes
+        .iter()
+        .position(|node| Rc::ptr_eq(node, operator))
+        .unwrap()
+}

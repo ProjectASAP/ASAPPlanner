@@ -214,22 +214,15 @@ impl Scan {
                     width = i64::try_from(read.level_widths_ms[read.level]).map_err(|_| {
                         Error::Invalid("a cover level's width exceeds Int64".into())
                     })?;
-                    let range = i64::try_from(read.range_ms)
+                    // Only checks: a range or offset past Int64 is refused
+                    // as before (`window_ends_at` would saturate instead).
+                    i64::try_from(read.range_ms)
                         .map_err(|_| Error::Invalid("a cover's range exceeds Int64".into()))?;
-                    let offset = i64::try_from(read.offset_ms)
+                    i64::try_from(read.offset_ms)
                         .map_err(|_| Error::Invalid("a cover's offset exceeds Int64".into()))?;
-                    let windows =
-                        planner_types::ir::operator::tumbling_window_chain::cover_windows(
-                            evaluation_time_ms - offset - range,
-                            evaluation_time_ms - offset,
-                            &read.level_widths_ms,
-                        )
-                        .map_err(|error| Error::Invalid(error.to_string()))?;
                     window_ends.extend(
-                        windows
-                            .into_iter()
-                            .filter(|(level, _)| *level == read.level)
-                            .map(|(_, window_end)| window_end),
+                        read.window_ends_at(*evaluation_time_ms)
+                            .map_err(|error| Error::Invalid(error.to_string()))?,
                     );
                 }
                 let mut ranges: Vec<(i64, i64)> = Vec::new();

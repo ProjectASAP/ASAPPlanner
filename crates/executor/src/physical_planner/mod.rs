@@ -608,27 +608,12 @@ fn compile_internal(
                     .ok_or_else(|| invalid("SummaryMergeWindows reads a chain's window ends"))?;
                 let width_ms = i64::try_from(*tumbling_window_width_ms)
                     .map_err(|_| invalid("tumbling-window width exceeds Int64"))?;
-                let millis =
-                    |ms: u64| i64::try_from(ms).map_err(|_| invalid("a window overflows Int64"));
                 // Refreshed: the narrower windows inside its newest window.
                 // Built for its readers: those inside what they read; the
                 // wider windows reaching past it are partial, and a cover
-                // takes none of them.
-                let (end_offset_ms, length_ms) = match graph.input_time_access(id).reads {
-                    InputRows::LastWindow { length_ms } => (0, millis(length_ms)?),
-                    _ => {
-                        let read = window_read_above(id, &graph).ok_or_else(|| {
-                            invalid(format!(
-                                "node {id}: SummaryMergeWindows built for its readers is read \
-                                 outside the time ranges above it"
-                            ))
-                        })?;
-                        (
-                            millis(read.ends_before_evaluation_ms)?,
-                            millis(read.length_ms)?,
-                        )
-                    }
-                };
+                // takes none of them (so no whole-windows check).
+                let (end_offset_ms, length_ms, _) =
+                    chain_input_window(id, &graph, "SummaryMergeWindows", None)?;
                 let window = Operator::time_range(
                     input.clone(),
                     time,
@@ -671,18 +656,15 @@ fn compile_internal(
             {
                 // Each level by its id, widest first, as the payload lists
                 // them (the inputs may come in another order).
-                let levels = levels
+                let widths = cover_level_widths_ms(levels, &nodes)
+                    .ok_or_else(|| invalid("a time-range cover reads chains"))?;
+                let levels: Vec<(NodeId, SchemaRef)> = levels
                     .iter()
                     .map(|&level| {
                         let level = level as NodeId;
-                        let width = nodes
-                            .get(&level)
-                            .and_then(|level| level.payload.chain_tumbling_window_width_ms())
-                            .ok_or_else(|| invalid("a time-range cover reads chains"))?;
-                        Ok((level, width, Arc::new(nodes[&level].output_schema.clone())))
+                        (level, Arc::new(nodes[&level].output_schema.clone()))
                     })
-                    .collect::<Result<Vec<(NodeId, u64, SchemaRef)>, Error>>()?;
-                let widths: Vec<u64> = levels.iter().map(|(_, width, _)| *width).collect();
+                    .collect();
                 let range_ms = i64::try_from(range.as_millis())
                     .map_err(|_| invalid("a time-range cover overflows Int64"))?;
                 // Under an offset the range ends that much earlier, on every
@@ -695,7 +677,7 @@ fn compile_internal(
                     ));
                 }
                 let mut selected = Vec::with_capacity(levels.len());
-                for (index, (level, _, schema)) in levels.iter().enumerate() {
+                for (index, (level, schema)) in levels.iter().enumerate() {
                     let time = schema
                         .time_index
                         .ok_or_else(|| invalid("a time-range cover reads window ends"))?;
@@ -711,16 +693,11 @@ fn compile_internal(
                             None,
                             None,
                         )?
-                        .with_cover_level(CoverLevel {
-                            range_ms: range_ms as u64,
-                            offset_ms: *offset_ms,
-                            level_widths_ms: widths.clone(),
-                            level: index,
-                        })?,
+                        .with_cover_level(widths.clone(), index)?,
                     )?;
                     selected.push(helper);
                 }
-                let first = levels[0].2.clone();
+                let first = levels[0].1.clone();
                 physical_dag.add(
                     id,
                     selected,
@@ -771,53 +748,23 @@ fn compile_internal(
                     })) => Some(named_column(input, &ColumnRef::SampleValue)?),
                     _ => None,
                 };
-                let millis = |ms: u64| {
-                    i64::try_from(ms).map_err(|_| invalid("a chain's read overflows Int64"))
-                };
-                let (window, built_for_readers) = match graph.input_time_access(id).reads {
-                    // Refreshed: its newest window, `(T - length_ms, T]`.
-                    InputRows::LastWindow { length_ms } => (
-                        Operator::time_range(
-                            input.clone(),
-                            time,
-                            0,
-                            millis(length_ms)?,
-                            sample_value,
-                            None,
-                        )?,
-                        false,
-                    ),
-                    // The windows its readers read, whole tumbling windows.
-                    _ => {
-                        let read = window_read_above(id, &graph).ok_or_else(|| {
-                            invalid(format!(
-                                "node {id}: a tumbling-window chain built for its readers is \
-                                 read outside the time ranges above it"
-                            ))
-                        })?;
-                        let (end_offset_ms, read_width_ms) = (
-                            millis(read.ends_before_evaluation_ms)?,
-                            millis(read.length_ms)?,
-                        );
-                        if end_offset_ms % width_ms != 0 || read_width_ms % width_ms != 0 {
-                            return Err(invalid(format!(
-                                "node {id}: a window ({end_offset_ms} ms back, {read_width_ms} ms \
-                                 wide) is not whole tumbling windows of {width_ms} ms"
-                            )));
-                        }
-                        (
-                            Operator::time_range(
-                                input.clone(),
-                                time,
-                                end_offset_ms,
-                                read_width_ms,
-                                sample_value,
-                                None,
-                            )?
-                            .with_tumbling_window_ends(width_ms)?,
-                            true,
-                        )
-                    }
+                // Refreshed: its newest window, `(T - length_ms, T]`. Built
+                // for its readers: the windows they read, whole tumbling
+                // windows.
+                let (end_offset_ms, length_ms, built_for_readers) =
+                    chain_input_window(id, &graph, "a tumbling-window chain", Some(width_ms))?;
+                let window = Operator::time_range(
+                    input.clone(),
+                    time,
+                    end_offset_ms,
+                    length_ms,
+                    sample_value,
+                    None,
+                )?;
+                let window = if built_for_readers {
+                    window.with_tumbling_window_ends(width_ms)?
+                } else {
+                    window
                 };
                 // The rows the build reads: built for its readers, each
                 // followed by its tumbling window's end, which groups each
@@ -2125,6 +2072,59 @@ mod tests;
 #[cfg(feature = "test-support")]
 pub mod test_support;
 
+/// The widths of a cover's levels `levels`, in its order (widest first);
+/// `None` when one is not a chain.
+fn cover_level_widths_ms(
+    levels: &[PhysicalASAPNodeId],
+    nodes: &BTreeMap<NodeId, &PhysicalASAPDAGNode>,
+) -> Option<Vec<u64>> {
+    levels
+        .iter()
+        .map(|&level| {
+            nodes
+                .get(&(level as NodeId))
+                .and_then(|node| node.payload.chain_tumbling_window_width_ms())
+        })
+        .collect()
+}
+
+/// The window a chain-shaped node `id` (a chain, or `SummaryMergeWindows`,
+/// named `what` in errors) reads from its input, `(T - end_offset_ms -
+/// length_ms, T - end_offset_ms]`, as `(end_offset_ms, length_ms,
+/// built_for_readers)`. Refreshed: its newest window, `(0, length_ms,
+/// false)`. Built for its readers: the window they read
+/// ([`window_read_above`]), refused unless whole windows of
+/// `whole_windows_of_ms` when that is given.
+fn chain_input_window(
+    id: NodeId,
+    graph: &CompileGraph<'_>,
+    what: &str,
+    whole_windows_of_ms: Option<i64>,
+) -> Result<(i64, i64, bool), Error> {
+    let millis = |ms: u64| i64::try_from(ms).map_err(|_| invalid("a chain's read overflows Int64"));
+    if let InputRows::LastWindow { length_ms } = graph.input_time_access(id).reads {
+        return Ok((0, millis(length_ms)?, false));
+    }
+    let read = window_read_above(id, graph).ok_or_else(|| {
+        invalid(format!(
+            "node {id}: {what} built for its readers is read outside the time ranges above it"
+        ))
+    })?;
+    let (end_offset_ms, length_ms) = (
+        millis(read.ends_before_evaluation_ms)?,
+        millis(read.length_ms)?,
+    );
+    if let Some(width_ms) = whole_windows_of_ms {
+        if end_offset_ms % width_ms != 0 || length_ms % width_ms != 0 {
+            return Err(invalid(format!(
+                "node {id}: a window ({end_offset_ms} ms back, {length_ms} ms wide) is not \
+                 whole tumbling windows of {width_ms} ms"
+            )));
+        }
+    }
+    Ok((end_offset_ms, length_ms, true))
+}
+
 /// How the covers reading `id` read it, when every compiled reader of it
 /// is a `TimeRangeCover`: per cover, its range, its levels' widths and
 /// `id`'s index among them (each distinct read once). A query run then
@@ -2144,19 +2144,10 @@ fn cover_reads_of(id: NodeId, graph: &CompileGraph<'_>) -> Option<Vec<CoverLevel
         else {
             return None;
         };
-        let level_widths_ms = levels
-            .iter()
-            .map(|&level| {
-                graph
-                    .nodes
-                    .get(&(level as NodeId))
-                    .and_then(|node| node.payload.chain_tumbling_window_width_ms())
-            })
-            .collect::<Option<Vec<u64>>>()?;
         let read = CoverLevel {
             range_ms: u64::try_from(range.as_millis()).ok()?,
             offset_ms: *offset_ms,
-            level_widths_ms,
+            level_widths_ms: cover_level_widths_ms(levels, graph.nodes)?,
             level: levels.iter().position(|&level| level as NodeId == id)?,
         };
         if !reads.contains(&read) {
