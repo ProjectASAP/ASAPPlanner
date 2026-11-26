@@ -52,6 +52,10 @@ impl AggregateCore for DDSketchAccumulator {
         self.inner.memory_bytes()
     }
 
+    fn shrink_to_fit(&mut self) {
+        self.inner.shrink_to_fit();
+    }
+
     /// Quantiles.
     fn estimate(&self, query: &SketchStatistic) -> Result<f64, KernelError> {
         match query {

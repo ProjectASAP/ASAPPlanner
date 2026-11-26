@@ -45,9 +45,10 @@ pub(crate) enum StateStorage {
     /// contiguous buffer, no allocation per state.
     Exact(ExactRecords),
     /// Sketch states in their view layout, read through read-only views
-    /// ([`super::mapped_states`]): sealed windows the run holds in that
-    /// layout ([`StateColumn::from_sealed_views`]), or stored ones something
-    /// outside the run holds ([`StateColumn::from_views`], charged nothing).
+    /// ([`super::mapped_states`]): sealed DDSketch, KLL and Count-Min
+    /// windows the run holds in that layout ([`StateColumn::sealed`]), or
+    /// stored ones something outside the run holds
+    /// ([`StateColumn::from_views`], charged nothing).
     Mapped(MappedSketches),
 }
 
@@ -281,6 +282,17 @@ impl StateColumn {
             held_outside_run: AtomicBool::new(false),
             objects_held_outside_run: None,
         }
+    }
+
+    /// The sealed sketch `states` of `family`, as a stored window holds
+    /// them: a family with a view layout (DDSketch, KLL, Count-Min) in that
+    /// layout ([`Self::from_sealed_views`]), the layout the cost model
+    /// prices a sealed state at; any other family as owned sketches, the
+    /// form it is priced at. A chain's own windows, a query-time build and
+    /// a level merged from narrower windows all seal here.
+    pub(crate) fn sealed(family: FieldDataType, states: Vec<Arc<dyn AggregateCore>>) -> Self {
+        Self::from_sealed_views(family.clone(), states.iter().cloned())
+            .unwrap_or_else(|| Self::from_objects(family, states))
     }
 
     /// The sealed sketch `states` of `family`, stored in their view layout

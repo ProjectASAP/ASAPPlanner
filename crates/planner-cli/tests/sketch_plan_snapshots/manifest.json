@@ -16,13 +16,13 @@
   "workloads": [
     {
       "id": "shared-quantiles-1h-mvp",
-      "covers": "two queries share one DDSketch pane chain (q0.5 and q0.9 over 1 h)",
+      "covers": "two queries share one quantile sketch pane chain (q0.5 and q0.9 over 1 h)",
       "workload": "tools/dag-viewer/memo-examples/promql/rangeheavy-t5-q05-q09-1h.json",
       "deployment": "mvp"
     },
     {
       "id": "nested-windows-15m-1h-mvp",
-      "covers": "15 min and 1 h windows share one DDSketch pane chain",
+      "covers": "15 min and 1 h windows share one quantile sketch pane chain",
       "workload": "tools/dag-viewer/memo-examples/promql/rangeheavy-t5-q09-15m-1h.json",
       "deployment": "mvp"
     },

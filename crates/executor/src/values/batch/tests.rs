@@ -521,8 +521,8 @@ fn concat_of_different_exact_columns_keeps_records() {
     assert_eq!(sums, vec![30.0, 10.0, 30.0, 2.0]);
 }
 
-/// A batch of `count` rows, one state each: KLL (k = 200) objects, or
-/// exact sums.
+/// A batch of `count` rows, one state each: KMV (k = 64) objects (a
+/// family with no view layout, so sealed as objects), or exact sums.
 fn state_batch(count: u32, exact: bool) -> Batch {
     use crate::StateColumnUpdater;
     use planner_types::summary_type::{ExactKind, ExactParams, SketchAlgorithm};
@@ -533,8 +533,8 @@ fn state_batch(count: u32, exact: bool) -> Batch {
         )
     } else {
         (
-            FieldDataType::Sketch(SketchAlgorithm::KLL),
-            Some(planner_types::summary_type::SketchParams::Kll { k: 200 }),
+            FieldDataType::Sketch(SketchAlgorithm::KMV),
+            Some(planner_types::summary_type::SketchParams::Kmv { k: 64 }),
         )
     };
     let mut updater = StateColumnUpdater::new(&family, parameters.as_ref()).unwrap();

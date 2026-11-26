@@ -336,22 +336,20 @@ fn an_exclusion_matching_nothing_changes_nothing() {
 
 /// The answer-10 example: a KLL `k` range moves the quantile's state to a
 /// larger `k`, and its cost never falls as more is excluded. Unrestricted,
-/// the quantile reads stored windows of KLL at k = 1,404 (sealed
-/// sketches, priced at what they retain, cost less to keep than a
-/// query-time k = 547 build costs to run); excluding k up to 1,403 changes
-/// nothing;
-/// excluding k up to 2,862 rules every stored size out, and the quantile is
-/// built at query time at k = 2,863.
+/// the quantile reads stored windows of KLL at k = 547 (sealed into their
+/// view layout, priced at what they retain); excluding k up to 1,403 moves
+/// it to stored windows at k = 1,404; excluding k up to 2,862 rules every
+/// stored size out, and the quantile is built at query time at k = 2,863.
 #[test]
 fn a_kll_k_range_moves_the_quantile_to_a_larger_k() {
     let workload = kll_workload();
     let cases = [
-        (None, STORED_KLL_PLAN.as_slice(), 1404, 0.059986),
+        (None, STORED_KLL_PLAN.as_slice(), 547, 0.030563),
         (
             Some(kll_at_most(1403)),
             STORED_KLL_PLAN.as_slice(),
             1404,
-            0.059986,
+            0.055804,
         ),
         (Some(kll_at_most(2862)), KLL_PLAN.as_slice(), 2863, 0.062491),
     ];

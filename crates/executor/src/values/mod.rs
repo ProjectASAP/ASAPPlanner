@@ -12,8 +12,7 @@ mod state_column;
 pub use batch::{Batch, BatchColumn};
 pub use mapped_states::family_has_view_layout;
 #[cfg(test)]
-pub(crate) use mapped_states::state_view_bytes;
-pub(crate) use mapped_states::MappedSketchKernel;
+pub(crate) use mapped_states::{state_view_bytes, MappedSketchKernel};
 pub use state_column::StateColumn;
 pub(crate) use state_column::StateStorage;
 /// Shared ownership of schema metadata; the field model is identical at planning

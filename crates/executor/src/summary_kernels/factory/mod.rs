@@ -256,7 +256,7 @@ impl AccumulatorUpdater for KllAccumulatorUpdater {
     }
 
     fn shrink_to_fit(&mut self) {
-        self.acc.inner.shrink_to_fit();
+        self.acc.shrink_to_fit();
     }
 }
 
@@ -341,7 +341,7 @@ impl AccumulatorUpdater for DDSketchAccumulatorUpdater {
     }
 
     fn shrink_to_fit(&mut self) {
-        self.acc.inner.shrink_to_fit();
+        self.acc.shrink_to_fit();
     }
 }
 

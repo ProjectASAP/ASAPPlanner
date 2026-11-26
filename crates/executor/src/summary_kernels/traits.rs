@@ -39,6 +39,12 @@ pub trait AggregateCore: Send + Sync {
     /// state its sketch's `memory_bytes()`.
     fn approx_memory_bytes(&self) -> usize;
 
+    /// Free what the state holds only for later updates and merges, once
+    /// no more come (a sealed window, a finished merge). Answers, merges
+    /// and encodings are unchanged; a state that holds no such room keeps
+    /// the default, which does nothing.
+    fn shrink_to_fit(&mut self) {}
+
     /// The identity and footprint of a state this row shares with other
     /// rows (one Hydra grid read by every group of a build). Reservations
     /// count it once per identity, not once per row.

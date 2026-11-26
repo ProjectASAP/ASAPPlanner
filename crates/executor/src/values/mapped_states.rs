@@ -21,7 +21,7 @@ use crate::{AggregateCore, Error};
 use arrow::buffer::{Buffer, ScalarBuffer};
 use asap_sketchlib::{CountMinF64View, DdSketchView, KllView};
 use planner_types::ir::schema::FieldDataType;
-use planner_types::summary_type::{ExactKind, SketchAlgorithm};
+use planner_types::summary_type::{ExactKind, SketchAlgorithm, SketchStatistic};
 use std::sync::Arc;
 
 /// Which sketch kernel a mapped column's states belong to.
@@ -299,14 +299,37 @@ impl MappedSketches {
         }
     }
 
-    /// The interpolated quantile `q` of DDSketch state `index`, read on its
-    /// view (as `DDSketchAccumulator::estimate` answers it); `None` for an
-    /// empty state.
-    pub(crate) fn ddsketch_quantile(&self, index: usize, q: f64) -> Result<Option<f64>, String> {
-        debug_assert_eq!(self.kernel, MappedSketchKernel::DDSketch);
-        DdSketchView::from_bytes(self.state_bytes(index))
-            .expect("a view `to_view_bytes` wrote")
-            .quantile_interpolated(q)
+    /// `statistic` of state `index`, read on its view as the owned
+    /// accumulator's `estimate` answers it, with no owned sketch built: a
+    /// DDSketch's or KLL's quantile (`None` for an empty state), a
+    /// Count-Min's total. Fails for a statistic its family does not answer
+    /// or a quantile outside [0, 1].
+    pub(crate) fn estimate(
+        &self,
+        index: usize,
+        statistic: &SketchStatistic,
+    ) -> Result<Option<f64>, String> {
+        const WRITTEN: &str = "a view `to_view_bytes` wrote";
+        let bytes = self.state_bytes(index);
+        match (self.kernel, statistic) {
+            (MappedSketchKernel::DDSketch, SketchStatistic::Quantile { q }) => {
+                DdSketchView::from_bytes(bytes)
+                    .expect(WRITTEN)
+                    .quantile_interpolated(*q)
+            }
+            (MappedSketchKernel::Kll, SketchStatistic::Quantile { q }) => {
+                let view = KllView::from_bytes(bytes).expect(WRITTEN);
+                match (view.count(), (0.0..=1.0).contains(q)) {
+                    (0, _) => Ok(None),
+                    (_, true) => Ok(Some(view.quantile(*q))),
+                    (_, false) => Err("quantile must be in [0, 1]".into()),
+                }
+            }
+            (MappedSketchKernel::CountMin, SketchStatistic::PointCount { value: None, .. }) => Ok(
+                Some(CountMinF64View::from_bytes(bytes).expect(WRITTEN).total()),
+            ),
+            (kernel, statistic) => Err(format!("{kernel:?} does not answer {statistic:?}")),
+        }
     }
 
     /// The bytes state `index`'s view reads, an upper bound on what

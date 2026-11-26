@@ -14,24 +14,8 @@
         "materialized_views": []
       },
       "node_id": 1,
-      "plan_id": "8c2bbba375df73032544bda8ce858852",
       "refresh": "at_ingestion",
-      "retention_ms": 100000,
-      "view_state_key": {
-        "definition_id": "0c7f962d8fde713c1de7a58752019151",
-        "logical_properties": {
-          "parameters": {
-            "DDSketch": {
-              "alpha": 0.05
-            }
-          }
-        },
-        "window": {
-          "tumbling": {
-            "width_ms": 1000
-          }
-        }
-      }
+      "retention_ms": 100000
     },
     {
       "coverage": {
@@ -46,20 +30,8 @@
         "materialized_views": []
       },
       "node_id": 8,
-      "plan_id": "8c2bbba375df73032544bda8ce858852",
       "refresh": "at_ingestion",
-      "retention_ms": 1200000,
-      "view_state_key": {
-        "definition_id": "87fb3a2af6a1c70dca832c73960f21b2",
-        "logical_properties": {
-          "parameters": null
-        },
-        "window": {
-          "tumbling": {
-            "width_ms": 30000
-          }
-        }
-      }
+      "retention_ms": 1200000
     },
     {
       "coverage": {
@@ -76,20 +48,8 @@
         ]
       },
       "node_id": 9,
-      "plan_id": "8c2bbba375df73032544bda8ce858852",
       "refresh": "at_ingestion",
-      "retention_ms": 1200000,
-      "view_state_key": {
-        "definition_id": "87fb3a2af6a1c70dca832c73960f21b2",
-        "logical_properties": {
-          "parameters": null
-        },
-        "window": {
-          "tumbling": {
-            "width_ms": 60000
-          }
-        }
-      }
+      "retention_ms": 1200000
     },
     {
       "coverage": {
@@ -106,20 +66,8 @@
         ]
       },
       "node_id": 10,
-      "plan_id": "8c2bbba375df73032544bda8ce858852",
       "refresh": "at_ingestion",
-      "retention_ms": 1200000,
-      "view_state_key": {
-        "definition_id": "87fb3a2af6a1c70dca832c73960f21b2",
-        "logical_properties": {
-          "parameters": null
-        },
-        "window": {
-          "tumbling": {
-            "width_ms": 300000
-          }
-        }
-      }
+      "retention_ms": 1200000
     }
   ],
   "queries": [
@@ -142,8 +90,8 @@
       }
     ],
     "cost": {
-      "cost_per_second": 9.64355146368e-6,
-      "cpu_core_seconds_per_second": 0.835978033333,
+      "cost_per_second": 0.0000301034951893,
+      "cpu_core_seconds_per_second": 2.64897803333,
       "per_node": {
         "0": {
           "cost_per_second": 6.52152e-9,
@@ -160,11 +108,11 @@
           "timing": "ingestion_time"
         },
         "1": {
-          "cost_per_second": 6.0711406912e-7,
+          "cost_per_second": 7.76565780724e-7,
           "cost_source": "analytical",
-          "cpu_core_seconds_per_second": 0.03827,
-          "detail": "build DDSketch in tumbling windows of 1000 ms for 10000 groups: 100000 rows x 117 ops, 1000 group visits, 10000.0 states emitted; x 1.0000/s; keeps 153720000 bytes",
-          "ingest_cpu_core_seconds_per_second": 0.01327,
+          "cpu_core_seconds_per_second": 0.05127,
+          "detail": "build DDSketch in tumbling windows of 1000 ms for 10000 groups: 100000 rows x 247 ops, 1000 group visits, 10000.0 states emitted; x 1.0000/s; keeps 173960000 bytes",
+          "ingest_cpu_core_seconds_per_second": 0.02627,
           "multiplier": 1,
           "operator": "SummaryTumblingWindowChain",
           "priced_outside_measured_scale": false,
@@ -244,10 +192,10 @@
           "timing": "query_time"
         },
         "2": {
-          "cost_per_second": 1.23684001721e-7,
+          "cost_per_second": 1.23684001974e-7,
           "cost_source": "analytical",
           "cpu_core_seconds_per_second": 0.011,
-          "detail": "time range 100s: 100 tumbling windows of states; x 1.0000/s; holds 136 bytes for 11.000 ms",
+          "detail": "time range 100s: 100 tumbling windows of states; x 1.0000/s; holds 156 bytes for 11.000 ms",
           "ingest_cpu_core_seconds_per_second": 0.0,
           "multiplier": 1,
           "operator": "TimeRange",
@@ -258,15 +206,15 @@
           "timing": "query_time"
         },
         "3": {
-          "cost_per_second": 8.01447055256e-6,
+          "cost_per_second": 0.0000283049625663,
           "cost_source": "analytical",
-          "cpu_core_seconds_per_second": 0.711,
-          "detail": "merge 1000000 states into 10000; x 1.0000/s; holds 24440000 bytes for 711.000 ms",
+          "cpu_core_seconds_per_second": 2.511,
+          "detail": "merge 1000000 states into 10000; x 1.0000/s; holds 24680000 bytes for 2511.000 ms",
           "ingest_cpu_core_seconds_per_second": 0.0,
           "multiplier": 1,
           "operator": "SummaryMerge",
           "priced_outside_measured_scale": false,
-          "query_ms_per_step": 711.0,
+          "query_ms_per_step": 2511.0,
           "refresh_cpu_ms_per_window": 0.0,
           "refresh_wall_ms_per_window": 0.0,
           "timing": "query_time"
@@ -358,17 +306,17 @@
       },
       "source": "analytical-cost-v2 (illustrative statistics)",
       "usage": {
-        "average_memory_bytes": 211978768.948,
-        "cpu_ops_per_second": 835018033.333,
+        "average_memory_bytes": 276813409.168,
+        "cpu_ops_per_second": 2648018033.33,
         "disk_bytes": 0,
         "latency_per_query": [
           {
             "allowed_lateness_ms": 0.0,
             "evaluations_per_second": 1.0,
-            "latency_ms": 878.41,
+            "latency_ms": 2678.41,
             "precompute_execution_ms": 25.0,
             "precompute_queueing_ms": 69.5,
-            "query_execution_ms": 783.91
+            "query_execution_ms": 2583.91
           },
           {
             "allowed_lateness_ms": 0.0,
@@ -379,12 +327,12 @@
             "query_execution_ms": 92.791
           }
         ],
-        "peak_cpu_cores": 3,
-        "peak_memory_bytes": 220440341,
+        "peak_cpu_cores": 4,
+        "peak_memory_bytes": 240920361,
         "precompute_load": 0.025975,
         "recommended_configuration": {
           "ingest": {
-            "predicted_busy_thread_seconds_per_second": 0.023,
+            "predicted_busy_thread_seconds_per_second": 0.036,
             "recommended_threads": 1
           },
           "precompute": {
@@ -392,8 +340,8 @@
             "recommended_threads": 1
           },
           "query": {
-            "predicted_busy_thread_seconds_per_second": 0.787003033333,
-            "recommended_threads": 2
+            "predicted_busy_thread_seconds_per_second": 2.58700303333,
+            "recommended_threads": 4
           }
         },
         "scanned_bytes_per_second": 9600000.0
