@@ -24,8 +24,12 @@ fn generate(
     data: &DataWorkload,
     capabilities: &DeploymentCapabilities,
 ) -> PhysicalASAPMemoCandidates {
-    let physical =
-        generate_physical_asap_memo_candidates(logical, data, &capabilities.exclusions());
+    let physical = generate_physical_asap_memo_candidates(
+        logical,
+        data,
+        &capabilities.exclusions(),
+        Default::default(),
+    );
     let count = physical.physical_candidates.len();
     let mut consumer_inputs = Vec::new();
     for (_, edge) in physical.edges() {

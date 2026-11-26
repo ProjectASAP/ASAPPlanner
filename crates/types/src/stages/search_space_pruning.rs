@@ -14,12 +14,25 @@ pub struct SearchSpacePruning {
     /// needs, each reader's least θ meeting its requirement and the least
     /// θ two readers sharing the state need.
     pub threshold_theta: bool,
+    /// Rule 5, Stage 2: a query-time result is offered with $\ell$ =
+    /// `OneEvaluation` only when two readers may read it in one evaluation
+    /// (two consumer inputs, or a consumer and a query output); read once,
+    /// its `None` form does all the `OneEvaluation` one does at no more cost.
+    pub one_evaluation_by_readers: bool,
+    /// Rule 4, Stage 2: an input a consumer reads off its evaluation grid
+    /// (a cover's wider levels, a merge of narrower windows) reads only
+    /// windows stored at ingestion time, so its edges from query-time
+    /// producers are not admissible, and a producer no context can read
+    /// is pruned as reaching no query output.
+    pub context_reachability: bool,
 }
 
 impl Default for SearchSpacePruning {
     fn default() -> Self {
         Self {
             threshold_theta: true,
+            one_evaluation_by_readers: true,
+            context_reachability: true,
         }
     }
 }
@@ -27,7 +40,14 @@ impl Default for SearchSpacePruning {
 impl SearchSpacePruning {
     /// Each rule's name and switch, in pipeline order.
     fn switches(&mut self) -> Vec<(&'static str, &mut bool)> {
-        vec![("threshold_theta", &mut self.threshold_theta)]
+        vec![
+            ("threshold_theta", &mut self.threshold_theta),
+            ("context_reachability", &mut self.context_reachability),
+            (
+                "one_evaluation_by_readers",
+                &mut self.one_evaluation_by_readers,
+            ),
+        ]
     }
 
     /// Switches rule `rule` (a rule's name, or `all` for every rule) on or
@@ -80,9 +100,17 @@ mod tests {
     fn all_is_a_rule_and_an_unknown_rule_is_refused() {
         let mut pruning = SearchSpacePruning::default();
         assert_eq!(pruning.set("all", false), Ok(()));
-        assert_eq!(pruning.rules_off(), vec!["threshold_theta"]);
-        assert_eq!(pruning.set("threshold_theta", true), Ok(()));
-        assert!(pruning.rules_off().is_empty());
+        assert_eq!(
+            pruning.rules_off(),
+            vec![
+                "threshold_theta",
+                "context_reachability",
+                "one_evaluation_by_readers"
+            ]
+        );
+        assert_eq!(pruning.set("all", true), Ok(()));
+        assert_eq!(pruning.set("context_reachability", false), Ok(()));
+        assert_eq!(pruning.rules_off(), vec!["context_reachability"]);
         let error = pruning.set("no_such_rule", false).unwrap_err();
         assert!(
             error.contains("unknown search-space pruning rule no_such_rule"),

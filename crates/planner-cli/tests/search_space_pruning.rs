@@ -172,6 +172,15 @@ fn physical_candidates(document: &Value) -> &Vec<Value> {
         .unwrap()
 }
 
+/// A physical candidate's lifetime name (`None`, `OneEvaluation`,
+/// `AcrossEvaluations`).
+fn lifetime(physical: &Value) -> &str {
+    let lifetime = &physical["properties"]["lifetime"];
+    lifetime
+        .as_str()
+        .unwrap_or_else(|| lifetime.as_object().unwrap().keys().next().unwrap())
+}
+
 // The switches.
 
 /// `all=off` is accepted; a default run's document has no
@@ -346,6 +355,158 @@ fn rule1_two_ranges_sharing_windows_keep_the_optimum() {
         1_000,
         1_000,
     ));
+}
+
+// Rule 4: candidates no context can read (Stage 2).
+
+/// `quantile_over_time(0.9, m[5m])` every 60 s and every 30 s at phase
+/// 15 s: Pass 2 adds a 60 s KLL chain level that only the 5 min cover over
+/// the 15 s chain reads, and a cover reads its wider levels only from a
+/// chain kept at ingestion time. Its query-time copies have no execution
+/// in any context, so Stage 2 does not keep them.
+#[test]
+fn rule4_a_wider_level_only_a_cover_reads_is_kept_at_ingestion_time_only() {
+    let workload = json!({
+        "query_workload": {"language": "promql", "repeating_queries": [
+            repeating("quantile_over_time(0.9, m[5m])", 60_000, 0, 0.05),
+            repeating("quantile_over_time(0.9, m[5m])", 30_000, 15_000, 0.05),
+        ]},
+        "data_workload": {
+            "arrival": {"ingesting": {"rows_per_second": 1000.0}},
+            "sources": {"m": {"series_count": 1000, "metric_type": "gauge", "sample_interval": 1000}}
+        }
+    });
+    let pruned = plan(&workload, &raw_retained(), &[]);
+    let groups: BTreeMap<u64, &str> = pass2_groups(&pruned)
+        .iter()
+        .map(|group| {
+            (
+                group["id"].as_u64().unwrap(),
+                group["label"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    let wide_query_time: Vec<&Value> = physical_candidates(&pruned)
+        .iter()
+        .filter(|physical| {
+            groups[&physical["group"].as_u64().unwrap()].contains("tumbling_window_width_ms=60000")
+                && physical["properties"]["timing"] == "query_time"
+        })
+        .collect();
+    assert_eq!(wide_query_time, Vec::<&Value>::new());
+    let unpruned = plan(&workload, &raw_retained(), &["context_reachability"]);
+    assert!(physical_candidates(&pruned).len() < physical_candidates(&unpruned).len());
+    assert_same_cost(&pruned, &unpruned, "context_reachability");
+}
+
+// Rule 5: `OneEvaluation` only for a result two consumers may read in one
+// evaluation (Stage 2).
+
+/// The live candidates at most one reader can read: one live consumer
+/// candidate's input over a satisfied edge, or one query output. Two
+/// candidates of one consumer group count twice (readout copies of one
+/// group may both be selected in one evaluation).
+fn candidates_read_at_most_once(document: &Value) -> BTreeSet<CandidateKey> {
+    let live = live_candidates(document);
+    let mut reads: BTreeMap<CandidateKey, usize> = live.keys().map(|&key| (key, 0)).collect();
+    for candidate in live.values() {
+        for input in candidate["inputs"].as_array().into_iter().flatten() {
+            let group = input["group"].as_u64().unwrap();
+            for edge in input["edges"].as_array().unwrap() {
+                let producer = (group, edge["producer"].as_u64().unwrap());
+                if edge["satisfies_logical_requirement"] == json!(true) {
+                    if let Some(count) = reads.get_mut(&producer) {
+                        *count += 1;
+                    }
+                }
+            }
+        }
+    }
+    for group in pass2_groups(document) {
+        if group["roots_of"]
+            .as_array()
+            .is_some_and(|roots| !roots.is_empty())
+        {
+            let id = group["id"].as_u64().unwrap();
+            for (key, count) in reads.iter_mut() {
+                if key.0 == id {
+                    *count += 1;
+                }
+            }
+        }
+    }
+    reads
+        .into_iter()
+        .filter(|&(_, count)| count <= 1)
+        .map(|(key, _)| key)
+        .collect()
+}
+
+/// The physical candidate's logical candidate.
+fn logical_key(physical: &Value) -> CandidateKey {
+    (
+        physical["group"].as_u64().unwrap(),
+        physical["index_in_group"].as_u64().unwrap(),
+    )
+}
+
+/// A single quantile: every candidate has one reader, so no physical
+/// candidate is kept for one evaluation; the plan costs the same as with
+/// the twins.
+#[test]
+fn rule5_a_result_read_once_per_evaluation_gets_no_one_evaluation_twin() {
+    let workload = promql(
+        vec![repeating(
+            "quantile_over_time(0.99, m[5m])",
+            60_000,
+            0,
+            0.05,
+        )],
+        100,
+        1_000,
+    );
+    let pruned = plan(&workload, &raw_retained(), &[]);
+    let once = candidates_read_at_most_once(&pruned);
+    let twins: Vec<&Value> = physical_candidates(&pruned)
+        .iter()
+        .filter(|physical| {
+            lifetime(physical) == "OneEvaluation" && once.contains(&logical_key(physical))
+        })
+        .collect();
+    assert_eq!(twins, Vec::<&Value>::new());
+    let unpruned = plan(&workload, &raw_retained(), &["one_evaluation_by_readers"]);
+    assert_same_cost(&pruned, &unpruned, "one_evaluation_by_readers");
+}
+
+/// `sum(rate(m[5m])) / count(rate(m[5m]))`: one `rate` group is read by
+/// both aggregates in each evaluation, so its query-time candidates keep
+/// their `OneEvaluation` twins (computed once, read twice).
+#[test]
+fn rule5_a_result_two_consumers_read_keeps_its_one_evaluation_twin() {
+    let workload = promql(
+        vec![repeating(
+            "sum(rate(m[5m])) / count(rate(m[5m]))",
+            60_000,
+            0,
+            0.05,
+        )],
+        100,
+        1_000,
+    );
+    let pruned = plan(&workload, &raw_retained(), &[]);
+    let once = candidates_read_at_most_once(&pruned);
+    let shared_twins = physical_candidates(&pruned)
+        .iter()
+        .filter(|physical| {
+            lifetime(physical) == "OneEvaluation" && !once.contains(&logical_key(physical))
+        })
+        .count();
+    assert!(
+        shared_twins > 0,
+        "a group read twice keeps its OneEvaluation twins"
+    );
+    let unpruned = plan(&workload, &raw_retained(), &["one_evaluation_by_readers"]);
+    assert_same_cost(&pruned, &unpruned, "one_evaluation_by_readers");
 }
 
 // Rule 8a: identical candidates (fixed on main; a regression guard).

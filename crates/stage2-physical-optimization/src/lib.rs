@@ -27,7 +27,7 @@ use std::ops::Range;
 use asap_types::deployment_capabilities::DeploymentExclusion;
 use asap_types::stages::{
     CandidateForMemoGroupId, LogicalASAPMemoCandidates, MemoGroupId, PhysicalASAPMemoCandidates,
-    PhysicalCandidate, PhysicalCandidateId, PhysicalEdge, PrunedCandidate,
+    PhysicalCandidate, PhysicalCandidateId, PhysicalEdge, PrunedCandidate, SearchSpacePruning,
 };
 use asap_types::workload::DataWorkload;
 
@@ -53,6 +53,7 @@ pub fn generate_physical_asap_memo_candidates(
     logical: &LogicalASAPMemoCandidates,
     data: &DataWorkload,
     exclusions: &[DeploymentExclusion],
+    search_space_pruning: SearchSpacePruning,
 ) -> PhysicalASAPMemoCandidates {
     let memo = &logical.memo;
     let eliminated: HashSet<CandidateForMemoGroupId> = logical
@@ -60,6 +61,10 @@ pub fn generate_physical_asap_memo_candidates(
         .iter()
         .map(|pruned| pruned.candidate)
         .collect();
+    // Rule 5: how many readers each logical candidate has, its satisfied
+    // edges into consumers plus the queries whose output its group is.
+    let reads =
+        (search_space_pruning.one_evaluation_by_readers).then(|| readers_per_candidate(logical));
     let ingestion_time_offered = group::ingestion_time_offered_per_group(logical, &eliminated);
     let across_evaluations_offered =
         group::across_evaluations_offered_per_group(logical, &eliminated);
@@ -87,6 +92,9 @@ pub fn generate_physical_asap_memo_candidates(
                 logical_candidate_id,
                 ingestion_time_offered[group_index],
                 across_evaluations_offered[group_index],
+                reads
+                    .as_ref()
+                    .is_none_or(|reads| reads.get(&logical_candidate_id).copied().unwrap_or(0) > 1),
                 data,
                 exclusions,
             ) {
@@ -106,8 +114,12 @@ pub fn generate_physical_asap_memo_candidates(
                 .insert(logical_candidate_id, first..alternatives.len());
         }
     }
-    let (edges, admissible_producer_alternatives_per_input) =
-        edge::expand_edges(logical, &alternatives, &alternatives_of_logical_candidate);
+    let (edges, admissible_producer_alternatives_per_input) = edge::expand_edges(
+        logical,
+        &alternatives,
+        &alternatives_of_logical_candidate,
+        search_space_pruning.context_reachability,
+    );
     // Candidates that cannot be built or that no query output reads.
     let prune_reasons = pruning::prune_reasons(
         &alternatives,
@@ -153,4 +165,37 @@ pub fn generate_physical_asap_memo_candidates(
         edges,
         pruned_candidates,
     )
+}
+
+/// Per logical candidate, how many readers may read it in one evaluation:
+/// each satisfied logical edge into a consumer input (two candidates of
+/// one consumer group count twice, as readout copies may both be
+/// selected), plus each query whose output its group is. A candidate with
+/// at most one reader needs no `OneEvaluation` form
+/// (`SearchSpacePruning::one_evaluation_by_readers`).
+///
+/// Example: in `sum(rate(m[5m])) / count(rate(m[5m]))` the one `rate`
+/// candidate has two readers, the `sum` and the `count`.
+fn readers_per_candidate(
+    logical: &LogicalASAPMemoCandidates,
+) -> HashMap<CandidateForMemoGroupId, usize> {
+    let mut reads: HashMap<CandidateForMemoGroupId, usize> = HashMap::new();
+    for edge in &logical.edges {
+        if edge.satisfies_logical_requirement {
+            *reads.entry(edge.producer_candidate_id).or_default() += 1;
+        }
+    }
+    let memo = &logical.memo;
+    for group in memo.root_groups() {
+        let queries = memo.queries_rooted_at(group).len();
+        for index_in_group in 0..memo.groups()[group.0 as usize].candidates.len() {
+            *reads
+                .entry(CandidateForMemoGroupId {
+                    group,
+                    index_in_group,
+                })
+                .or_default() += queries;
+        }
+    }
+    reads
 }
