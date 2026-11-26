@@ -230,7 +230,7 @@
       }
     ],
     "cost": {
-      "cost_per_second": 32.8014583462,
+      "cost_per_second": 23.9418953469,
       "cpu_core_seconds_per_second": 0.0143185769167,
       "per_node": {
         "0": {
@@ -248,10 +248,10 @@
           "timing": "ingestion_time"
         },
         "1": {
-          "cost_per_second": 7.438125,
+          "cost_per_second": 4.071125,
           "cost_source": "analytical",
           "cpu_core_seconds_per_second": 0.000163,
-          "detail": "build exact Counter accumulator in tumbling windows of 60000 ms for 1000 groups: 1000 rows x 107 ops, 100 group visits, 16.7 states emitted; x 1.0000/s; keeps 58201000 bytes",
+          "detail": "build exact Counter accumulator in tumbling windows of 60000 ms for 1000 groups: 1000 rows x 107 ops, 100 group visits, 16.7 states emitted; x 1.0000/s; keeps 31265000 bytes",
           "ingest_cpu_core_seconds_per_second": 0.000138,
           "multiplier": 1,
           "operator": "SummaryTumblingWindowChain",
@@ -262,10 +262,10 @@
           "timing": "ingestion_time"
         },
         "10": {
-          "cost_per_second": 1.47795833333,
+          "cost_per_second": 0.750458333333,
           "cost_source": "analytical",
           "cpu_core_seconds_per_second": 0.0000108333333333,
-          "detail": "merge tumbling windows of 60000 ms into 300000 ms for 1000 groups: 16.7 states merged, 3.3 states emitted; x 1.0000/s; keeps 11737000 bytes",
+          "detail": "merge tumbling windows of 60000 ms into 300000 ms for 1000 groups: 16.7 states merged, 3.3 states emitted; x 1.0000/s; keeps 5917000 bytes",
           "ingest_cpu_core_seconds_per_second": 0.0,
           "multiplier": 1,
           "operator": "SummaryMergeWindows",
@@ -276,10 +276,10 @@
           "timing": "ingestion_time"
         },
         "11": {
-          "cost_per_second": 0.501958333333,
+          "cost_per_second": 0.254458333333,
           "cost_source": "analytical",
           "cpu_core_seconds_per_second": 2.83333333333e-6,
-          "detail": "merge tumbling windows of 300000 ms into 900000 ms for 1000 groups: 3.3 states merged, 1.1 states emitted; x 1.0000/s; keeps 3993000 bytes",
+          "detail": "merge tumbling windows of 300000 ms into 900000 ms for 1000 groups: 3.3 states merged, 1.1 states emitted; x 1.0000/s; keeps 2013000 bytes",
           "ingest_cpu_core_seconds_per_second": 0.0,
           "multiplier": 1,
           "operator": "SummaryMergeWindows",
@@ -290,10 +290,10 @@
           "timing": "ingestion_time"
         },
         "12": {
-          "cost_per_second": 0.101399284867,
+          "cost_per_second": 0.101399284107,
           "cost_source": "analytical",
           "cpu_core_seconds_per_second": 0.000101399283333,
-          "detail": "time range cover 3600s: 3.07 + 2.00 + 4.00 tumbling windows of states per level; x 1.0167/s; holds 121 bytes for 0.100 ms",
+          "detail": "time range cover 3600s: 3.07 + 2.00 + 4.00 tumbling windows of states per level; x 1.0167/s; holds 61 bytes for 0.100 ms",
           "ingest_cpu_core_seconds_per_second": 0.0,
           "multiplier": 1,
           "operator": "TimeRangeCover",
@@ -304,10 +304,10 @@
           "timing": "query_time"
         },
         "13": {
-          "cost_per_second": 4.34473987986,
+          "cost_per_second": 4.34470729481,
           "cost_source": "analytical",
           "cpu_core_seconds_per_second": 0.00434467416667,
-          "detail": "merge 9067 states into 1000; x 1.0167/s; holds 121000 bytes for 4.273 ms",
+          "detail": "merge 9067 states into 1000; x 1.0167/s; holds 61000 bytes for 4.273 ms",
           "ingest_cpu_core_seconds_per_second": 0.0,
           "multiplier": 1,
           "operator": "SummaryMerge",
@@ -360,10 +360,10 @@
           "timing": "query_time"
         },
         "2": {
-          "cost_per_second": 1.47795833333,
+          "cost_per_second": 0.798958333333,
           "cost_source": "analytical",
           "cpu_core_seconds_per_second": 0.0000108333333333,
-          "detail": "merge tumbling windows of 60000 ms into 300000 ms for 1000 groups: 16.7 states merged, 3.3 states emitted; x 1.0000/s; keeps 11737000 bytes",
+          "detail": "merge tumbling windows of 60000 ms into 300000 ms for 1000 groups: 16.7 states merged, 3.3 states emitted; x 1.0000/s; keeps 6305000 bytes",
           "ingest_cpu_core_seconds_per_second": 0.0,
           "multiplier": 1,
           "operator": "SummaryMergeWindows",
@@ -374,10 +374,10 @@
           "timing": "ingestion_time"
         },
         "3": {
-          "cost_per_second": 0.501958333333,
+          "cost_per_second": 0.270958333333,
           "cost_source": "analytical",
           "cpu_core_seconds_per_second": 2.83333333333e-6,
-          "detail": "merge tumbling windows of 300000 ms into 900000 ms for 1000 groups: 3.3 states merged, 1.1 states emitted; x 1.0000/s; keeps 3993000 bytes",
+          "detail": "merge tumbling windows of 300000 ms into 900000 ms for 1000 groups: 3.3 states merged, 1.1 states emitted; x 1.0000/s; keeps 2145000 bytes",
           "ingest_cpu_core_seconds_per_second": 0.0,
           "multiplier": 1,
           "operator": "SummaryMergeWindows",
@@ -388,10 +388,10 @@
           "timing": "ingestion_time"
         },
         "4": {
-          "cost_per_second": 0.101399284867,
+          "cost_per_second": 0.101399284157,
           "cost_source": "analytical",
           "cpu_core_seconds_per_second": 0.000101399283333,
-          "detail": "time range cover 3600s: 3.07 + 2.00 + 4.00 tumbling windows of states per level; x 1.0167/s; holds 121 bytes for 0.100 ms",
+          "detail": "time range cover 3600s: 3.07 + 2.00 + 4.00 tumbling windows of states per level; x 1.0167/s; holds 65 bytes for 0.100 ms",
           "ingest_cpu_core_seconds_per_second": 0.0,
           "multiplier": 1,
           "operator": "TimeRangeCover",
@@ -402,10 +402,10 @@
           "timing": "query_time"
         },
         "5": {
-          "cost_per_second": 4.34473987986,
+          "cost_per_second": 4.34470946714,
           "cost_source": "analytical",
           "cpu_core_seconds_per_second": 0.00434467416667,
-          "detail": "merge 9067 states into 1000; x 1.0167/s; holds 121000 bytes for 4.273 ms",
+          "detail": "merge 9067 states into 1000; x 1.0167/s; holds 65000 bytes for 4.273 ms",
           "ingest_cpu_core_seconds_per_second": 0.0,
           "multiplier": 1,
           "operator": "SummaryMerge",
@@ -458,10 +458,10 @@
           "timing": "ingestion_time"
         },
         "9": {
-          "cost_per_second": 7.401125,
+          "cost_per_second": 3.793625,
           "cost_source": "analytical",
           "cpu_core_seconds_per_second": 0.000126,
-          "detail": "build exact Counter accumulator in tumbling windows of 60000 ms for 1000 groups: 1000 rows x 70 ops, 100 group visits, 16.7 states emitted; x 1.0000/s; keeps 58201000 bytes",
+          "detail": "build exact Counter accumulator in tumbling windows of 60000 ms for 1000 groups: 1000 rows x 70 ops, 100 group visits, 16.7 states emitted; x 1.0000/s; keeps 29341000 bytes",
           "ingest_cpu_core_seconds_per_second": 0.000101,
           "multiplier": 1,
           "operator": "SummaryTumblingWindowChain",
@@ -474,7 +474,7 @@
       },
       "source": "analytical-cost-v2 (illustrative statistics)",
       "usage": {
-        "average_memory_bytes": 147863051.436,
+        "average_memory_bytes": 76986547.442,
         "cpu_ops_per_second": 14307376.9167,
         "disk_bytes": 0,
         "latency_per_query": [
@@ -488,7 +488,7 @@
           }
         ],
         "peak_cpu_cores": 2,
-        "peak_memory_bytes": 148104410,
+        "peak_memory_bytes": 77112294,
         "precompute_load": 0.0000773333333333,
         "recommended_configuration": {
           "ingest": {
