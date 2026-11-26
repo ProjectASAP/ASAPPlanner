@@ -6,11 +6,11 @@
 //! cut, with [`RootPruneReason::AboveReaderThreshold`], and dead-candidate
 //! elimination removes the candidates left without a consumer.
 //!
-//! Example: `quantile_over_time(0.99, m[5m])` at relative 0.05 reads a KLL
-//! state listed at k = 26 … 2863. Its readout's edges are satisfied from
-//! k = 132 up; k = 132 is the threshold, so the edges from k = 269, 547,
-//! 1404 and 2863 are cut and those builds (and the merges over them) are
-//! dead.
+//! Example: `topk(5, sum by (host) (m))` at relative 0.05 reads a
+//! `CmsWithHeap` state listed at 240 θs; its readout's edges are satisfied
+//! by the θs at least (width 55, depth 7, heap 10) in some field
+//! combination, and only the least of those (the thresholds) keep their
+//! edges, so the other builds are dead.
 //!
 //! Exactness: a θ no smaller than another in every size field (a larger
 //! KLL `k`, a wider or deeper Count-Min, a smaller DDSketch α) meets every
@@ -19,6 +19,13 @@
 //! place at no more cost; a θ two readers share is the least listed θ at
 //! least both their thresholds, kept. θs of different shapes do not
 //! compare and are each kept.
+//!
+//! Sketches that keep up to `k` items (KLL, KMV, Hydra over KLL) are left
+//! as they are: once `k` reaches the values a state holds they keep every
+//! value and stop compacting, so a larger `k` can cost less (a stored KLL
+//! window at k = 1,404 costs less than one at k = 547 in the
+//! `deployment_exclusions` example), and the least θ meeting a reader is
+//! not the cheapest.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -71,7 +78,7 @@ pub(crate) fn cut_edges_above_thresholds(
             if edge.satisfies.is_ok()
                 && live(&edge.consumer)
                 && live(&edge.producer)
-                && theta(edge.producer).is_some()
+                && theta(edge.producer).is_some_and(costs_grow_with_every_field)
                 && !excluded_by_range(edge.producer.group)
             {
                 readers
@@ -149,6 +156,17 @@ pub(crate) fn cut_edges_above_thresholds(
         }
         cut += cut_now;
     }
+}
+
+/// Whether a larger θ of `theta`'s shape never costs less: every shape but
+/// the item-keeping ones (module doc).
+fn costs_grow_with_every_field(theta: &SketchParams) -> bool {
+    !matches!(
+        theta,
+        SketchParams::Kll { .. }
+            | SketchParams::Kmv { .. }
+            | SketchParams::Hydra(HydraParams::HydraKll { .. })
+    )
 }
 
 /// A θ's shape and its size fields, each oriented so larger is larger
