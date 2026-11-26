@@ -11,7 +11,7 @@
 //! logical edges and physical candidates, not by the planner's pruning
 //! code.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::process::Command;
 
 use serde_json::{json, Value};
@@ -155,6 +155,13 @@ fn live_candidates(document: &Value) -> BTreeMap<CandidateKey, &Value> {
                 .map(move |candidate| ((id, candidate["index"].as_u64().unwrap()), candidate))
         })
         .collect()
+}
+
+/// Stage 2's physical candidates.
+fn physical_candidates(document: &Value) -> &Vec<Value> {
+    document["stage2_physical_asap_optimization"]["physical_candidates"]
+        .as_array()
+        .unwrap()
 }
 
 // The switches.
@@ -302,4 +309,47 @@ fn rule8_no_group_holds_two_identical_candidates() {
         }
     }
     assert_eq!(duplicates, Vec::<String>::new());
+}
+
+// Rule 8b: logical candidates no physical form can build.
+
+/// `topk(5, sum by (host) (m))` over a gauge whose sign is not declared:
+/// a Count-Min build over weights not proven non-negative is unusable in
+/// every physical form, and whether the weights are proven is a logical
+/// fact, so Pass 1 lists no such θ (8b; Stage 2 pruned 240 `CmsWithHeap`
+/// θs and the readout above them before). Every live logical candidate
+/// then has a physical candidate, and the plan costs the same.
+#[test]
+fn rule8_a_count_min_build_over_unproven_weights_is_not_a_logical_candidate() {
+    let workload = json!({
+        "query_workload": {"language": "promql", "repeating_queries": [
+            repeating("topk(5, sum by (host) (m))", 60_000, 0, 0.05),
+        ]},
+        "data_workload": {
+            "arrival": {"ingesting": {"rows_per_second": 1000.0}},
+            "sources": {"m": {"series_count": 1000, "metric_type": "gauge", "sample_interval": 1000}}
+        }
+    });
+    let document = plan(&workload, &raw_retained(), &[]);
+    let physical: BTreeSet<CandidateKey> = physical_candidates(&document)
+        .iter()
+        .map(|p| {
+            (
+                p["group"].as_u64().unwrap(),
+                p["index_in_group"].as_u64().unwrap(),
+            )
+        })
+        .collect();
+    let without_physical: Vec<String> = live_candidates(&document)
+        .iter()
+        .filter(|(key, _)| !physical.contains(key))
+        .map(|((group, index), candidate)| {
+            format!(
+                "G{group}[{index}] {} θ={}",
+                candidate["label"], candidate["parameters"]
+            )
+        })
+        .collect();
+    assert_eq!(without_physical, Vec::<String>::new());
+    assert!(cost(&document) > 0.0);
 }
