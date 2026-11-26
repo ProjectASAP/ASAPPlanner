@@ -105,6 +105,14 @@ pub enum RootPruneReason {
         consumer: CandidateForMemoGroupId,
         input: usize,
     },
+    /// Search-space pruning rule 1 (`SearchSpacePruning::threshold_theta`):
+    /// the producer's θ is larger than the least θ of its shape that also
+    /// meets this consumer input (the reader's threshold), and no two
+    /// readers of its group need it to share one state.
+    AboveReaderThreshold {
+        consumer: CandidateForMemoGroupId,
+        input: usize,
+    },
     /// The candidate never had a consumer and is not a query output. A
     /// candidate whose consumers were eliminated is traced to their causes.
     NoConsumer,

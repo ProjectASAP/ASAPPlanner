@@ -72,7 +72,7 @@ pub fn pass2_with_evidence(
     entries: &[QueryWorkloadEntry],
     evidence: &dyn AccuracyEvidence,
 ) -> LogicalASAPMemoCandidates {
-    generate_logical_asap_memo_candidates(memo, entries, evidence).unwrap()
+    generate_logical_asap_memo_candidates(memo, entries, evidence, Default::default()).unwrap()
 }
 
 /// The edges into input `input` of `consumer`: each producer and α^log.
