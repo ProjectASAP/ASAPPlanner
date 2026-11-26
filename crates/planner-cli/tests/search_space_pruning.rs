@@ -423,15 +423,11 @@ fn candidates_read_at_most_once(document: &Value) -> BTreeSet<CandidateKey> {
         }
     }
     for group in pass2_groups(document) {
-        if group["roots_of"]
-            .as_array()
-            .is_some_and(|roots| !roots.is_empty())
-        {
-            let id = group["id"].as_u64().unwrap();
-            for (key, count) in reads.iter_mut() {
-                if key.0 == id {
-                    *count += 1;
-                }
+        let outputs = group["roots_of"].as_array().map_or(0, Vec::len);
+        let id = group["id"].as_u64().unwrap();
+        for (key, count) in reads.iter_mut() {
+            if key.0 == id {
+                *count += outputs;
             }
         }
     }
