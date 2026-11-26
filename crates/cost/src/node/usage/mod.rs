@@ -116,16 +116,22 @@ pub struct NodeCost {
 /// plan is known (resident cached windows, partial copies, kept results
 /// and answers, raw data on disk), and the plan's
 /// [`ResourceUsage`](crate::ResourceUsage) memory, disk and disk traffic
-/// are the sums over its nodes. `bytes_per_window` is a size, not summed.
+/// are the sums over its nodes. `bytes_per_window` and
+/// `stored_bytes_per_window` are sizes, not summed.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct NodeMemoryAndDisk {
     /// Memory it holds, averaged over time.
     pub average_memory_bytes: f64,
     /// The most memory it holds at once.
     pub peak_memory_bytes: u64,
-    /// An ingestion-time view's bytes per window (one output); 0 for any
-    /// other node.
+    /// An ingestion-time view's decoded bytes per window (one output), as
+    /// memory holds it; 0 for any other node.
     pub bytes_per_window: u64,
+    /// An ingestion-time view's bytes per window in its files, which its
+    /// disk, disk writes and cold reads count: its states at the measured
+    /// `stored_bytes_per_state` (file bytes per state's row), else
+    /// `bytes_per_window`; 0 for any other node.
+    pub stored_bytes_per_window: u64,
     /// Bytes it keeps on disk at the peak.
     pub disk_bytes: u64,
     /// Bytes it writes to disk per second: a view under the data plane's
@@ -543,8 +549,11 @@ pub fn reads_one_batch_of<C>(
 /// ([`NodeResourceUsageAndCost::cached_windows`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CachedViewWindows {
-    /// The bytes of one window.
+    /// The decoded bytes of one window, as the cache holds it.
     pub bytes_per_window: u64,
+    /// The bytes of one window in the view's files, as a cold read reads
+    /// it ([`NodeMemoryAndDisk::stored_bytes_per_window`]).
+    pub stored_bytes_per_window: u64,
     /// The width of its windows, the time between two outputs
     /// ([`output_interval_ms`]).
     pub width_ms: u64,
@@ -624,8 +633,9 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
     data: &DataWorkload,
     settings: &'a CostInputs,
 ) -> Result<(NodeResourceUsageAndCost<'a>, NodeCostTerms), AnalyticalCostError> {
-    // What a per-series state's row holds beside its state.
-    let series_row_bytes_beside_state = settings.data_plane_execution.stored_row_bytes_beside_state;
+    // How the executor runs the plan; its row layout sets what a
+    // per-series state's row holds beside its state.
+    let data_plane_execution = &settings.data_plane_execution;
     // A query-time computation over raw rows short of their range is not
     // offered.
     if let Some(short) = query_time_computation_short_of_source_rows(node, producers) {
@@ -965,7 +975,7 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
             state_bytes_per_row(
                 producer.output_facts.statistics,
                 producer.output_schema,
-                series_row_bytes_beside_state,
+                data_plane_execution,
             )
         })
     };
@@ -1645,7 +1655,7 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
                         let state_bytes = state_bytes_per_row(
                             producer.output_facts.statistics,
                             producer.output_schema,
-                            series_row_bytes_beside_state,
+                            data_plane_execution,
                         );
                         EdgeStatistics {
                             rows: input.rows,
@@ -1655,7 +1665,7 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
                                     state_bytes
                                         + state_row_bytes_beside_state(
                                             &node.output_schema,
-                                            series_row_bytes_beside_state,
+                                            data_plane_execution,
                                         ),
                                 )
                                 .ok_or(AnalyticalCostError::Overflow)?,
@@ -1721,7 +1731,7 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
                         open_state_bytes
                             + state_row_bytes_beside_state(
                                 &node.output_schema,
-                                series_row_bytes_beside_state,
+                                data_plane_execution,
                             ),
                     )
                     .ok_or(AnalyticalCostError::Overflow)?,
@@ -1735,7 +1745,7 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
                         state_bytes
                             + state_row_bytes_beside_state(
                                 &node.output_schema,
-                                series_row_bytes_beside_state,
+                                data_plane_execution,
                             ),
                     )
                     .ok_or(AnalyticalCostError::Overflow)?,
@@ -1808,7 +1818,7 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
                         open_state_bytes
                             + state_row_bytes_beside_state(
                                 &node.output_schema,
-                                series_row_bytes_beside_state,
+                                data_plane_execution,
                             ),
                     )
                     .ok_or(AnalyticalCostError::Overflow)?,
@@ -1849,7 +1859,7 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
                         state_bytes
                             + state_row_bytes_beside_state(
                                 &node.output_schema,
-                                series_row_bytes_beside_state,
+                                data_plane_execution,
                             ),
                     )
                     .ok_or(AnalyticalCostError::Overflow)?,
@@ -1915,7 +1925,7 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
             let input_state_bytes = state_bytes_per_row(
                 narrower.output_facts.statistics,
                 narrower.output_schema,
-                series_row_bytes_beside_state,
+                data_plane_execution,
             );
             let merged_state_bytes = match (family, merged_input_rows) {
                 (StateFamily::Sketch(params), Some(rows)) => sketch_state_bytes(params, rows),
@@ -1943,7 +1953,7 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
                         merged_state_bytes
                             + state_row_bytes_beside_state(
                                 &node.output_schema,
-                                series_row_bytes_beside_state,
+                                data_plane_execution,
                             ),
                     )
                     .ok_or(AnalyticalCostError::Overflow)?,
@@ -1996,7 +2006,7 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
                 state_bytes_per_row(
                     producer.output_facts.statistics,
                     producer.output_schema,
-                    series_row_bytes_beside_state,
+                    data_plane_execution,
                 )
             };
             // Each input's states per group, every one folding its rows.
@@ -2047,10 +2057,7 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
             let out = EdgeStatistics {
                 rows: group_count,
                 bytes: (merged_state_bytes
-                    + state_row_bytes_beside_state(
-                        &node.output_schema,
-                        series_row_bytes_beside_state,
-                    ))
+                    + state_row_bytes_beside_state(&node.output_schema, data_plane_execution))
                 .checked_mul(group_count)
                 .ok_or(AnalyticalCostError::Overflow)?,
             };
@@ -2260,6 +2267,25 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
     // build holds while it runs, and the newest window an ingestion-time
     // view keeps besides its sealed ones.
     let open_state = open_output_bytes.map_or(state, |open| state.max(open));
+    // One output's bytes in a stored view's files: its rows at the measured
+    // file bytes per state's row, else its decoded bytes (`state`). Only an
+    // output of states has them; raw rows kept at ingestion do not.
+    let stored_output_bytes = match measured_unit_cost.and_then(|p| p.stored_bytes_per_state) {
+        Some(bytes)
+            if outputs_states(&node.output_schema) && !raw_rows_materialized_at_ingestion =>
+        {
+            (out.rows as f64 * bytes).round() as u64
+        }
+        _ => state,
+    };
+    // The bytes in files of `decoded` bytes kept on disk, at an output's
+    // stored-to-decoded ratio.
+    let decoded_to_stored_bytes = |decoded: u64| -> u64 {
+        match state {
+            0 => decoded,
+            _ => (decoded as f64 * stored_output_bytes as f64 / state as f64).round() as u64,
+        }
+    };
     let (mut materialized_bytes, medium) = match (ingestion, node.lifetime, &node.payload) {
         (_, Lifetime::None, _) => {
             // A summary build holds its states open while it runs.
@@ -2292,9 +2318,13 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
                         .checked_add(open_state)
                         .ok_or(AnalyticalCostError::Overflow)?;
                 }
-                StorageMedium::Disk => disk_bytes = between,
+                StorageMedium::Disk => {
+                    disk_bytes = stored_output_bytes
+                        .checked_mul(retained_output_count - 1)
+                        .ok_or(AnalyticalCostError::Overflow)?
+                }
             }
-            detail += &format!("; materializes {between} bytes across evaluations");
+            detail += &format!("; materializes {between} decoded bytes across evaluations");
             (0, medium)
         }
         (_, Lifetime::OneEvaluation(medium), _) => {
@@ -2303,7 +2333,7 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
                     held_bytes = Some(open_state);
                     peak_memory_bytes = open_state;
                 }
-                StorageMedium::Disk => disk_bytes = state,
+                StorageMedium::Disk => disk_bytes = stored_output_bytes,
             }
             (0, medium)
         }
@@ -2337,9 +2367,11 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
     }
     // A view's bytes per window: one output of an ingestion-time view kept
     // across evaluations; raw rows kept at ingestion are not windows.
-    let view_bytes_per_window = match (ingestion, node.lifetime) {
-        (true, Lifetime::AcrossEvaluations(_)) if !raw_rows_materialized_at_ingestion => state,
-        _ => 0,
+    let (view_bytes_per_window, view_stored_bytes_per_window) = match (ingestion, node.lifetime) {
+        (true, Lifetime::AcrossEvaluations(_)) if !raw_rows_materialized_at_ingestion => {
+            (state, stored_output_bytes)
+        }
+        _ => (0, 0),
     };
     // Under a window cache, an in-memory view's retained windows are in its
     // files, and only the one being built in memory here: the caller adds
@@ -2364,25 +2396,26 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
             let windows_on_disk = kept_ms
                 .div_ceil(output_interval_ms)
                 .max(retained_output_count);
-            disk_bytes = state
+            disk_bytes = stored_output_bytes
                 .checked_mul(windows_on_disk)
                 .ok_or(AnalyticalCostError::Overflow)?;
             let average_kept_ms = retention_ms as f64
                 + cache.retention_margin_ms as f64
                 + cache.file_span_ms as f64 / 2.0;
             disk_bytes_charged = Some(
-                state as f64
+                stored_output_bytes as f64
                     * (average_kept_ms / output_interval_ms as f64)
                         .max(retained_output_count as f64),
             );
             average_memory_bytes = open_state as f64;
             peak_memory_bytes = open_state;
             detail += &format!(
-                "; keeps {windows_on_disk} windows of {state} bytes on disk \
+                "; keeps {windows_on_disk} windows of {stored_output_bytes} bytes on disk \
                  ({retained_output_count} retained), {open_state} bytes building in memory"
             );
             cached_windows = Some(CachedViewWindows {
                 bytes_per_window: state,
+                stored_bytes_per_window: stored_output_bytes,
                 width_ms: output_interval_ms,
                 retained: retained_output_count,
             });
@@ -2407,11 +2440,19 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
                 peak_memory_bytes = materialized_bytes;
             }
             StorageMedium::Disk => {
-                disk_bytes = materialized_bytes;
+                disk_bytes = decoded_to_stored_bytes(materialized_bytes);
                 disk_bytes_charged = exact_bytes;
             }
         }
-        detail += &format!("; keeps {materialized_bytes} bytes");
+        detail += &format!(
+            "; keeps {materialized_bytes} bytes{}",
+            match (medium, disk_bytes) {
+                (StorageMedium::Disk, stored) if stored != materialized_bytes => {
+                    format!(" decoded, {stored} in files")
+                }
+                _ => String::new(),
+            }
+        );
     }
     if let Payload::NonASAP(NonASAPOp::Scan { source, .. }) = &node.payload {
         if !ingestion {
@@ -2658,6 +2699,7 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
                 average_memory_bytes,
                 peak_memory_bytes,
                 bytes_per_window: view_bytes_per_window,
+                stored_bytes_per_window: view_stored_bytes_per_window,
                 disk_bytes,
                 // Each window is written to disk when it closes: a view on
                 // disk, or one under the window cache, which keeps every
@@ -2665,7 +2707,9 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
                 disk_written_bytes_per_second: match cached_windows.is_some()
                     || node.lifetime == Lifetime::AcrossEvaluations(StorageMedium::Disk)
                 {
-                    true => view_bytes_per_window as f64 * 1_000.0 / output_interval_ms as f64,
+                    true => {
+                        view_stored_bytes_per_window as f64 * 1_000.0 / output_interval_ms as f64
+                    }
                     false => 0.0,
                 },
                 disk_read_bytes_per_second: 0.0,

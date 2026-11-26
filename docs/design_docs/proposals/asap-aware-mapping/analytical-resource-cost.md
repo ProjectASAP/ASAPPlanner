@@ -824,8 +824,14 @@ column takes (declared in `distinct_values_per_label`, else every row's
 differs). A KMV build compares each row's hash with the hashes its state
 retains until the state holds `k` of them, so its cost per row depends on
 `k`, its rows per state and the distinct values; a KMV merge inserts each
-hash an input state retains the same way. A state's row on any edge holds
-its labels, its window's time and its series identity beside the state; a
+hash an input state retains the same way. A per-series state's row holds,
+beside the state, its offset in the state column and a dictionary key per
+label column (the series identity is one), the label text being kept once
+per series per file and the window time once per window; a grouped state's
+row holds its window's time and its group keys. A stored view's window has
+two sizes: its decoded bytes, which memory holds, and its bytes in the
+view's files (its states at a measured stored size per state's row, else
+the decoded bytes), which its disk, disk writes and cold reads count; a
 DDSketch state is sized for the values it is expected to hold, spread like
 latencies, not for the most it could hold; a column's declared
 `column_magnitudes` caps that spread and never raises it. Merging exact Min or

@@ -280,18 +280,23 @@ pub struct DataPlaneExecution {
     /// so a range request computes only the steps it has not answered;
     /// `None` (default): no answer is kept and every step is computed.
     pub answer_cache: Option<AnswerCache>,
-    /// Bytes a stored per-series state's row holds beside its state: its
-    /// window's time and its series key, no label text (a series' labels
-    /// are derived from its identity). Default 72: an 8-byte window time
-    /// and a 64-byte series key (a serialized label set, e.g.
-    /// `{"instance":"host-17:9100","job":"api","region":"r1"}`, about 55
-    /// bytes, and a 4-byte offset, rounded up; the data workload declares
-    /// no label lengths).
-    pub stored_row_bytes_beside_state: u64,
+    /// Bytes a stored per-series state's row holds for its state's offset
+    /// in the view's state column. Default 4 (a `u32`).
+    pub state_offset_bytes_per_row: u64,
+    /// Bytes a stored per-series state's row holds per label column, each
+    /// text column (the series identity is one): a dictionary key; the label text is kept
+    /// once per series per file, and the window time once per window, not
+    /// per row. Default 4 (a `u32`). Example: a per-series Sum carrying
+    /// `job`, `region` and `service` holds 4 + 4 × 4 = 20 bytes beside its
+    /// state.
+    pub key_bytes_per_label_column: u64,
 }
 
-/// The default [`DataPlaneExecution::stored_row_bytes_beside_state`].
-const DEFAULT_STORED_ROW_BYTES_BESIDE_STATE: u64 = 72;
+/// The default [`DataPlaneExecution::state_offset_bytes_per_row`]: a `u32`.
+const DEFAULT_STATE_OFFSET_BYTES_PER_ROW: u64 = 4;
+
+/// The default [`DataPlaneExecution::key_bytes_per_label_column`]: a `u32`.
+const DEFAULT_KEY_BYTES_PER_LABEL_COLUMN: u64 = 4;
 
 /// Query-time results kept after their evaluation time
 /// (`docs/design_docs/proposals/cost-terms-from-calibration.md`, section
@@ -362,7 +367,8 @@ impl Default for DataPlaneExecution {
             view_window_cache: None,
             kept_query_time_results: None,
             answer_cache: None,
-            stored_row_bytes_beside_state: DEFAULT_STORED_ROW_BYTES_BESIDE_STATE,
+            state_offset_bytes_per_row: DEFAULT_STATE_OFFSET_BYTES_PER_ROW,
+            key_bytes_per_label_column: DEFAULT_KEY_BYTES_PER_LABEL_COLUMN,
         }
     }
 }

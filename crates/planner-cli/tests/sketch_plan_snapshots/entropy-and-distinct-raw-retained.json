@@ -21,7 +21,7 @@
       }
     ],
     "cost": {
-      "cost_per_second": 4.97341613969e-8,
+      "cost_per_second": 4.97334591409e-8,
       "cpu_core_seconds_per_second": 0.00439816666667,
       "per_node": {
         "0": {
@@ -53,10 +53,10 @@
           "timing": "query_time"
         },
         "2": {
-          "cost_per_second": 1.08178937114e-8,
+          "cost_per_second": 1.08171914554e-8,
           "cost_source": "analytical",
           "cpu_core_seconds_per_second": 0.000954,
-          "detail": "build Kmv into 10000 states: 200000 rows x 116.2 ops, 200000 group visits; x 0.0167/s; holds 83040000 bytes for 57.240 ms",
+          "detail": "build Kmv into 10000 states: 200000 rows x 116.2 ops, 200000 group visits; x 0.0167/s; holds 82400000 bytes for 57.240 ms",
           "ingest_cpu_core_seconds_per_second": 0.0,
           "multiplier": 1,
           "operator": "SummaryAgg",
@@ -111,7 +111,7 @@
       },
       "source": "analytical-cost-v2 (illustrative statistics)",
       "usage": {
-        "average_memory_bytes": 84850.02712,
+        "average_memory_bytes": 84239.46712,
         "cpu_ops_per_second": 4387500.0,
         "disk_bytes": 6400000,
         "latency_per_query": [
@@ -133,7 +133,7 @@
           }
         ],
         "peak_cpu_cores": 2,
-        "peak_memory_bytes": 91360064,
+        "peak_memory_bytes": 90720064,
         "precompute_load": -0.0,
         "recommended_configuration": {
           "ingest": {

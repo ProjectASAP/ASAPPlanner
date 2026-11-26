@@ -868,10 +868,11 @@ fn priced_bytes_agree_with_the_executor() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
-/// A per-series state's row holds its window's time and its series key
-/// beside the state (72 bytes by default), and no label text; the state's
-/// own bytes, which a merge is costed by, leave them out. A stored
-/// per-series Sum carrying `job`: 128 bytes per row, 56 of them its state.
+/// A per-series state's row holds, beside the state, its offset and a key
+/// per text column (4 + 2 × 4 = 12 bytes at the defaults), and no label
+/// text; the state's own bytes, which a merge is costed by, leave them out.
+/// A stored per-series Sum carrying `job`: 36 bytes per row, 24 of them its
+/// state.
 #[test]
 fn state_bytes_per_row_leave_out_what_the_row_holds_beside_its_state() {
     use asap_types::ir::schema::{Field, PROMQL_SERIES_IDENTITY};
@@ -890,12 +891,13 @@ fn state_bytes_per_row_leave_out_what_the_row_holds_beside_its_state() {
             false,
         ),
     ]);
-    assert_eq!(state_row_bytes_beside_state(&schema, 72), 72);
+    let execution = crate::DataPlaneExecution::default();
+    assert_eq!(state_row_bytes_beside_state(&schema, &execution), 12);
     let edge = EdgeStatistics {
         rows: 1_000,
-        bytes: 128_000,
+        bytes: 36_000,
     };
-    assert_eq!(state_bytes_per_row(edge, &schema, 72), 56);
+    assert_eq!(state_bytes_per_row(edge, &schema, &execution), 24);
 }
 
 /// `n` values of series `series` with a wide floor: a lognormal of median
@@ -1259,8 +1261,8 @@ fn stored_ddsketch_prices_never_fall_below_what_the_executor_holds() {
 
 /// A grouped state's row (no series identity) keeps its window's time and
 /// its group keys beside the state, whatever a per-series row holds (the
-/// input, 4 here, does not apply): a Sum grouped by `job` holds 8 + 16 =
-/// 24 bytes beside its state.
+/// row layout inputs, 8 and 2 here, do not apply): a Sum grouped by `job`
+/// holds 8 + 16 = 24 bytes beside its state.
 #[test]
 fn a_grouped_state_row_keeps_its_group_keys() {
     use asap_types::summary_type::{ExactKind, ExactParams};
@@ -1273,5 +1275,10 @@ fn a_grouped_state_row_keeps_its_group_keys() {
         ),
         Field::new("job", FieldDataType::Plain(DataType::Utf8), false),
     ]);
-    assert_eq!(state_row_bytes_beside_state(&schema, 4), 24);
+    let execution = crate::DataPlaneExecution {
+        state_offset_bytes_per_row: 8,
+        key_bytes_per_label_column: 2,
+        ..crate::DataPlaneExecution::default()
+    };
+    assert_eq!(state_row_bytes_beside_state(&schema, &execution), 24);
 }

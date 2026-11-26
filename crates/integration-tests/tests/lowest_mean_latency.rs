@@ -968,10 +968,14 @@ async fn milp_reads_are_the_reachable_sub_dag() {
 }
 
 /// Latency-bound exclusions are sound: with the bound exactly the selected
-/// plan's latency (the raw read; then, with a heavier refresh, the chain
-/// over its raw rows), that plan is still selected.
+/// plan's latency (the raw read; then, with a heavier refresh, a build
+/// over its raw rows), a plan within the bound is still selected, no
+/// slower than the unbounded selection beyond the solve's 1% stopping gap.
+/// The plans may differ: at 40,000 ns per state, the query-time `SummaryAgg`
+/// selected unbounded (30.301 ms) and the `Aggregate` selected under the
+/// bound (30.300 ms) are within the gap of each other.
 #[tokio::test]
-async fn a18_a_plan_exactly_at_its_bound_is_kept() {
+async fn a18_a_bound_at_the_selected_latency_keeps_a_plan_within_it() {
     for state_ns in [10_000.0, 40_000.0] {
         let settings = cost_inputs(
             lowest_mean_latency(),
@@ -987,7 +991,15 @@ async fn a18_a_plan_exactly_at_its_bound_is_kept() {
             true,
         )
         .await;
-        assert_eq!(bounded.plan.dag, unbounded.plan.dag, "state {state_ns} ns");
+        let bounded_latency = bounded.query_ms(0, "latency_ms");
+        assert!(
+            bounded_latency <= latency * (1.0 + 1e-9),
+            "state {state_ns} ns: {bounded_latency} ms over the bound {latency} ms"
+        );
+        assert!(
+            bounded_latency >= latency / 1.01,
+            "state {state_ns} ns: {bounded_latency} ms, unbounded {latency} ms"
+        );
     }
 }
 

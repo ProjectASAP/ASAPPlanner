@@ -172,9 +172,15 @@ pub struct PredictedNodeUsage {
     /// The most memory it holds at once.
     #[serde(default)]
     pub peak_memory_bytes: u64,
-    /// An ingestion-time view's bytes per window; 0 for any other node.
+    /// An ingestion-time view's decoded bytes per window, as memory holds
+    /// it; 0 for any other node.
     #[serde(default)]
     pub bytes_per_window: u64,
+    /// An ingestion-time view's bytes per window in its files (disk, disk
+    /// writes, cold reads); `bytes_per_window` without a measured
+    /// `stored_bytes_per_state`; 0 for any other node.
+    #[serde(default)]
+    pub stored_bytes_per_window: u64,
     /// Bytes it keeps on disk at the peak.
     #[serde(default)]
     pub disk_bytes: u64,
@@ -727,6 +733,7 @@ pub fn selected_plan_report(
                     average_memory_bytes: node.memory_and_disk.average_memory_bytes,
                     peak_memory_bytes: node.memory_and_disk.peak_memory_bytes,
                     bytes_per_window: node.memory_and_disk.bytes_per_window,
+                    stored_bytes_per_window: node.memory_and_disk.stored_bytes_per_window,
                     disk_bytes: node.memory_and_disk.disk_bytes,
                     disk_written_bytes_per_second: node
                         .memory_and_disk

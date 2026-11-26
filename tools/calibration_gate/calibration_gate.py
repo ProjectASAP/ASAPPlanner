@@ -57,7 +57,9 @@ steady state (without `elapsed_ms`, it is not checked). A view row whose
 predicted and measured values are both below 1% of the plan's totals for
 that resource is printed but not gated; bytes per window and the plan rows
 are always gated. The measured `memory_bytes` is compared with the
-predicted average memory.
+predicted average memory. Bytes per window are compared with the
+report's `stored_bytes_per_window` (a window's bytes in its files) when it
+has one, else with `bytes_per_window`.
 
 Usage:
 
@@ -208,6 +210,10 @@ def resource_rows(row, usage, per_node, plan, measured, cost_inputs, ratios):
             if measured_field not in view:
                 continue
             predicted_value = node.get(predicted_field, 0)
+            if predicted_field == "bytes_per_window":
+                # A view's measured bytes per window are what its files
+                # hold: the stored size, when the report gives one.
+                predicted_value = node.get("stored_bytes_per_window", predicted_value)
             note = None
             if predicted_field == "disk_bytes":
                 note = disk_not_checked([node_id])

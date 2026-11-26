@@ -3,6 +3,7 @@
 
 use crate::node::analytical::AnalyticalCostError;
 use crate::node::operator_statistics::EdgeStatistics;
+use crate::DataPlaneExecution;
 use asap_types::ir::operator::AggIntent;
 use asap_types::ir::schema::{DataType, Field, FieldDataType, Schema, PROMQL_SERIES_IDENTITY};
 use asap_types::summary_type::SketchParams;
@@ -26,19 +27,19 @@ fn column_bytes(field: &Field) -> u64 {
 }
 
 /// Bytes a summary state's output row holds beside its state. A
-/// per-series row (one with the series identity) holds
-/// [`DataPlaneExecution::stored_row_bytes_beside_state`](crate::DataPlaneExecution)
-/// (its window's time and its series key) and no label text, its labels
-/// being derived from the identity; a plain column beside them other than
-/// the 8-byte window time (a value) is counted at [`column_bytes`]. Any
-/// other row holds its window's time and its group keys, each at
-/// [`column_bytes`]. Example: a per-series Sum carrying `job` holds 72
-/// bytes beside its 24-byte sealed state (at the default), 96 in all; a
-/// Sum grouped by `job` holds 8 + 16 = 24.
-pub(crate) fn state_row_bytes_beside_state(
-    schema: &Schema,
-    stored_row_bytes_beside_state: u64,
-) -> u64 {
+/// per-series row (one with the series identity) is stored as the
+/// executor lays it out: its state's offset
+/// ([`DataPlaneExecution::state_offset_bytes_per_row`]) and a dictionary key
+/// per label column, each text column: the identity and each label derived
+/// from it ([`DataPlaneExecution::key_bytes_per_label_column`]); its label text is
+/// kept once per series per file and its window time once per window, not
+/// per row. A plain column beside them other than the 8-byte window time
+/// (a value) is counted at [`column_bytes`]. Any other row holds its
+/// window's time and its group keys, each at [`column_bytes`]. Example, at
+/// the defaults: a per-series Sum carrying `job` holds 4 + 2 × 4 = 12
+/// bytes beside its 24-byte sealed state, 36 in all; a Sum grouped by
+/// `job` holds 8 + 16 = 24.
+pub(crate) fn state_row_bytes_beside_state(schema: &Schema, execution: &DataPlaneExecution) -> u64 {
     let not_state = || {
         schema.fields.iter().filter(|field| {
             !matches!(
@@ -50,13 +51,15 @@ pub(crate) fn state_row_bytes_beside_state(
     if !not_state().any(|field| field.name == PROMQL_SERIES_IDENTITY) {
         return not_state().map(column_bytes).sum();
     }
-    // Text columns are the identity and labels derived from it; the
-    // window time is in `stored_row_bytes_beside_state`.
+    let is_text = |field: &&Field| field.dtype == FieldDataType::Plain(DataType::Utf8);
+    let key_columns = not_state().filter(is_text).count() as u64;
     let other_plain_bytes: u64 = not_state()
-        .filter(|field| field.dtype != FieldDataType::Plain(DataType::Utf8))
+        .filter(|field| !is_text(field))
         .map(column_bytes)
         .sum();
-    stored_row_bytes_beside_state + other_plain_bytes.saturating_sub(WINDOW_TIME_BYTES)
+    execution.state_offset_bytes_per_row
+        + execution.key_bytes_per_label_column * key_columns
+        + other_plain_bytes.saturating_sub(WINDOW_TIME_BYTES)
 }
 
 /// Bytes of a state row's window time, a timestamp at [`column_bytes`].
@@ -65,17 +68,14 @@ const WINDOW_TIME_BYTES: u64 = 8;
 /// Bytes of the state one row of `edge` holds: its bytes per row without
 /// what the row holds beside its state ([`state_row_bytes_beside_state`] of
 /// the producer's `schema`). Example: 1,000 rows of stored per-series Sums
-/// carrying `job`, 96,000 bytes, hold 96 − 72 = 24 bytes of state each.
+/// carrying `job`, 36,000 bytes, hold 36 − 12 = 24 bytes of state each.
 pub(crate) fn state_bytes_per_row(
     edge: EdgeStatistics,
     schema: &Schema,
-    stored_row_bytes_beside_state: u64,
+    execution: &DataPlaneExecution,
 ) -> u64 {
     edge.bytes_per_row()
-        .saturating_sub(state_row_bytes_beside_state(
-            schema,
-            stored_row_bytes_beside_state,
-        ))
+        .saturating_sub(state_row_bytes_beside_state(schema, execution))
 }
 
 /// Exact state that keeps every value or item of its group, so grows with

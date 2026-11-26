@@ -401,6 +401,7 @@ pub mod planning {
                     ns_per_unit: 0.0,
                     ns_per_invocation: 0.0,
                     memory_bytes_per_state: None,
+                    stored_bytes_per_state: None,
                     ns_per_state_emitted: 0.0,
                     measured_series_count: None,
                     measures: Vec::new(),

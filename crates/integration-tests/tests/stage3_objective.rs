@@ -677,12 +677,31 @@ fn the_objective_is_the_plan_cost_on_one_off_queries_over_years() {
     );
 }
 
+/// A deployment that keeps raw data and runs no ingestion-time chain, so
+/// a query reads `m` at query time.
+static NO_CHAINS: std::sync::LazyLock<DeploymentCapabilities> =
+    std::sync::LazyLock::new(|| DeploymentCapabilities {
+        excluded_candidates: serde_json::from_value(
+            serde_json::json!([{"operator": "SummaryTumblingWindowChain"}]),
+        )
+        .unwrap(),
+        ..Default::default()
+    });
+
+/// The built-in models on the [`NO_CHAINS`] deployment.
+fn models_without_chains() -> PlanningModels<'static> {
+    PlanningModels::builtin().with_deployment_capabilities(&NO_CHAINS)
+}
+
 /// `sum_over_time(m[5m] @ end())` and `sum_over_time(m[5m])`, both instant
 /// every 60 s: an instant query's `@ end()` is its evaluation time, so the
 /// anchored input runs in the evaluation context and shares `m[5m]` with
 /// the plain query, in the MILP and in `plan_cost` alike. The two cost less
 /// than planned alone, which is what any plan that does not share `m[5m]`
-/// (such as one in a request context of its own) costs.
+/// (such as one in a request context of its own) costs. Ingestion-time
+/// chains are excluded: a stored chain answers the plain query more
+/// cheaply than any read of `m` at query time (#1486), and the `@ end()`
+/// query cannot read it, so the plan would share nothing.
 #[test]
 fn an_instant_at_end_input_shares_the_evaluation_context() {
     let queries = [
@@ -691,7 +710,7 @@ fn an_instant_at_end_input_shares_the_evaluation_context() {
     ];
     let (plan, (objective, plan_cost)) = selected_plan_objective_and_plan_cost_with(
         &over_m(queries.to_vec()),
-        PlanningModels::builtin(),
+        models_without_chains(),
         &CostInputs::default(),
     );
     assert_equal(
@@ -702,7 +721,7 @@ fn an_instant_at_end_input_shares_the_evaluation_context() {
     let alone: f64 = costs_of_queries_planned_alone(
         &queries,
         |queries| over_m(queries.to_vec()),
-        PlanningModels::builtin,
+        models_without_chains,
     )
     .iter()
     .sum();
