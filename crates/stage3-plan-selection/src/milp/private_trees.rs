@@ -110,7 +110,7 @@ pub(crate) fn dearer_private_trees(
                 .0;
             for &(producer, _) in &reads {
                 if producer != cheapest {
-                    leave_out_tree(inputs, producer, &mut left_out);
+                    leave_out_tree(inputs, producer, &tree, kept, &mut left_out);
                 }
             }
         }
@@ -136,15 +136,17 @@ fn uncoupled(
     !answers
         && selectable.edges_out_of(index).len() == 1
         && costs.per_execution[index].is_ok()
-        && (!accuracy_enforced
-            || inputs
-                .physical
-                .logical_candidates
-                .memo
-                .candidate(logical)
-                .logical_properties
-                .parameters()
-                .is_none())
+        && (!accuracy_enforced || {
+            let candidate = inputs.physical.logical_candidates.memo.candidate(logical);
+            candidate.logical_properties.parameters().is_none()
+                && candidate
+                    .input_requirements
+                    .iter()
+                    .all(|requirement| requirement.required_accuracy.is_none())
+        })
+        // (X): no query must avoid reading it.
+        && (0..inputs.entries.len())
+            .all(|query| !inputs.physical.logical_candidates.query_must_not_read(query, logical))
         && !costs.retention_cost_per_retained_second.contains_key(&v)
         && !costs.raw_data_source.contains_key(&v)
         && !costs.per_resident_window.contains_key(&v)
@@ -200,9 +202,18 @@ fn private_tree_cost(
     Some(total)
 }
 
-/// Leaves out private execution `index` and every producer below it: each
-/// is read by its one edge only, so nothing else reads them.
-fn leave_out_tree(inputs: &SelectionInputs<'_>, index: usize, left_out: &mut [bool]) {
+/// Leaves out private execution `index` and its private subtree, the
+/// kept private producers below it (`tree` is `Some` for a private
+/// execution): each is read by its one edge only, so nothing else reads
+/// them. A producer already left out, or not private, is not walked: it
+/// may be shared.
+fn leave_out_tree(
+    inputs: &SelectionInputs<'_>,
+    index: usize,
+    tree: &[Option<f64>],
+    kept: &[bool],
+    left_out: &mut [bool],
+) {
     let selectable = inputs.selectable;
     let mut pending = vec![index];
     while let Some(execution) = pending.pop() {
@@ -214,7 +225,8 @@ fn leave_out_tree(inputs: &SelectionInputs<'_>, index: usize, left_out: &mut [bo
                 selectable
                     .edges_into(execution, input)
                     .iter()
-                    .map(|&position| selectable.edges()[position].producer),
+                    .map(|&position| selectable.edges()[position].producer)
+                    .filter(|&producer| kept[producer] && tree[producer].is_some()),
             );
         }
     }
