@@ -636,7 +636,7 @@ fn rule3_cover_rows_tighten_the_lp_bound_at_the_same_optimum() {
 
 // Rule 7: single-reader groups by dynamic programming (Stage 3).
 
-/// One exact sum over a 5 min window, accuracy not enforced: every
+/// One exact sum over a 5 min window: every
 /// execution below the output has one reader and no coupling term, so
 /// only each input's cheapest tree reaches the MILP (decided 2026-11-26:
 /// groups an accuracy or retention term couples stay in the MILP, so the
