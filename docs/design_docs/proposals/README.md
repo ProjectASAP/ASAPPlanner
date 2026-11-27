@@ -15,6 +15,7 @@ extensions. A design document is not a promise of downstream runtime support.
 - [Memo-based joint optimization with MILP](joint-planning-search.md)
 - [Window and materialization choices](window-materialization-choices.md)
 - [Multi-level tumbling-window chains](multi-level-window-chains.md)
+- [Wider tumbling windows per reader](wider-tumbling-windows-per-reader.md)
 - [Schema and physical data for ASAP primitives](asap-primitive-schema.md)
 - [Stage 3: lowest mean latency under cluster limits](stage3-lowest-mean-latency.md)
 - [Cost terms from calibration](cost-terms-from-calibration.md)
