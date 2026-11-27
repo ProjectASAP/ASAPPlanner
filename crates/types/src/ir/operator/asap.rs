@@ -13,14 +13,11 @@ use super::tumbling_window_chain::is_time_indexed_state;
 use crate::ir::operator::arguments::Reduction;
 use crate::ir::operator::maintained_population::{MaintainedPopulation, PopulationStatistic};
 use crate::ir::scalar::column_resolution::resolve_column_ref;
-use crate::ir::scalar::ColumnRef;
 use crate::ir::schema::aggregate_schema::{aggregate_output, OutputColumnSource};
 use crate::ir::schema::{ColumnId, DataType, Field, FieldDataType, Schema};
 use crate::ir::SchemaDerivationError;
 use crate::summary_type::SummaryTypeCapability;
-use crate::summary_type::{
-    CounterReadout, ExactKind, SketchStatistic, SummaryInputExpr, SummaryUpdate,
-};
+use crate::summary_type::{CounterReadout, SketchStatistic, SummaryInputExpr, SummaryUpdate};
 
 /// Why an ASAP operator cannot be used yet.
 pub const UNIMPLEMENTED_ASAP_OP: &str =
@@ -887,12 +884,10 @@ fn chain_schema(
 /// `SummaryAgg` or `SummaryTumblingWindowChain` of an exact summary type)
 /// with `counter_readout` computes, over the build's input: the build's
 /// reduction, one unnamed measure (the kind's [`ExactKind::measure`] of the
-/// column the build reads, `None` for the sample value, as the front ends
-/// write it), filtered by the build's filter. For a chain it is the
-/// aggregate of one window, whose value column a finalize outputs; it
-/// ignores the windows. `Ok(None)` for any other build, and for a build
-/// whose input is no column unless it counts rows (a count reads no
-/// column). Errors when the build's column does not resolve, or when
+/// column the build reads, `None` for an input that is no column), filtered
+/// by the build's filter. For a chain it is the aggregate of one window,
+/// whose value column a finalize outputs. `Ok(None)` for any other build.
+/// Errors when the build's column does not resolve, or when
 /// `counter_readout` does not fit the kind (a counter needs one, any other
 /// kind takes none). Example: finalizing `SummaryAgg[Counter](m[5m])` with
 /// `CounterReadout::Rate` computes `Aggregate(Rate)` over `m[5m]`.
@@ -921,13 +916,11 @@ pub(crate) fn finalized_aggregate<J: OperatorInput>(
         return Ok(None);
     };
     let column = match &input.weight {
-        SummaryInputExpr::Column(ColumnRef::SampleValue) => None,
         SummaryInputExpr::Column(col) => Some(
             resolve_column_ref(col, source.schema())
                 .map_err(|e| SchemaDerivationError::InvalidScalarSignature(e.to_string()))?,
         ),
-        _ if *kind == ExactKind::Count => None,
-        _ => return Ok(None),
+        _ => None,
     };
     let measure = kind.measure(column, counter_readout).ok_or_else(|| {
         SchemaDerivationError::InvalidScalarSignature(
@@ -940,8 +933,8 @@ pub(crate) fn finalized_aggregate<J: OperatorInput>(
         measures: vec![measure],
         output_names: vec![String::new()],
         // A filtered SUM/MIN/MAX is NULL for a group without a matching
-        // row. Empty when unfiltered, as the front ends write it.
-        filters: filter.iter().cloned().map(Some).collect(),
+        // row.
+        filters: vec![filter.clone()],
         having: None,
     }))
 }
@@ -959,22 +952,14 @@ fn finalized_schema<J: OperatorInput>(
         .map(|build| finalized_aggregate(build, counter_readout))
         .transpose()?
         .flatten();
-    let value_result = match aggregate {
-        Some(aggregate @ NonASAPOp::Aggregate { .. }) => {
-            let per_entity = matches!(
-                aggregate,
-                NonASAPOp::Aggregate {
-                    reduction: Reduction::PerEntity,
-                    ..
-                }
-            );
+    let value_result = match &aggregate {
+        Some(aggregate @ NonASAPOp::Aggregate { reduction, .. }) => {
             let aggregate_schema = aggregate.output_schema()?;
-            if per_entity {
-                aggregate_schema
+            match reduction {
+                Reduction::PerEntity => aggregate_schema
                     .column_id("value")
-                    .and_then(|i| aggregate_schema.fields.get(i).cloned())
-            } else {
-                aggregate_schema.fields.last().cloned()
+                    .and_then(|i| aggregate_schema.fields.get(i).cloned()),
+                Reduction::Reduce(_) => aggregate_schema.fields.last().cloned(),
             }
         }
         _ => None,

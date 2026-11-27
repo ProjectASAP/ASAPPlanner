@@ -36,11 +36,11 @@ use crate::ir::properties::selection::{
     constraint_of, union, Constraint, IntervalConstraintLimit, SelectionBox,
 };
 use crate::ir::scalar::expr_ir::ScalarValue;
-use crate::ir::scalar::{Predicate, ScalarExpr};
-use crate::ir::schema::ColumnId;
+use crate::ir::scalar::{ColumnRef, Predicate, ScalarExpr};
+use crate::ir::schema::{ColumnId, FieldDataType};
 use crate::ir::SchemaDerivationError;
 use crate::stages::MemoGroupId;
-use crate::summary_type::{MergeInputRule, SummaryTypeCapability};
+use crate::summary_type::{ExactKind, MergeInputRule, SummaryInputExpr, SummaryTypeCapability};
 
 /// What an aggregate computes, with every lifted selection removed, its
 /// inputs named by memo group.
@@ -234,13 +234,44 @@ pub(super) fn aggregate_coverage<'m>(
             child,
             counter_readout,
         }) => {
-            let Operator::ASAP(build @ ASAPOp::SummaryAgg { .. }) = child.operator() else {
+            let build = child.operator();
+            let Operator::ASAP(
+                build @ ASAPOp::SummaryAgg {
+                    summary_type: FieldDataType::ExactAggregate(kind, _),
+                    input,
+                    ..
+                },
+            ) = &build
+            else {
                 return Err(CoverageError::NoCoverage);
             };
-            let aggregate = finalized_aggregate(&build, *counter_readout)
-                .ok()
-                .flatten()
-                .ok_or(CoverageError::NoCoverage)?;
+            // The aggregate as the front ends write it: its measure reads
+            // the sample value as no column. A state of an input that is no
+            // column computes no aggregate, unless it counts rows.
+            let reads_sample_value = match &input.weight {
+                SummaryInputExpr::Column(column) => *column == ColumnRef::SampleValue,
+                _ if *kind == ExactKind::Count => false,
+                _ => return Err(CoverageError::NoCoverage),
+            };
+            // The group's schema derived from the same aggregate, so this
+            // does too: an error here is a caller bug.
+            let Ok(Some(mut aggregate)) = finalized_aggregate(build, *counter_readout) else {
+                debug_assert!(false, "a finalize whose schema derives has an aggregate");
+                return Err(CoverageError::NoCoverage);
+            };
+            if let NonASAPOp::Aggregate {
+                measures, filters, ..
+            } = &mut aggregate
+            {
+                if let Some(measure) = kind
+                    .measure(None, *counter_readout)
+                    .filter(|_| reads_sample_value)
+                {
+                    measures[0] = measure;
+                }
+                // No filter list when unfiltered.
+                filters.retain(Option::is_some);
+            }
             aggregate_coverage(&Operator::NonASAP(aggregate))
         }
         Operator::ASAP(_) => Err(CoverageError::NoCoverage),
