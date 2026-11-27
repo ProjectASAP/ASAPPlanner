@@ -25,10 +25,10 @@ fn generate(
     capabilities: &DeploymentCapabilities,
 ) -> PhysicalASAPMemoCandidates {
     // The unit tests check every offered (τ, ℓ): rule 5 off.
-    let mut every_alternative = SearchSpacePruning::default();
-    every_alternative
-        .set("one_evaluation_by_readers", false)
-        .expect("a pruning rule");
+    let every_alternative = SearchSpacePruning {
+        one_evaluation_by_readers: false,
+        ..SearchSpacePruning::default()
+    };
     let physical = generate_physical_asap_memo_candidates(
         logical,
         data,

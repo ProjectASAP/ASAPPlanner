@@ -357,7 +357,7 @@ fn rule1_two_ranges_sharing_windows_keep_the_optimum() {
     ));
 }
 
-// Rule 5: `OneEvaluation` only for a result two consumers may read in one
+// Rule 5: `OneEvaluation` only for a result two readers may read in one
 // evaluation (Stage 2).
 
 /// The live candidates at most one reader can read: one live consumer
@@ -421,6 +421,7 @@ fn rule5_a_result_read_once_per_evaluation_gets_no_one_evaluation_twin() {
     );
     let pruned = plan(&workload, &raw_retained(), &[]);
     let once = candidates_read_at_most_once(&pruned);
+    assert!(!once.is_empty(), "some candidate is read once");
     let twins: Vec<&Value> = physical_candidates(&pruned)
         .iter()
         .filter(|physical| {
@@ -429,6 +430,13 @@ fn rule5_a_result_read_once_per_evaluation_gets_no_one_evaluation_twin() {
         .collect();
     assert_eq!(twins, Vec::<&Value>::new());
     let unpruned = plan(&workload, &raw_retained(), &["one_evaluation_by_readers"]);
+    let one_evaluation_count = |document: &Value| {
+        physical_candidates(document)
+            .iter()
+            .filter(|physical| lifetime(physical) == "OneEvaluation")
+            .count()
+    };
+    assert!(one_evaluation_count(&pruned) < one_evaluation_count(&unpruned));
     assert_same_cost(&pruned, &unpruned, "one_evaluation_by_readers");
 }
 
@@ -466,8 +474,9 @@ fn rule5_a_result_two_consumers_read_keeps_its_one_evaluation_twin() {
 /// `sum(sum_over_time(m[5m] @ end()))` as a 10 min range request every
 /// 60 s at phases 0 and 30 s: Stage 3 runs the `@ end()` shift's input in
 /// one request context for both grids, so the input is read twice there
-/// and keeps its `OneEvaluation` twin; the plan costs what it costs with
-/// every twin.
+/// and keeps its `OneEvaluation` twin, although one consumer edge reads it
+/// ([`candidates_read_at_most_once`] does not count the anchor twice); the
+/// plan costs what it costs with every twin.
 #[test]
 fn rule5_an_anchored_consumer_on_two_grids_keeps_the_optimum() {
     let ranged = |phase_ms: u64| {
@@ -477,6 +486,17 @@ fn rule5_an_anchored_consumer_on_two_grids_keeps_the_optimum() {
     };
     let workload = promql(vec![ranged(0), ranged(30_000)], 100, 1_000);
     let pruned = plan(&workload, &raw_retained(), &[]);
+    let once = candidates_read_at_most_once(&pruned);
+    let anchored_twins = physical_candidates(&pruned)
+        .iter()
+        .filter(|physical| {
+            lifetime(physical) == "OneEvaluation" && once.contains(&logical_key(physical))
+        })
+        .count();
+    assert!(
+        anchored_twins > 0,
+        "the anchored consumer's input keeps its OneEvaluation twin"
+    );
     let unpruned = plan(&workload, &raw_retained(), &["one_evaluation_by_readers"]);
     assert_same_cost(&pruned, &unpruned, "one_evaluation_by_readers");
 }

@@ -9,10 +9,10 @@
 
 use asap_planner::{
     CandidateExclusion, CounterSemanticsSupport, DeploymentCapabilities, ErrorSelectingPlan,
-    ExclusionSource, OperatorKind, PlanSearchSettings, PlanningModels, PlanningRun, RejectionCause,
-    Selection, SelectionError, SketchAlgorithm, SketchParameterRange, SketchParams, SummaryFamily,
+    ExclusionSource, OperatorKind, PlanningModels, PlanningRun, RejectionCause, Selection,
+    SelectionError, SketchAlgorithm, SketchParameterRange, SketchParams, SummaryFamily,
 };
-use asap_planner_cli::planning_stages::{lower_promql_roots, run_search_over};
+use asap_planner_cli::planning_stages::{lower_promql_roots, run_stages_until, RunUntil};
 use asap_types::deployment_capabilities::CandidateDescription;
 use asap_types::ir::flat::NodeId;
 use asap_types::ir::operator::arguments::Reduction;
@@ -118,17 +118,20 @@ fn planned(workload: &PlanningWorkload, capabilities: &DeploymentCapabilities) -
         .with_deployment_capabilities(capabilities);
     // Every lifetime offered (rule 5 off): these tests count the
     // alternatives each exclusion prunes.
-    let mut every_lifetime = SearchSpacePruning::default();
-    every_lifetime
-        .set("one_evaluation_by_readers", false)
-        .expect("a pruning rule");
-    let settings = PlanSearchSettings {
-        inspect: true,
-        search_space_pruning: every_lifetime,
+    let every_alternative = SearchSpacePruning {
+        one_evaluation_by_readers: false,
+        ..SearchSpacePruning::default()
     };
-    run_search_over(roots, &entries, &data, models, settings)
-        .unwrap()
-        .run
+    run_stages_until(
+        roots,
+        &entries,
+        &data,
+        models,
+        every_alternative,
+        RunUntil::Stage3,
+    )
+    .unwrap()
+    .run
 }
 
 /// The capabilities of the default deployment plus the caller's

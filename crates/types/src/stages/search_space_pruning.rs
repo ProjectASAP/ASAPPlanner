@@ -18,12 +18,15 @@ pub struct SearchSpacePruning {
     /// Rule 5, Stage 2: a query-time result is offered with $\ell$ =
     /// `OneEvaluation` only when two readers may read it in one evaluation
     /// context (two consumer inputs, a consumer anchored with `@ end()` or
-    /// `@ start()`, or a consumer and a query output). Read once, its
+    /// `@ start()`, a consumer and a query output, or two query outputs).
+    /// Read once, its
     /// `None` form does all the `OneEvaluation` one does at no more cost:
     /// the only `OneEvaluation` medium offered is memory, which holds at
     /// least what `None` holds while its one consumer runs; retention,
     /// raw data on disk and kept results are charged alike to both forms;
-    /// and `None` delivers on every context.
+    /// and `None` delivers on every context. Readers are counted per
+    /// logical consumer: an optimal plan never selects two lifetimes of one
+    /// consumer in one context.
     pub one_evaluation_by_readers: bool,
 }
 
