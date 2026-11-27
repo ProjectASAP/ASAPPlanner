@@ -486,10 +486,9 @@ fn a_materialized_chain_runs_once_and_retains_what_its_consumers_read_back() {
 /// The chain of [`a_materialized_chain_runs_once_and_retains_what_its_consumers_read_back`]:
 /// its $h_v$, in seconds, would be at least 60 or 300 times a read, an
 /// unbounded column with whole-number coefficients that HiGHS's presolve
-/// takes for an integer (#1533). Every continuous
-/// variable of its selection model is within $[0, 1]$: $h_v$ is held as a
-/// share of the 300 s the longest read needs, and the optimum still
-/// retains 300 s.
+/// takes for an integer (#1533). Its selection model holds $h_v$ as a
+/// share in $[0, 1]$ of the 300 s the longest read needs, and the optimum
+/// still retains 300 s.
 #[test]
 fn retention_is_a_share_of_the_longest_need() {
     let mut memo = empty_memo();
@@ -536,19 +535,17 @@ fn retention_is_a_share_of_the_longest_need() {
     };
     let mut problem = ProblemVariables::new();
     let kept = vec![true; selectable.executions().len()];
-    selection_model(&inputs, &kept, None, &mut problem);
-    let continuous: Vec<(f64, f64)> = problem
+    let model = selection_model(&inputs, &kept, None, &mut problem);
+    let [(&v, h)] = model.variables.h.iter().collect::<Vec<_>>()[..] else {
+        panic!("one h_v");
+    };
+    assert_eq!(v, PhysicalCandidateId(1));
+    assert_eq!(h.longest_need_s, 300.0);
+    let (_, definition) = problem
         .iter_variables_with_def()
-        .filter(|(_, definition)| !definition.is_integer())
-        .map(|(_, definition)| (definition.get_min(), definition.get_max()))
-        .collect();
-    assert!(!continuous.is_empty());
-    assert!(
-        continuous
-            .iter()
-            .all(|&(min, max)| min >= 0.0 && max <= 1.0),
-        "{continuous:?}"
-    );
+        .find(|&(variable, _)| variable == h.share)
+        .unwrap();
+    assert_eq!((definition.get_min(), definition.get_max()), (0.0, 1.0));
     let solved = solve_selection(&inputs).unwrap();
     assert_eq!(
         solved.retention_ms.get(&PhysicalCandidateId(1)),

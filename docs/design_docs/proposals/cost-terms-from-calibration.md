@@ -116,7 +116,10 @@ the windows written within the idle time of those the read's retention
 need keeps. $r_v$ costs more the larger it is, so at the optimum it is
 the most over the selected reads, what `plan_cost` charges. The mean
 counts are in cost model 1's objective, the most in cost model 3's memory
-row.
+row. The MILP holds $r_v$ as $R_v s_v$, with $s_v \in [0, 1]$ and $R_v$
+the most windows any kept read keeps, so that the solver's presolve does
+not take $r_v$ for an integer column; it holds $h_v$ the same way, as a
+share of its longest need.
 
 On the dashboard above, the plan's predicted memory goes from 5,475 MiB
 to 292 MiB against a measured 570 MiB working set (the rest of

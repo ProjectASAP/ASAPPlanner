@@ -5,9 +5,9 @@
 //! | Family | Variables | Constraints |
 //! |---|---|---|
 //! | baseline (section 3) over execution contexts (section 5) | $x_{\kappa,v}$ (with $x^{\mathrm{mat}}_v = x_{\mathrm{Materialized}(v),v}$), $y_{\kappa,u,c,i}$, $z_{q,v}$, $t$, $r_s$ ([`SelectionVariables`]) | (A) [`input_satisfaction_constraints`], (B) [`producer_selection_constraints`], (C)/(D) [`query_coverage_constraints`], (E) [`acyclicity_constraints`], (F) and one consumer per context of a query-time result that is not materialized [`use_constraints`], each source's raw data on disk once [`selection_cost_terms`]; (G), (H): $y$ exists only on admissible edges where the producer delivers on the consumer's context |
-//! | retention (section 5) | $h_v$ | (R) [`super::retention::retention_constraints`] |
+//! | retention (section 5) | $h_v$, held as a share of its longest need ([`super::retention::RetentionShare`]) | (R) [`super::retention::retention_constraints`] |
 //! | result and answer caches (`cost-terms-from-calibration.md`, section 2) | $t$, $b$, $H$, $w_{q,e}$ | [`super::kept_results::kept_result_terms`] |
-//! | resident windows under a window cache (`cost-terms-from-calibration.md`, section 1) | $s_v$, the share of its most windows | (W) [`super::retention::resident_window_terms`] |
+//! | resident windows under a window cache (`cost-terms-from-calibration.md`, section 1) | $r_v$, held as a share of the most windows any kept read keeps | (W) [`super::retention::resident_window_terms`] |
 //! | exact-only reads per query | $a_{q,e}$ | (X) [`super::exact_only::exact_only_constraints`] |
 //! | accuracy (`accuracy-models.md`, constraint (K)), per execution | $E_{\kappa,c,m}$, $D_{\kappa,c}$ ([`AccuracyVariables`]); $F_{\kappa,c,i,m}$, $H_{\kappa,c,i}$ | (K) [`accuracy_constraints`], over [`ErrorModel`] |
 //!
@@ -85,8 +85,9 @@ pub(crate) struct SelectionVariables {
     /// $t$, by execution: only for executions on a cycle of selectable
     /// edges (a strongly connected component); `None` elsewhere.
     t: Vec<Option<Variable>>,
-    /// $h_v$ as a share of its longest need, for a candidate with a
-    /// retention cost and an execution kept ([`retention_variables`]).
+    /// $h_v$ in seconds, [`RetentionShare::seconds`]: its longest need
+    /// times a share in $[0, 1]$, for a candidate with a retention cost and
+    /// an execution kept ([`retention_variables`]).
     pub(super) h: BTreeMap<PhysicalCandidateId, RetentionShare>,
     /// Per raw-data source a query-time scan keeps on disk at a cost: the
     /// cost per second of keeping it, at least each selected scan's,
@@ -317,7 +318,8 @@ pub(super) type RawDataRow = (Variable, f64, Variable);
 
 /// `costs` over the selection, unscaled: the terms (coefficient,
 /// variable) of each kept execution's share ($x$), each edge's ($y$) and
-/// each retention share ($h_v$) of a candidate that is not a query-time
+/// each retention cost ($\pi_v h_v$, over [`RetentionShare::share`]) of a
+/// candidate that is not a query-time
 /// scan, and the rows ($r_s$, coefficient, variable) that keep each
 /// source's raw data on disk once, for the selected scan that keeps the
 /// most: $r_s \ge \pi_v h_v$ for each query-time `Scan` $v$ of source $s$
@@ -347,7 +349,7 @@ pub(super) fn selection_cost_terms<'c>(
     for (&position, &y) in &variables.y {
         terms.push((costs.per_edge[position].unwrap_or(0.0), y));
     }
-    let retention_share = |v: &PhysicalCandidateId| {
+    let cost_per_retained_second = |v: &PhysicalCandidateId| {
         costs
             .retention_cost_per_retained_second
             .get(v)
@@ -356,7 +358,7 @@ pub(super) fn selection_cost_terms<'c>(
     };
     for (v, h) in &variables.h {
         if !costs.raw_data_source.contains_key(v) {
-            terms.push((retention_share(v) * h.longest_need_s, h.share));
+            terms.push((cost_per_retained_second(v) * h.longest_need_s, h.share));
         }
     }
     let mut executions_of: HashMap<PhysicalCandidateId, Vec<usize>> = HashMap::new();
@@ -374,7 +376,7 @@ pub(super) fn selection_cost_terms<'c>(
     for (v, source) in scans {
         let r = raw_data_on_disk_of(source);
         if let Some(h) = variables.h.get(v) {
-            let per_retained_second = retention_share(v);
+            let per_retained_second = cost_per_retained_second(v);
             if per_retained_second > 0.0 {
                 raw_data_rows.push((r, per_retained_second * h.longest_need_s, h.share));
             }
@@ -741,7 +743,7 @@ pub(crate) fn solve_selection_reporting_lp_bound(
         &mut resident_rows,
     );
     // Cost model 1's objective is `costs` itself: every y is on a costed
-    // edge and every h_v has a retention share (`selection_cost_terms`
+    // edge and every h_v has a retention cost (`selection_cost_terms`
     // reads a missing one as 0, which only cost model 3's quantities have).
     assert!(
         variables
@@ -755,7 +757,7 @@ pub(crate) fn solve_selection_reporting_lp_bound(
             .h
             .keys()
             .all(|v| costs.retention_cost_per_retained_second.contains_key(v)),
-        "a retention share for each h_v"
+        "a retention cost for each h_v"
     );
     // The objective's terms per second, unscaled: (cost, variable). A
     // query-time scan's retention is in its source's r_s.

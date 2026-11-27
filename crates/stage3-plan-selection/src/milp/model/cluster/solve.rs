@@ -151,7 +151,8 @@ pub(super) fn freshness_big_m(
 }
 
 /// `costs` over the selection as one linear expression: each execution's
-/// and edge's share times its variable, each retention share times $h_v$,
+/// and edge's share times its variable, each cost per retained second
+/// times $h_v$,
 /// and per source the most raw data a selected scan keeps (a variable at
 /// least each, added to `problem` with its rows).
 pub(super) fn quantity_expression(
@@ -172,11 +173,11 @@ pub(super) fn quantity_expression(
                 .entry(source)
                 .or_insert_with(|| problem.add(variable().min(0)))
         });
-    for (share, variable) in terms {
-        expression += share * variable;
+    for (coefficient, variable) in terms {
+        expression += coefficient * variable;
     }
-    for (r, share, variable) in raw_data_rows {
-        rows.push(constraint!(r >= share * variable));
+    for (r, coefficient, variable) in raw_data_rows {
+        rows.push(constraint!(r >= coefficient * variable));
     }
     for r in most_of_source.into_values() {
         expression += r;
@@ -195,10 +196,10 @@ pub(super) fn quantity_expression(
     ) {
         expression += per_unit * variable;
     }
-    for (per_window, r) in
+    for (cost_of_most_windows, share) in
         resident_window_terms(costs, selectable, &variables.y, &variables.z, problem, rows)
     {
-        expression += per_window * r;
+        expression += cost_of_most_windows * share;
     }
     expression
 }

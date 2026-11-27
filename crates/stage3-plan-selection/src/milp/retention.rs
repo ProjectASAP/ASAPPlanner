@@ -228,16 +228,16 @@ pub(crate) fn resident_window_terms(
         let most = most_resident_windows.entry(v).or_default();
         *most = most.max(read_windows);
     }
-    let mut resident: BTreeMap<PhysicalCandidateId, Variable> = BTreeMap::new();
+    let mut resident_share: BTreeMap<PhysicalCandidateId, Variable> = BTreeMap::new();
     for (v, read_windows, read_variable) in kept_reads {
-        let share = *resident
+        let share = *resident_share
             .entry(v)
             .or_insert_with(|| problem.add(variable().min(0).max(1)));
         rows.push(constraint!(
             most_resident_windows[&v] * share >= read_windows * read_variable
         ));
     }
-    resident
+    resident_share
         .into_iter()
         .map(|(v, share)| {
             (
