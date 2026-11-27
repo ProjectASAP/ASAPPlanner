@@ -1,14 +1,19 @@
-//! Summary states held in their view layout: a sealed sketch column
-//! ([`super::StateColumn::from_sealed_views`]) and the columns joined from
-//! such columns, read in place instead of being rebuilt as objects. A merge
-//! folds each sketch into the run's accumulator through `asap_sketchlib`'s
-//! read-only views.
+//! Summary states held in their view layout, read in place instead of
+//! being rebuilt as objects: a sealed sketch column
+//! ([`super::StateColumn::from_sealed_views`]), the columns joined from such
+//! columns, and states a runtime stored and hands back over its own bytes
+//! ([`super::StateColumn::from_views`]). A merge folds each sketch into the
+//! run's accumulator through `asap_sketchlib`'s read-only views.
 //!
-//! The bytes of state `i` are `bytes[offsets[i]..offsets[i + 1]]`, each
-//! state 8-byte aligned, in `asap_sketchlib`'s view layout for DDSketch,
-//! KLL and Count-Min ([`state_view_bytes`]). Other families have no view
+//! The bytes of state `i` are `bytes[offsets[i]..offsets[i + 1]]`, in a
+//! state's view layout ([`super::StateColumn::view_bytes`]):
+//! `asap_sketchlib`'s for DDSketch, KLL and Count-Min, each view starting
+//! 8-byte aligned ([`MappedSketches`]), and a fixed little-endian record for
+//! each exact family ([`MappedRecords`]). Other families have no view
 //! layout; their states stay objects.
 
+use crate::summary_kernels::exact::ScalarState;
+use crate::summary_kernels::increase::IncreaseAccumulator;
 use crate::summary_kernels::{
     CountMinSketchAccumulator, DDSketchAccumulator, DatasketchesKLLAccumulator,
 };
@@ -16,7 +21,7 @@ use crate::{AggregateCore, Error};
 use arrow::buffer::{Buffer, ScalarBuffer};
 use asap_sketchlib::{CountMinF64View, DdSketchView, KllView};
 use planner_types::ir::schema::FieldDataType;
-use planner_types::summary_type::SketchAlgorithm;
+use planner_types::summary_type::{ExactKind, SketchAlgorithm};
 use std::sync::Arc;
 
 /// Which sketch kernel a mapped column's states belong to.
@@ -29,7 +34,7 @@ pub(crate) enum MappedSketchKernel {
 
 impl MappedSketchKernel {
     /// The kernel of a sketch column of `family`; `None` for a family with
-    /// no view layout.
+    /// no sketch view layout.
     pub(crate) fn of(family: &FieldDataType) -> Option<Self> {
         match family {
             FieldDataType::Sketch(SketchAlgorithm::DDSketch) => Some(Self::DDSketch),
@@ -38,6 +43,30 @@ impl MappedSketchKernel {
             _ => None,
         }
     }
+}
+
+/// The view layout of a family's states: a sketch view, or an exact record.
+pub(crate) enum ViewLayout {
+    Sketch(MappedSketchKernel),
+    Record(ExactKind),
+}
+
+impl ViewLayout {
+    /// `None` for a family with no view layout.
+    pub(crate) fn of(family: &FieldDataType) -> Option<Self> {
+        match family {
+            FieldDataType::ExactAggregate(kind, _) => Some(Self::Record(*kind)),
+            family => MappedSketchKernel::of(family).map(Self::Sketch),
+        }
+    }
+}
+
+/// Whether states of `family` have a view layout, so a column of them can
+/// be written as view bytes ([`super::StateColumn::view_bytes`]) and read
+/// back in place ([`super::StateColumn::from_views`]): DDSketch, KLL,
+/// Count-Min and every exact family.
+pub fn family_has_view_layout(family: &FieldDataType) -> bool {
+    ViewLayout::of(family).is_some()
 }
 
 fn invalid(message: impl Into<String>) -> Error {
@@ -55,6 +84,36 @@ impl MappedPart {
     fn state(&self, index: usize) -> &[u8] {
         &self.bytes[self.offsets[index] as usize..self.offsets[index + 1] as usize]
     }
+}
+
+/// Checks `offsets` over `bytes`: at least one, ascending, within `bytes`.
+fn check_offsets(bytes: &Buffer, offsets: &ScalarBuffer<u32>) -> Result<(), Error> {
+    if offsets.is_empty() {
+        return Err(invalid("view offsets need the end offset"));
+    }
+    if offsets.windows(2).any(|pair| pair[0] > pair[1])
+        || offsets
+            .last()
+            .is_some_and(|&end| end as usize > bytes.len())
+    {
+        return Err(invalid("view offsets descend or run past the bytes"));
+    }
+    Ok(())
+}
+
+/// Checks that every state of `part` is a `kernel` view, so the reads below
+/// cannot fail.
+fn check_views(kernel: MappedSketchKernel, part: &MappedPart) -> Result<(), Error> {
+    for index in 0..part.offsets.len() - 1 {
+        let view = part.state(index);
+        match kernel {
+            MappedSketchKernel::DDSketch => DdSketchView::from_bytes(view).map(|_| ()),
+            MappedSketchKernel::Kll => KllView::from_bytes(view).map(|_| ()),
+            MappedSketchKernel::CountMin => CountMinF64View::from_bytes(view).map(|_| ()),
+        }
+        .map_err(|e| invalid(format!("state {index}: {e}")))?;
+    }
+    Ok(())
 }
 
 /// Mapped sketch states, possibly from several buffers (a column joined
@@ -89,7 +148,8 @@ impl MappedSketches {
         }
     }
 
-    fn state_bytes(&self, index: usize) -> &[u8] {
+    /// State `index`'s view bytes, where they lie.
+    pub(crate) fn state_bytes(&self, index: usize) -> &[u8] {
         match &self.states {
             Some(states) => {
                 let (part, state) = states[index];
@@ -135,6 +195,25 @@ impl MappedSketches {
             parts,
             states: Some(states),
         }
+    }
+
+    /// The `kernel` views at `offsets` over `bytes`, which something
+    /// outside the run holds, read where they lie. Each view is checked
+    /// here (in range, 8-byte aligned, a `kernel` view), so reading it
+    /// later cannot fail.
+    pub(crate) fn over(
+        kernel: MappedSketchKernel,
+        bytes: Buffer,
+        offsets: ScalarBuffer<u32>,
+    ) -> Result<Self, Error> {
+        check_offsets(&bytes, &offsets)?;
+        let part = MappedPart { bytes, offsets };
+        check_views(kernel, &part)?;
+        Ok(Self {
+            kernel,
+            parts: vec![Arc::new(part)],
+            states: None,
+        })
     }
 
     /// The column of `selected` states (column, index), their bytes copied
@@ -185,14 +264,7 @@ impl MappedSketches {
         };
         // Views written by `to_view_bytes` read back; every read below
         // expects them to.
-        debug_assert!((0..part.offsets.len() - 1).all(|index| {
-            let view = part.state(index);
-            match kernel {
-                MappedSketchKernel::DDSketch => DdSketchView::from_bytes(view).is_ok(),
-                MappedSketchKernel::Kll => KllView::from_bytes(view).is_ok(),
-                MappedSketchKernel::CountMin => CountMinF64View::from_bytes(view).is_ok(),
-            }
-        }));
+        debug_assert!(check_views(kernel, &part).is_ok());
         Ok((
             Self {
                 kernel,
@@ -296,6 +368,169 @@ pub(crate) fn state_view_bytes(
         MappedSketchKernel::CountMin => any
             .downcast_ref::<CountMinSketchAccumulator>()
             .map(|cms| cms.inner.to_view_bytes()),
+    }
+}
+
+/// The record of an exact state: little-endian 8-byte words. A presence
+/// word is 0 or 1; the words of an absent part are zero.
+///
+/// | kind | words |
+/// |---|---|
+/// | SUM | `sum`, `compensation` (f64), `seen` (presence word, last) |
+/// | COUNT | `count` (u64) |
+/// | MIN, MAX | presence word, `value` (f64) |
+/// | counter (rate, increase) | presence word, `starting_value` (f64), `starting_timestamp` (i64), `last_seen_value` (f64), `last_seen_timestamp` (i64), `total_increase` (f64), `sample_count` (u64) |
+/// | irate | twice (older first): presence word, `timestamp` (i64), `value` (f64) |
+pub(crate) fn exact_record_bytes(record: &ScalarState) -> Vec<u8> {
+    let mut out = Vec::with_capacity(56);
+    let mut word = |value: u64| out.extend_from_slice(&value.to_le_bytes());
+    match record {
+        ScalarState::Sum {
+            sum,
+            compensation,
+            seen,
+        } => {
+            word(sum.to_bits());
+            word(compensation.to_bits());
+            word(u64::from(*seen));
+        }
+        ScalarState::Count(count) => word(*count),
+        ScalarState::Min(value) | ScalarState::Max(value) => {
+            word(u64::from(value.is_some()));
+            word(value.unwrap_or(0.0).to_bits());
+        }
+        ScalarState::Counter(counter) => {
+            word(u64::from(counter.is_some()));
+            let c = counter
+                .clone()
+                .unwrap_or_else(|| IncreaseAccumulator::new(0.0, 0, 0.0, 0));
+            word(c.starting_value.to_bits());
+            word(c.starting_timestamp as u64);
+            word(c.last_seen_value.to_bits());
+            word(c.last_seen_timestamp as u64);
+            word(c.total_increase.to_bits());
+            word(c.sample_count);
+        }
+        ScalarState::LastTwoSamples(samples) => {
+            for sample in samples {
+                word(u64::from(sample.is_some()));
+                let (time, value) = sample.unwrap_or((0, 0.0));
+                word(time as u64);
+                word(value.to_bits());
+            }
+        }
+    }
+    out
+}
+
+/// The size in bytes of an exact kind's record ([`exact_record_bytes`]).
+fn record_size(kind: ExactKind) -> usize {
+    match kind {
+        ExactKind::Sum => 24,
+        ExactKind::Count => 8,
+        ExactKind::Min | ExactKind::Max => 16,
+        ExactKind::Counter => 56,
+        ExactKind::IRate => 48,
+    }
+}
+
+/// The byte offsets of a record's presence words, each 0 or 1.
+fn presence_offsets(kind: ExactKind) -> &'static [usize] {
+    match kind {
+        ExactKind::Sum => &[16],
+        ExactKind::Count => &[],
+        ExactKind::Min | ExactKind::Max | ExactKind::Counter => &[0],
+        ExactKind::IRate => &[0, 24],
+    }
+}
+
+fn u64_at(record: &[u8], at: usize) -> u64 {
+    u64::from_le_bytes(record[at..at + 8].try_into().expect("8 bytes"))
+}
+
+fn f64_at(record: &[u8], at: usize) -> f64 {
+    f64::from_bits(u64_at(record, at))
+}
+
+fn i64_at(record: &[u8], at: usize) -> i64 {
+    u64_at(record, at) as i64
+}
+
+/// Exact records of one kind ([`exact_record_bytes`]) back to back in bytes
+/// something outside the run holds, read where they lie.
+pub(crate) struct MappedRecords {
+    kind: ExactKind,
+    bytes: Buffer,
+}
+
+impl MappedRecords {
+    /// The `kind` records at `offsets` over `bytes`: record `i` must start
+    /// at `i` times its kind's size, and each presence word be 0 or 1.
+    pub(crate) fn over(
+        kind: ExactKind,
+        bytes: Buffer,
+        offsets: ScalarBuffer<u32>,
+    ) -> Result<Self, Error> {
+        check_offsets(&bytes, &offsets)?;
+        let size = record_size(kind);
+        if offsets
+            .iter()
+            .enumerate()
+            .any(|(i, &offset)| offset as usize != i * size)
+        {
+            return Err(invalid(format!(
+                "{kind:?} records are not {size} bytes each"
+            )));
+        }
+        let bytes = bytes.slice_with_length(0, (offsets.len() - 1) * size);
+        if let Some(index) = bytes.chunks_exact(size).position(|record| {
+            presence_offsets(kind)
+                .iter()
+                .any(|&at| u64_at(record, at) > 1)
+        }) {
+            return Err(invalid(format!("{kind:?} record {index} is malformed")));
+        }
+        Ok(Self { kind, bytes })
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.bytes.len() / record_size(self.kind)
+    }
+
+    /// Record `index`'s bytes, where they lie.
+    pub(crate) fn record_bytes(&self, index: usize) -> &[u8] {
+        let size = record_size(self.kind);
+        &self.bytes[index * size..(index + 1) * size]
+    }
+
+    /// Record `index`.
+    pub(crate) fn get(&self, index: usize) -> ScalarState {
+        let record = self.record_bytes(index);
+        let present = |at: usize| u64_at(record, at) == 1;
+        match self.kind {
+            ExactKind::Sum => ScalarState::Sum {
+                sum: f64_at(record, 0),
+                compensation: f64_at(record, 8),
+                seen: present(16),
+            },
+            ExactKind::Count => ScalarState::Count(u64_at(record, 0)),
+            ExactKind::Min => ScalarState::Min(present(0).then(|| f64_at(record, 8))),
+            ExactKind::Max => ScalarState::Max(present(0).then(|| f64_at(record, 8))),
+            ExactKind::Counter => ScalarState::Counter(present(0).then(|| IncreaseAccumulator {
+                starting_value: f64_at(record, 8),
+                starting_timestamp: i64_at(record, 16),
+                last_seen_value: f64_at(record, 24),
+                last_seen_timestamp: i64_at(record, 32),
+                total_increase: f64_at(record, 40),
+                sample_count: u64_at(record, 48),
+            })),
+            ExactKind::IRate => {
+                let sample = |at: usize| {
+                    present(at).then(|| (i64_at(record, at + 8), f64_at(record, at + 16)))
+                };
+                ScalarState::LastTwoSamples([sample(0), sample(24)])
+            }
+        }
     }
 }
 
@@ -757,5 +992,83 @@ mod tests {
             view_peak <= object_peak,
             "views {view_peak} B, objects {object_peak} B"
         );
+    }
+
+    /// Every exact kind's record, present and absent, is its kind's size
+    /// and reads back as the state it was written from.
+    #[test]
+    fn exact_records_read_back_as_written() {
+        let counter = IncreaseAccumulator::new(3.0, 1_000, 10.5, 9_000);
+        let cases = [
+            (
+                ExactKind::Sum,
+                vec![
+                    ScalarState::Sum {
+                        sum: 7.25,
+                        compensation: -1e-17,
+                        seen: true,
+                    },
+                    ScalarState::Sum {
+                        sum: 0.0,
+                        compensation: 0.0,
+                        seen: false,
+                    },
+                ],
+            ),
+            (
+                ExactKind::Count,
+                vec![ScalarState::Count(42), ScalarState::Count(0)],
+            ),
+            (
+                ExactKind::Min,
+                vec![ScalarState::Min(Some(-2.5)), ScalarState::Min(None)],
+            ),
+            (
+                ExactKind::Max,
+                vec![ScalarState::Max(Some(f64::NAN)), ScalarState::Max(None)],
+            ),
+            (
+                ExactKind::Counter,
+                vec![
+                    ScalarState::Counter(Some(counter)),
+                    ScalarState::Counter(None),
+                ],
+            ),
+            (
+                ExactKind::IRate,
+                vec![
+                    ScalarState::LastTwoSamples([Some((1_000, 1.0)), Some((2_000, 4.0))]),
+                    ScalarState::LastTwoSamples([None, Some((-5, 0.5))]),
+                    ScalarState::LastTwoSamples([None, None]),
+                ],
+            ),
+        ];
+        for (kind, states) in cases {
+            let records: Vec<Vec<u8>> = states.iter().map(exact_record_bytes).collect();
+            assert!(
+                records.iter().all(|r| r.len() == record_size(kind)),
+                "{kind:?}"
+            );
+            let offsets: Vec<u32> = (0..=records.len())
+                .map(|i| (i * record_size(kind)) as u32)
+                .collect();
+            let mapped = MappedRecords::over(
+                kind,
+                Buffer::from_vec(records.concat()),
+                ScalarBuffer::from(offsets),
+            )
+            .unwrap();
+            assert_eq!(mapped.len(), states.len());
+            for (index, state) in states.iter().enumerate() {
+                assert_eq!(format!("{:?}", mapped.get(index)), format!("{state:?}"));
+                // Bit-equal, so a NaN compares equal to itself.
+                assert_eq!(
+                    exact_record_bytes(&mapped.get(index)),
+                    records[index],
+                    "{kind:?} {state:?}"
+                );
+                assert_eq!(mapped.record_bytes(index), &records[index][..]);
+            }
+        }
     }
 }

@@ -339,10 +339,14 @@ impl Batch {
             if 2 * indices.len() >= state_column.len() {
                 continue;
             }
-            // Mapped states a deployment holds cost the run nothing:
-            // indices into them are kept as they are.
-            if matches!(state_column.storage(), super::StateStorage::Mapped(_))
-                && state_column.is_held_outside_run()
+            // States in their view layout that something outside the run
+            // holds cost the run nothing: indices into them are kept as
+            // they are.
+            if matches!(
+                state_column.storage(),
+                super::StateStorage::Mapped(_)
+                    | super::StateStorage::Exact(super::state_column::ExactRecords::Mapped(_))
+            ) && state_column.is_held_outside_run()
             {
                 continue;
             }
@@ -527,6 +531,7 @@ impl Batch {
                             kernel,
                             selected.into_iter(),
                         )),
+                        0,
                     )
                 })));
                 continue;

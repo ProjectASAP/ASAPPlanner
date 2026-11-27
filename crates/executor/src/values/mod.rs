@@ -10,6 +10,7 @@ mod batch;
 mod mapped_states;
 mod state_column;
 pub use batch::{Batch, BatchColumn};
+pub use mapped_states::family_has_view_layout;
 #[cfg(test)]
 pub(crate) use mapped_states::state_view_bytes;
 pub(crate) use mapped_states::MappedSketchKernel;
