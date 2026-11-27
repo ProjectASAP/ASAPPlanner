@@ -29,7 +29,10 @@
 //! cost less (a stored KLL window at k = 1,404 costs less than one at
 //! k = 547 in the `deployment_exclusions` example). A set one of whose θs a
 //! deployment exclusion's θ range matches is left as it is too: Stage 2 may
-//! prune the smaller θ.
+//! prune the smaller θ. Places are compared by (group, operator) only, not
+//! by the edges inside the set: an edge between two θ candidates never
+//! depends on their θ (both carry the same θ, and its logical check reads
+//! only the groups).
 
 use std::collections::{BTreeMap, BTreeSet};
 
