@@ -263,6 +263,20 @@ impl AccumulatorUpdater for KllAccumulatorUpdater {
 // ---------------------------------------------------------------------------
 // DDSketchAccumulatorUpdater
 // ---------------------------------------------------------------------------
+// Calls of `ddsketch_indexable_bounds` on this thread, for the test that a
+// row's validation does not recompute them.
+#[cfg(test)]
+std::thread_local! {
+    static INDEXABLE_BOUNDS_CALLS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// The smallest and largest magnitudes a DDSketch of `alpha` indexes.
+fn ddsketch_indexable_bounds(alpha: f64) -> (f64, f64) {
+    #[cfg(test)]
+    INDEXABLE_BOUNDS_CALLS.with(|calls| calls.set(calls.get() + 1));
+    asap_sketchlib::sketches::ddsketch::ddsketch_indexable_bounds(alpha)
+}
+
 pub struct DDSketchAccumulatorUpdater {
     acc: DDSketchAccumulator,
     alpha: f64,
@@ -284,8 +298,7 @@ impl AccumulatorUpdater for DDSketchAccumulatorUpdater {
     /// and a nonzero magnitude below it, which the zero bucket would take
     /// without the relative error.
     fn validate_single_input(&self, value: f64) -> Result<(), String> {
-        let (minimum, maximum) =
-            asap_sketchlib::sketches::ddsketch::ddsketch_indexable_bounds(self.alpha);
+        let (minimum, maximum) = ddsketch_indexable_bounds(self.alpha);
         let magnitude = value.abs();
         if value == 0.0 || (magnitude >= minimum && magnitude <= maximum) {
             Ok(())

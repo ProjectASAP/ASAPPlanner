@@ -24,6 +24,27 @@ fn accepts_zero_and_signed_samples_within_its_indexable_range() {
     }
 }
 
+/// A row's validation reads the bounds its updater computed once, not
+/// `ddsketch_indexable_bounds` again (66 ns a call; with the call in
+/// `DdSketch::try_add`, two thirds of a row's update before).
+#[test]
+fn validation_computes_the_indexable_bounds_once_per_updater() {
+    let mut updater = DDSketchAccumulatorUpdater::new(0.05);
+    let calls_before = INDEXABLE_BOUNDS_CALLS.with(std::cell::Cell::get);
+    for i in 1..=1000 {
+        let value = f64::from(i);
+        updater.validate_single_input(value).unwrap();
+        updater.update_single(value, 0).unwrap();
+    }
+    updater.reset();
+    updater.validate_single_input(3.0).unwrap();
+    let calls = INDEXABLE_BOUNDS_CALLS.with(std::cell::Cell::get) - calls_before;
+    assert_eq!(
+        calls, 0,
+        "validation recomputed the indexable bounds {calls} times"
+    );
+}
+
 /// Quantiles over 0, 0, 3, 5 and over signed samples are within alpha of
 /// PromQL's interpolated quantile, at rank q (n − 1) between adjacent
 /// order statistics: here each pair of neighbours shares a sign or
