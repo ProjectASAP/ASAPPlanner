@@ -176,12 +176,8 @@ pub(super) fn one_evaluation_offered_per_candidate(
         }
     }
     let mut queries_per_group: HashMap<MemoGroupId, usize> = HashMap::new();
-    for query in memo.queries() {
-        let groups: HashSet<MemoGroupId> =
-            query.root.operator_refs().into_iter().copied().collect();
-        for group in groups {
-            *queries_per_group.entry(group).or_default() += 1;
-        }
+    for (_, group) in memo.output_groups() {
+        *queries_per_group.entry(group).or_default() += 1;
     }
     for (group, queries) in queries_per_group {
         for index_in_group in 0..memo.groups()[group.0 as usize].candidates.len() {
