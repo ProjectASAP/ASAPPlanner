@@ -14,8 +14,20 @@
         "materialized_views": []
       },
       "node_id": 1,
+      "plan_id": "ef77cd5303dccd877907b5305d10a2a5",
       "refresh": "at_ingestion",
-      "retention_ms": 7200000
+      "retention_ms": 7200000,
+      "view_state_key": {
+        "definition_id": "904aa65a5adbf0e8b33be1f3b7f0ba37",
+        "logical_properties": {
+          "parameters": null
+        },
+        "window": {
+          "tumbling": {
+            "width_ms": 60000
+          }
+        }
+      }
     },
     {
       "coverage": {
@@ -32,8 +44,20 @@
         ]
       },
       "node_id": 2,
+      "plan_id": "ef77cd5303dccd877907b5305d10a2a5",
       "refresh": "at_ingestion",
-      "retention_ms": 7200000
+      "retention_ms": 7200000,
+      "view_state_key": {
+        "definition_id": "904aa65a5adbf0e8b33be1f3b7f0ba37",
+        "logical_properties": {
+          "parameters": null
+        },
+        "window": {
+          "tumbling": {
+            "width_ms": 300000
+          }
+        }
+      }
     },
     {
       "coverage": {
@@ -50,8 +74,20 @@
         ]
       },
       "node_id": 3,
+      "plan_id": "ef77cd5303dccd877907b5305d10a2a5",
       "refresh": "at_ingestion",
-      "retention_ms": 7200000
+      "retention_ms": 7200000,
+      "view_state_key": {
+        "definition_id": "904aa65a5adbf0e8b33be1f3b7f0ba37",
+        "logical_properties": {
+          "parameters": null
+        },
+        "window": {
+          "tumbling": {
+            "width_ms": 900000
+          }
+        }
+      }
     },
     {
       "coverage": {
@@ -66,8 +102,20 @@
         "materialized_views": []
       },
       "node_id": 9,
+      "plan_id": "ef77cd5303dccd877907b5305d10a2a5",
       "refresh": "at_ingestion",
-      "retention_ms": 7200000
+      "retention_ms": 7200000,
+      "view_state_key": {
+        "definition_id": "39b753519c8eabf9fe5af63fcfb59e19",
+        "logical_properties": {
+          "parameters": null
+        },
+        "window": {
+          "tumbling": {
+            "width_ms": 60000
+          }
+        }
+      }
     },
     {
       "coverage": {
@@ -84,8 +132,20 @@
         ]
       },
       "node_id": 10,
+      "plan_id": "ef77cd5303dccd877907b5305d10a2a5",
       "refresh": "at_ingestion",
-      "retention_ms": 7200000
+      "retention_ms": 7200000,
+      "view_state_key": {
+        "definition_id": "39b753519c8eabf9fe5af63fcfb59e19",
+        "logical_properties": {
+          "parameters": null
+        },
+        "window": {
+          "tumbling": {
+            "width_ms": 300000
+          }
+        }
+      }
     },
     {
       "coverage": {
@@ -102,8 +162,20 @@
         ]
       },
       "node_id": 11,
+      "plan_id": "ef77cd5303dccd877907b5305d10a2a5",
       "refresh": "at_ingestion",
-      "retention_ms": 7200000
+      "retention_ms": 7200000,
+      "view_state_key": {
+        "definition_id": "39b753519c8eabf9fe5af63fcfb59e19",
+        "logical_properties": {
+          "parameters": null
+        },
+        "window": {
+          "tumbling": {
+            "width_ms": 900000
+          }
+        }
+      }
     }
   ],
   "query": "sum(rate(http_requests_total{status=~\"5..\",job=~\"user-service|order-service|payment-service\"}[1h])) / sum(rate(http_requests_total{job=~\"user-service|order-service|payment-service\"}[1h]))",

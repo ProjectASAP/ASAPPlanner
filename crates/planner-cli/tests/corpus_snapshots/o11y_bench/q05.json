@@ -33,8 +33,20 @@
         "materialized_views": []
       },
       "node_id": 1,
+      "plan_id": "782b58d5b5663e0807064a09f1d9b98e",
       "refresh": "at_ingestion",
-      "retention_ms": 3900000
+      "retention_ms": 3900000,
+      "view_state_key": {
+        "definition_id": "e2a484ba8499e6304dc20ec7f22439f1",
+        "logical_properties": {
+          "parameters": null
+        },
+        "window": {
+          "tumbling": {
+            "width_ms": 60000
+          }
+        }
+      }
     },
     {
       "coverage": {
@@ -68,8 +80,20 @@
         "materialized_views": []
       },
       "node_id": 7,
+      "plan_id": "782b58d5b5663e0807064a09f1d9b98e",
       "refresh": "at_ingestion",
-      "retention_ms": 3900000
+      "retention_ms": 3900000,
+      "view_state_key": {
+        "definition_id": "f59063d026a5d754ce7f409ff9b0b9d7",
+        "logical_properties": {
+          "parameters": null
+        },
+        "window": {
+          "tumbling": {
+            "width_ms": 60000
+          }
+        }
+      }
     }
   ],
   "planner_executor_error": "the executor cannot compile the plan's query run: invalid DAG: node 13: invalid DAG: value operation has no native implementation",

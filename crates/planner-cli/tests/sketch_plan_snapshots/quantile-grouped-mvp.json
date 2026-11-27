@@ -14,8 +14,24 @@
         "materialized_views": []
       },
       "node_id": 1,
+      "plan_id": "f7dc3dbf9f6c995d655257d30264a96a",
       "refresh": "at_ingestion",
-      "retention_ms": 300000
+      "retention_ms": 300000,
+      "view_state_key": {
+        "definition_id": "0c7f962d8fde713c1de7a58752019151",
+        "logical_properties": {
+          "parameters": {
+            "DDSketch": {
+              "alpha": 0.05
+            }
+          }
+        },
+        "window": {
+          "tumbling": {
+            "width_ms": 10000
+          }
+        }
+      }
     },
     {
       "coverage": {
@@ -32,8 +48,24 @@
         ]
       },
       "node_id": 2,
+      "plan_id": "f7dc3dbf9f6c995d655257d30264a96a",
       "refresh": "at_ingestion",
-      "retention_ms": 300000
+      "retention_ms": 300000,
+      "view_state_key": {
+        "definition_id": "0c7f962d8fde713c1de7a58752019151",
+        "logical_properties": {
+          "parameters": {
+            "DDSketch": {
+              "alpha": 0.05
+            }
+          }
+        },
+        "window": {
+          "tumbling": {
+            "width_ms": 60000
+          }
+        }
+      }
     }
   ],
   "queries": [
