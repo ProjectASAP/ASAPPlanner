@@ -280,6 +280,9 @@ fn ddsketch_indexable_bounds(alpha: f64) -> (f64, f64) {
 pub struct DDSketchAccumulatorUpdater {
     acc: DDSketchAccumulator,
     alpha: f64,
+    /// The smallest and largest magnitudes a DDSketch of `alpha` indexes,
+    /// computed once here rather than for each row validated.
+    indexable_magnitudes: (f64, f64),
 }
 
 impl DDSketchAccumulatorUpdater {
@@ -287,6 +290,7 @@ impl DDSketchAccumulatorUpdater {
         Self {
             acc: DDSketchAccumulator::new(alpha),
             alpha,
+            indexable_magnitudes: ddsketch_indexable_bounds(alpha),
         }
     }
 }
@@ -298,7 +302,7 @@ impl AccumulatorUpdater for DDSketchAccumulatorUpdater {
     /// and a nonzero magnitude below it, which the zero bucket would take
     /// without the relative error.
     fn validate_single_input(&self, value: f64) -> Result<(), String> {
-        let (minimum, maximum) = ddsketch_indexable_bounds(self.alpha);
+        let (minimum, maximum) = self.indexable_magnitudes;
         let magnitude = value.abs();
         if value == 0.0 || (magnitude >= minimum && magnitude <= maximum) {
             Ok(())
