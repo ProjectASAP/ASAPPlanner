@@ -357,48 +357,6 @@ fn rule1_two_ranges_sharing_windows_keep_the_optimum() {
     ));
 }
 
-// Rule 4: candidates no context can read (Stage 2).
-
-/// `quantile_over_time(0.9, m[5m])` every 60 s and every 30 s at phase
-/// 15 s: Pass 2 adds a 60 s KLL chain level that only the 5 min cover over
-/// the 15 s chain reads, and a cover reads its wider levels only from a
-/// chain kept at ingestion time. Its query-time copies have no execution
-/// in any context, so Stage 2 does not keep them.
-#[test]
-fn rule4_a_wider_level_only_a_cover_reads_is_kept_at_ingestion_time_only() {
-    let workload = json!({
-        "query_workload": {"language": "promql", "repeating_queries": [
-            repeating("quantile_over_time(0.9, m[5m])", 60_000, 0, 0.05),
-            repeating("quantile_over_time(0.9, m[5m])", 30_000, 15_000, 0.05),
-        ]},
-        "data_workload": {
-            "arrival": {"ingesting": {"rows_per_second": 1000.0}},
-            "sources": {"m": {"series_count": 1000, "metric_type": "gauge", "sample_interval": 1000}}
-        }
-    });
-    let pruned = plan(&workload, &raw_retained(), &[]);
-    let groups: BTreeMap<u64, &str> = pass2_groups(&pruned)
-        .iter()
-        .map(|group| {
-            (
-                group["id"].as_u64().unwrap(),
-                group["label"].as_str().unwrap(),
-            )
-        })
-        .collect();
-    let wide_query_time: Vec<&Value> = physical_candidates(&pruned)
-        .iter()
-        .filter(|physical| {
-            groups[&physical["group"].as_u64().unwrap()].contains("tumbling_window_width_ms=60000")
-                && physical["properties"]["timing"] == "query_time"
-        })
-        .collect();
-    assert_eq!(wide_query_time, Vec::<&Value>::new());
-    let unpruned = plan(&workload, &raw_retained(), &["context_reachability"]);
-    assert!(physical_candidates(&pruned).len() < physical_candidates(&unpruned).len());
-    assert_same_cost(&pruned, &unpruned, "context_reachability");
-}
-
 // Rule 5: `OneEvaluation` only for a result two consumers may read in one
 // evaluation (Stage 2).
 

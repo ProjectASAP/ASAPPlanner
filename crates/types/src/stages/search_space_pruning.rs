@@ -25,12 +25,6 @@ pub struct SearchSpacePruning {
     /// raw data on disk and kept results are charged alike to both forms;
     /// and `None` delivers on every context.
     pub one_evaluation_by_readers: bool,
-    /// Rule 4, Stage 2: an input a consumer reads off its evaluation grid
-    /// (a cover's wider levels, a merge of narrower windows) reads only
-    /// windows stored at ingestion time, so its edges from query-time
-    /// producers are not admissible, and a producer no context can read
-    /// is pruned as reaching no query output.
-    pub context_reachability: bool,
 }
 
 impl Default for SearchSpacePruning {
@@ -38,7 +32,6 @@ impl Default for SearchSpacePruning {
         Self {
             threshold_theta: true,
             one_evaluation_by_readers: true,
-            context_reachability: true,
         }
     }
 }
@@ -48,7 +41,6 @@ impl SearchSpacePruning {
     fn switches(&mut self) -> Vec<(&'static str, &mut bool)> {
         vec![
             ("threshold_theta", &mut self.threshold_theta),
-            ("context_reachability", &mut self.context_reachability),
             (
                 "one_evaluation_by_readers",
                 &mut self.one_evaluation_by_readers,
@@ -108,15 +100,11 @@ mod tests {
         assert_eq!(pruning.set("all", false), Ok(()));
         assert_eq!(
             pruning.rules_off(),
-            vec![
-                "threshold_theta",
-                "context_reachability",
-                "one_evaluation_by_readers"
-            ]
+            vec!["threshold_theta", "one_evaluation_by_readers"]
         );
         assert_eq!(pruning.set("all", true), Ok(()));
-        assert_eq!(pruning.set("context_reachability", false), Ok(()));
-        assert_eq!(pruning.rules_off(), vec!["context_reachability"]);
+        assert_eq!(pruning.set("one_evaluation_by_readers", false), Ok(()));
+        assert_eq!(pruning.rules_off(), vec!["one_evaluation_by_readers"]);
         let error = pruning.set("no_such_rule", false).unwrap_err();
         assert!(
             error.contains("unknown search-space pruning rule no_such_rule"),

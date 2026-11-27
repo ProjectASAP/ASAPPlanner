@@ -321,7 +321,10 @@ impl SelectableExecutions {
         // chain built at query time ends its windows at the evaluation
         // time, not on the epoch grid.
         if read_off_the_grid {
-            if !producer.physical_properties.is_stored_at_ingestion_time() {
+            let epoch_anchored = producer.physical_properties.timing()
+                == ExecutionTiming::IngestionTime
+                && producer.physical_properties.is_across_evaluations();
+            if !epoch_anchored {
                 return None;
             }
         } else if !physical.delivers_on(u, &self.contexts[context.0]) {

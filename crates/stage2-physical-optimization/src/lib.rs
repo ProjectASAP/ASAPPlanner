@@ -114,12 +114,8 @@ pub fn generate_physical_asap_memo_candidates(
                 .insert(logical_candidate_id, first..alternatives.len());
         }
     }
-    let (edges, admissible_producer_alternatives_per_input) = edge::expand_edges(
-        logical,
-        &alternatives,
-        &alternatives_of_logical_candidate,
-        search_space_pruning.context_reachability,
-    );
+    let (edges, admissible_producer_alternatives_per_input) =
+        edge::expand_edges(logical, &alternatives, &alternatives_of_logical_candidate);
     // Candidates that cannot be built or that no query output reads.
     let prune_reasons = pruning::prune_reasons(
         &alternatives,
