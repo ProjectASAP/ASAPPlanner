@@ -412,4 +412,18 @@ fn malformed_views_are_refused() {
     let hll = FieldDataType::Sketch(SketchAlgorithm::HLL);
     assert!(!family_has_view_layout(&hll));
     assert!(StateColumn::from_views(hll, bytes, offsets).is_err());
+    // Exact records: a presence word above 1, a record off its slot, and
+    // parameters of another kind.
+    let sum = FieldDataType::ExactAggregate(ExactKind::Sum, ExactParams::Sum);
+    let mut record = [0u8; 24];
+    record[16] = 2;
+    let one = || ScalarBuffer::from(vec![0u32, 24]);
+    assert!(
+        StateColumn::from_views(sum.clone(), Buffer::from_vec(record.to_vec()), one()).is_err()
+    );
+    record[16] = 1;
+    let shifted = ScalarBuffer::from(vec![0u32, 16]);
+    assert!(StateColumn::from_views(sum, Buffer::from_vec(record.to_vec()), shifted).is_err());
+    let mismatched = FieldDataType::ExactAggregate(ExactKind::Sum, ExactParams::Count);
+    assert!(StateColumn::from_views(mismatched, Buffer::from_vec(record.to_vec()), one()).is_err());
 }

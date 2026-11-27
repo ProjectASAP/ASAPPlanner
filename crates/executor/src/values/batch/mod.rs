@@ -531,6 +531,8 @@ impl Batch {
                             kernel,
                             selected.into_iter(),
                         )),
+                        // It points into its inputs' bytes, whose own
+                        // columns report their stored size.
                         0,
                     )
                 })));

@@ -402,7 +402,7 @@ impl StateColumn {
     /// start at an 8-byte-aligned address), or an exact state's fixed
     /// record. Borrowed where the column already holds it in that layout,
     /// else written. `None` for a family with no view layout
-    /// ([`super::family_has_view_layout`]).
+    /// ([`super::family_has_view_layout`]) or a keyed exact state.
     pub fn view_bytes(&self, index: usize) -> Option<Cow<'_, [u8]>> {
         match &self.storage {
             StateStorage::Mapped(sketches) => Some(Cow::Borrowed(sketches.state_bytes(index))),
