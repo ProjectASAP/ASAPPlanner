@@ -101,7 +101,11 @@ pub(super) fn finest_common_group(
         _ => unreachable!("a member is a SummaryAgg or an Aggregate"),
     }
     let finest = memo.find_or_add_group(expression.clone())?;
-    for theta in listed_build_parameters(&expression) {
+    let listed = listed_build_parameters(
+        &expression,
+        &memo.groups()[finest.0 as usize].group_properties,
+    );
+    for theta in listed {
         add_candidate_if_output_matches(
             memo,
             finest,

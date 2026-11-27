@@ -97,6 +97,14 @@ pub enum RootPruneReason {
         tumbling_window_width_ms: u64,
         evaluation_period_ms: Option<u64>,
     },
+    /// The consumer's input has no producer edge: its group has no
+    /// candidate (e.g. a Count-Min state over weights not proven
+    /// non-negative, for which `listed_build_parameters` lists no build),
+    /// or none with the θ the consumer reads.
+    InputHasNoProducer {
+        consumer: CandidateForMemoGroupId,
+        input: usize,
+    },
     /// The candidate never had a consumer and is not a query output. A
     /// candidate whose consumers were eliminated is traced to their causes.
     NoConsumer,
@@ -131,7 +139,9 @@ pub enum PruneReason {
     ReachesNoQueryOutput,
     /// Stage 2: a Count-Min build (`CountMinSketch`, `CountMinSketchWithHeap`, `HydraCountMinSketch`) whose
     /// weight column's `column_signs` is not `NonNegative`: its estimates are
-    /// bounds only for non-negative weights.
+    /// bounds only for non-negative weights. `listed_build_parameters`
+    /// lists no such build, so Stage 2 prunes one only if a later rule adds
+    /// it.
     CountMinWeightsNotProvenNonNegative,
     /// Stage 2: the deployment's capabilities exclude it
     /// (`DeploymentCapabilities::exclusions`): the executor cannot run it,

@@ -25,7 +25,7 @@ use asap_types::stages::{
     Memo, MemoGroupId, MemoQuery, OriginOfCandidateForMemoGroup, PhysicalASAPMemoCandidates,
     PhysicalCandidate, PhysicalCandidateId, PhysicalEdge, PhysicalEdgeId, RequiredAccuracy,
 };
-use asap_types::stages::{Lifetime, PhysicalProperties, StorageMedium};
+use asap_types::stages::{Lifetime, PhysicalProperties, StorageMedium, ValueSign};
 use asap_types::summary_type::{
     ExactKind, ExactParams, SketchAlgorithm, SketchStatistic, SummaryUpdate,
 };
@@ -1560,9 +1560,9 @@ fn readouts_of(
     (group, readouts)
 }
 
-/// A memo over sources each declaring only its series count.
-fn memo_with_series(series: &[(&str, u64)]) -> Memo {
-    Memo::new(&DataWorkload {
+/// A data workload over sources each declaring only its series count.
+fn series_workload(series: &[(&str, u64)]) -> DataWorkload {
+    DataWorkload {
         sources: series
             .iter()
             .map(|&(metric, series_count)| {
@@ -1576,7 +1576,25 @@ fn memo_with_series(series: &[(&str, u64)]) -> Memo {
             })
             .collect(),
         ..DataWorkload::default()
-    })
+    }
+}
+
+/// A memo over sources each declaring only its series count.
+fn memo_with_series(series: &[(&str, u64)]) -> Memo {
+    Memo::new(&series_workload(series))
+}
+
+/// [`memo_with_series`] with every metric's values declared non-negative,
+/// so a Count-Min state over them lists its builds
+/// (`listed_build_parameters`).
+fn memo_with_non_negative_series(series: &[(&str, u64)]) -> Memo {
+    let mut data = series_workload(series);
+    for facts in data.sources.values_mut() {
+        facts
+            .column_signs
+            .insert("value".to_string(), ValueSign::NonNegative);
+    }
+    Memo::new(&data)
 }
 
 /// Every candidate of `memo` at query time, `OneEvaluation`.
@@ -2271,7 +2289,7 @@ fn k_charges_an_estimate_two_paths_reach_once_per_path() {
 #[test]
 fn k_charges_a_top_k_readout_for_every_estimate_it_ranks() {
     for (level, plans) in [(1e-3, true), (2e-3, false)] {
-        let mut memo = memo_with_series(&[("m", 10)]);
+        let mut memo = memo_with_non_negative_series(&[("m", 10)]);
         let (top_k, _) = readouts_of(
             &mut memo,
             "m",
@@ -2302,7 +2320,7 @@ fn set_operator_over_top_k(
     top_k_level: f64,
     p90_level: f64,
 ) -> Option<Vec<usize>> {
-    let mut memo = memo_with_series(&[("m", 10), ("r", 10)]);
+    let mut memo = memo_with_non_negative_series(&[("m", 10), ("r", 10)]);
     let (top_k, _) = readouts_of(
         &mut memo,
         "m",

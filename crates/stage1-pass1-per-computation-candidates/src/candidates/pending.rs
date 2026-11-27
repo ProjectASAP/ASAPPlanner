@@ -127,14 +127,17 @@ pub(crate) fn add_group(
 /// The state group of `build` (a `SummaryAgg`) with its build candidates:
 /// one per configuration of a sketch algorithm's predefined list
 /// (`parameter_list`), or the one exact accumulator build. Each lists
-/// `fused_groups`.
+/// `fused_groups`. A Count-Min state whose weights are not proven
+/// non-negative gets none (`listed_build_parameters`): no plan can use it,
+/// and its readouts are dead.
 pub(crate) fn add_state_group(
     memo: &mut Memo,
     build: Operator<MemoGroupId>,
     fused_groups: &[MemoGroupId],
 ) -> Result<MemoGroupId, PerComputationCandidateError> {
     let group = memo.find_or_add_group(build.clone())?;
-    for parameters in listed_build_parameters(&build) {
+    let listed = listed_build_parameters(&build, &memo.groups()[group.0 as usize].group_properties);
+    for parameters in listed {
         add_candidate(
             memo,
             group,

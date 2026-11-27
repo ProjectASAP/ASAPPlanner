@@ -42,8 +42,8 @@ asap-stage1-pass2-reuse-candidates -p asap-stage2-physical-optimization -p asap-
 - **Ways not offered.** A way the measure or the deployment cannot compute
   (the exact accumulator of an `avg` over a nullable input, a count sketch
   over relational rows, a summary the deployment does not support, a
-  quantile summary outside [0, 1], a top-k heap over one row per item) is
-  not offered, and Pass 1 records none. Accuracy is Pass 2's.
+  quantile summary outside [0, 1], a top-k heap over one row per item, a
+  Count-Min state whose weights are not proven non-negative) is not offered, and Pass 1 records none. Accuracy is Pass 2's.
 - **Fused computations.** `FusedComputation { absorbed_groups, ways_to_compute }`
   replaces the operators beneath (the whole-expression top-k, the nested
   sum, min or max) in one appearance; its builds list `absorbed_groups` in

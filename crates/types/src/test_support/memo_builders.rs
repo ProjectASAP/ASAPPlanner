@@ -139,7 +139,9 @@ pub fn sketch_state(
 ) -> MemoGroupId {
     let operator = state_grouped_by(FieldDataType::Sketch(algorithm), reduction, child);
     let state = memo.find_or_add_group(operator.clone()).unwrap();
-    for parameters in listed_build_parameters(&operator) {
+    let listed =
+        listed_build_parameters(&operator, &memo.groups()[state.0 as usize].group_properties);
+    for parameters in listed {
         candidate(memo, state, operator.clone(), parameters);
     }
     state
