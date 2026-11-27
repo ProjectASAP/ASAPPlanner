@@ -2,6 +2,7 @@
 //! ([`physical_asap_dag`]), and the materialized views it installs
 //! ([`materialized_view`]); the time windows its nodes read
 //! ([`time_window`]).
+mod content_id;
 pub mod materialized_view;
 pub mod physical_asap_dag;
 pub mod time_window;

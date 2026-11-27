@@ -151,6 +151,12 @@ pub struct LogicalProperties {
 }
 
 impl LogicalProperties {
+    /// The logical properties with θ `parameters`, as a plan node carries
+    /// them (`PhysicalASAPDAGNode::parameters`).
+    pub(crate) fn of_parameters(parameters: Option<SketchParams>) -> Self {
+        Self { parameters }
+    }
+
     /// $\boldsymbol\theta_v$.
     pub fn parameters(&self) -> Option<&SketchParams> {
         self.parameters.as_ref()

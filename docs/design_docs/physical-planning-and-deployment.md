@@ -24,8 +24,8 @@ flowchart LR
 | **Deployment** | Selected candidate, concrete data/state bindings and operational lifecycle |
 
 ASAPPlanner owns the first three layers and the shared physical operator
-implementation library. Deployment systems such as ASAPQuery and asap-fusion
-own deployment compilation and operation. Materialization is a planning contract
+implementation library. Deployment runtimes own deployment compilation and
+operation. Materialization is a planning contract
 associated with the logical DAG, not a separate computation IR.
 
 > **Status:** Stage 2 (physical ASAP-aware optimization) decides, per summary
@@ -432,7 +432,7 @@ executor, and a deployment runtime.
 | **Executor: operator library** | `PhysicalOperator` and the native operators | `asap-executor` | DataFusion's `ExecutionPlan` nodes |
 | **Executor: compiled plan** | `compile(dag, views, roots)` → `CompiledPhysicalDAG` with raw data and materialized view slots | `asap-executor` | DataFusion's physical planner, which resolves tables while planning; ours leaves them as slots |
 | **Executor: deployment interface** | `DataStore` (`read_raw_data`, `read_materialized_view`), `RawDataRequest`, `MaterializedViewRequest`, `instantiate` | `asap-executor` defines it; the deployment implements it | DataFusion's `TableProvider` and catalog |
-| **Deployment** | raw-data storage, the summary store (what a stored state is, where it lives, readiness, revisions), run scheduling, retention, transport | ASAPQuery, asap-fusion | catalog and runtime |
+| **Deployment** | raw-data storage, the summary store (what a stored state is, where it lives, readiness, revisions), run scheduling, retention, transport | a deployment runtime | catalog and runtime |
 
 ### The plan file
 
@@ -466,6 +466,24 @@ pub struct RefreshWindow {
     pub width_ms: u64,                // width of each window
     pub phase_ms: u64,                // where each window ends, modulo width_ms
 }
+impl PhysicalASAPDAG {
+    /// The plan's content id: 128-bit FNV-1a, in hex, of the DAG's JSON.
+    pub fn plan_id(&self) -> String;
+}
+impl MaterializedView {
+    pub node_id: PhysicalASAPNodeId;
+    pub fn plan_id(&self) -> &str;                    // with node_id: the view in one installed plan
+    pub fn view_state_key(&self) -> &ViewStateKey;    // what its stored state is, in any plan
+    pub fn coverage(&self) -> &ViewCoverage;          // definition_id and selection (logical)
+    pub fn refresh(&self) -> MaterializedViewRefresh;
+    pub fn retention_ms(&self) -> u64;
+}
+pub struct ViewStateKey {
+    pub definition_id: String,                // what is computed (the memo group's coverage definition)
+    pub window: Option<ViewWindow>,           // the view node's own windows
+    pub logical_properties: LogicalProperties, // the view node's candidate's θ
+}
+pub enum ViewWindow { Tumbling { width_ms: u64 } } // non_exhaustive
 ```
 
 These derivations are methods on `PhysicalASAPDAG` in `asap-types`, so a
@@ -510,6 +528,52 @@ its input: each row is grouped with its key by its window's end, and each
 state is stamped with that end, so the same `TimeRange` selects them. A
 `TimeShift { at }` evaluates its input once per request, at
 the request's end (`@ end()`), start (`@ start()`) or the given time.
+
+### Identifying a materialized view
+
+A view has two identities, in two scopes:
+
+- **In one installed plan:** `(plan_id, node_id)`. `plan_id` is the content
+  id of the plan's DAG: the 128-bit FNV-1a hash, in hex, of its JSON (every
+  serialized field of its nodes, edges and roots; not
+  `selected_physical_candidate`, which the plan file does not hold, nor the
+  query texts or wire version). Equal plans have equal ids across
+  processes and plan-file round trips; any change to the DAG changes it.
+- **In any plan:** the store key `(ViewStateKey, concrete selection)`: two
+  views with equal keys and one concrete selection (the request's time
+  range and the selection's other constraints) hold interchangeable
+  states, so a runtime keeps one copy, also across replanning. A runtime
+  that wants a short id hashes the key's JSON itself.
+
+`ViewStateKey` is logical-layer information carried on the physical node,
+like `view_coverage`, and it is taken from the view node alone:
+
+| Layer | What | On the node | In the key |
+| --- | --- | --- | --- |
+| Logical, memo group | what is computed | `view_coverage.definition_id` | `definition_id` |
+| Logical, memo group | which rows went in | `view_coverage.selection` | no: the store key's second half |
+| Logical, candidate | θ | `parameters` (the candidate's `LogicalProperties::parameters`) | `logical_properties` |
+| The view node's operator | the windows its state is kept in | a `SummaryTumblingWindowChain`'s or `SummaryMergeWindows`' `tumbling_window_width_ms` | `window` (`None` for a single state, whose window is in its selection) |
+| Physical | refresh (timing), lifetime (medium), retention | node fields | no |
+| Below the view node | how the state is computed | the sub-DAG | no |
+
+`definition_id` alone is not a store key: coverage leaves out θ and the
+tumbling-window width. Two KLL views of one minute of `t.value` with
+`k = 200` and `k = 400` have one coverage, and so do the three views of
+the planned `chains-10m-5m-3m-10s` workload (a 5-minute chain, a 10-second
+chain and 60-second windows merged from it); their keys differ in
+`logical_properties` and in `window`. Equivalent implementations in one
+memo group with equal θ share a key:
+`SummaryMerge(TimeRange(5m, Chain[1m]))` and
+`SummaryMerge(TimeRange(5m, Chain[5m]))` hold one state. Views that differ
+only in refresh mode, retention or storage medium share a key too. Five
+tumbling windows of one chain under `TimeShift(i·1m)` share one key, and
+each window's state is filed once under it and its absolute interval.
+
+Known limitations: the key is only as good as the coverage it carries. A
+finalized exact aggregate has no coverage (#1493), and a coverage depends
+on where a filter sits, not only on which rows are aggregated (#1494), so
+one stored state can get two keys.
 
 ### Input slots and compilation
 
@@ -562,7 +626,7 @@ pub struct MaterializedViewRequest<'a> {
 
 | | `read_raw_data` | `read_materialized_view` |
 | --- | --- | --- |
-| Keyed by | `Source` | `MaterializedView` (its coverage: the content id `definition_id` and selection) |
+| Keyed by | `Source` | `MaterializedView` (its `view_state_key` and selection; in one installed plan, `(plan_id, node_id)`) |
 | Time range | optional, a hint | always given, exact |
 | Predicates | a hint | none |
 | Executor re-filters | yes | no |
@@ -570,7 +634,7 @@ pub struct MaterializedViewRequest<'a> {
 
 - A **time series** is a table `(ts, value, *labels)`, as `Source::TimeSeries` declares.
 - A **SQL table** is a table with a time index.
-- A **materialized view** read returns exactly the states whose intervals tile the requested range. The store never counts an observation twice, never returns another definition's state, and never treats missing state as empty; it returns an error instead.
+- A **materialized view** read returns exactly the states whose intervals tile the requested range. The store never counts an observation twice, never returns the state of another `view_state_key` or selection, and never treats missing state as empty; it returns an error instead.
 
 Only the definition side of the deployment's summary store crosses the
 interface (the view's coverage and schema). Instances (their interval, group
@@ -677,7 +741,7 @@ dd_tumbling_window_0; the older tumbling windows were stored by earlier runs):
     refresh.instantiate(store)
         Scan calls read_raw_data(TimeSeries { latency }, time_range_ms = (12:04, 12:05]) once;
         both builds read its rows
-    store the KllState and the DDSketchState in the summary store, each under its view's coverage and interval
+    store the KllState and the DDSketchState in the summary store, each under its view's view_state_key and interval
 
 Query at T = 12:05 over (12:00, 12:05]:
     the installed DAG has the chain expanded: five tumbling window views, tumbling window i under TimeShift(i·1m)
@@ -689,11 +753,11 @@ Query at T = 12:05 over (12:00, 12:05]:
     NativeKllMerge executes once for both readouts → p50, p99
 ```
 
-The deployment matches a view to stored states by its coverage
-(`definition_id` and selection). Identity has two scopes: the memo compares
-coverages by `AggregateDefinition` `==` (its definitions hold memo group ids)
-and needs no id; the plan carries the view's content id on its node
-(`PhysicalASAPDAGNode::view_coverage`), defined at
+The deployment matches a view to stored states by its `view_state_key` and
+selection ([Identifying a materialized view](#identifying-a-materialized-view)).
+The memo compares coverages by `AggregateDefinition` `==` (its definitions
+hold memo group ids) and needs no id; the plan carries the view's content
+id on its node (`PhysicalASAPDAGNode::view_coverage`), defined at
 [`ViewCoverage::definition_id`](../../crates/types/src/plan/physical_asap_dag.rs).
 At execution time it checks their actual
 coverage, revisions and readiness. A compiled plan cannot establish future
@@ -714,9 +778,9 @@ sketch, or maintain different windows: such changes require replanning.
 | Where does retention live? | On the materialized-view node of the exported DAG | — |
 
 Mapping the materialized-views extension's terms: its `query()` is the sub-DAG
-under the view's node, and `coverage.definition_id` (the content id,
-[`ViewCoverage::definition_id`](../../crates/types/src/plan/physical_asap_dag.rs))
-identifies it.
+under the view's node, and its stored state is identified by
+`MaterializedView::view_state_key` with the selection (in one installed
+plan, by `(plan_id, node_id)`).
 Its readiness is the summary store's status, which the deployment owns. Its
 `mv_dependencies` build graph is `MaterializedView.inputs`.
 
@@ -775,7 +839,8 @@ operator/runtime fixtures:
 | Test | Contract exercised |
 | --- | --- |
 | `kll_tumbling_window_execution::five_tumbling_windows_roundtrip_and_shared_merge_runs_once` | One-minute tumbling window refreshes from raw data → five materialized view slots → shared native merge → p50/p99; counts every sample once, checks adjacent aligned windows and instruments one merge start per run |
-| `kll_tumbling_window_execution::a_store_keyed_by_definition_and_time_range_answers_the_tumbling_windows` | A store that finds states only by `(definition_id, time range)` (the content id is an opaque string to the store) answers the five-tumbling-window query: the tumbling windows share one definition and request the five ranges that tile the window |
+| `kll_tumbling_window_execution::a_store_keyed_by_view_state_key_and_time_range_answers_the_tumbling_windows` | A store that finds states only by `(view_state_key, time range)` answers the five-tumbling-window query: the tumbling windows share one key and request the five ranges that tile the window; with `k = 400` views over `k = 200` states, the read fails instead of answering (`…_misses_states_of_another_sketch_parameter`) |
+| `view_state_key::*` | θ-only and view-node-width-only differences give different keys; refresh, retention and medium do not; equivalent merges over 1-minute and 5-minute chains share a key; the three planned views of one coverage in `chains-10m-5m-3m-10s` get distinct keys; a view keeps its key across two workloads; the key is pinned and round-trips through JSON |
 | `runtime_install::tumbling_windows_of_one_refresh_window_read_each_raw_window_once` | A KLL chain and a DDSketch chain of 10 s tumbling windows over one `Scan` are one refresh group: each tumbling window window is read from raw data once, in one ingestion run that builds both tumbling windows; each state equals that of a run of its view alone, and both queries answer as the query-time reference |
 | `kll_tumbling_window_execution::tumbling_windows_reject_parameters_schema_and_missing_binding` | Parameter relabelling, incompatible schemas and missing views fail explicitly |
 | `precompute_candidates::grouped_rate_can_be_materialized_before_or_after_grouped_sum` | Stored counter state and stored Sum state answer like query time; summing counters before Rate does not |

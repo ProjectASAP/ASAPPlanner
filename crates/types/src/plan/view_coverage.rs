@@ -7,6 +7,7 @@
 
 use serde::Serialize;
 
+use super::content_id::content_id;
 use crate::ir::Operator;
 use crate::plan::physical_asap_dag::ViewCoverage;
 use crate::stages::{Memo, MemoGroupId};
@@ -16,9 +17,8 @@ use crate::stages::{Memo, MemoGroupId};
 /// coverage. The definition's input groups are expanded to their
 /// expressions recursively, down to the `Scan`s, so the id names no memo
 /// group: two memos (or processes) that compute the same thing give the
-/// same id, and different computations different ids. It is the 128-bit
-/// FNV-1a hash, in hex, of the expanded definition's JSON (non-finite
-/// floats serialized by `serde_f64`). Stage 3 sets it on a materialized
+/// same id, and different computations different ids. It is the content id
+/// (`plan::content_id`) of the expanded definition. Stage 3 sets it on a materialized
 /// view's plan node (`PhysicalASAPDAGNode::view_coverage`).
 pub fn view_coverage(memo: &Memo, group: MemoGroupId) -> Option<ViewCoverage> {
     let coverage = memo.groups()[group.0 as usize]
@@ -34,10 +34,8 @@ pub fn view_coverage(memo: &Memo, group: MemoGroupId) -> Option<ViewCoverage> {
             .map(|operator| operator.map_children(|input| input.map(|input| expanded(memo, input))))
             .collect(),
     };
-    let serialized =
-        serde_json::to_string(&expanded_definition).expect("an expanded definition serializes");
     Some(ViewCoverage {
-        definition_id: fnv1a_128_hex(&serialized),
+        definition_id: content_id(&expanded_definition),
         selection: coverage.selection.clone(),
     })
 }
@@ -64,15 +62,4 @@ fn expanded(memo: &Memo, group: MemoGroupId) -> ExpandedExpression {
             .expression
             .map_children(|&input| expanded(memo, input)),
     ))
-}
-
-/// The 128-bit FNV-1a hash of `text`, in hex: stable across processes and
-/// Rust versions.
-fn fnv1a_128_hex(text: &str) -> String {
-    const OFFSET: u128 = 0x6c62272e07bb014262b821756295c58d;
-    const PRIME: u128 = 0x0000000001000000000000000000013b;
-    let hash = text.bytes().fold(OFFSET, |hash, byte| {
-        (hash ^ u128::from(byte)).wrapping_mul(PRIME)
-    });
-    format!("{hash:032x}")
 }
