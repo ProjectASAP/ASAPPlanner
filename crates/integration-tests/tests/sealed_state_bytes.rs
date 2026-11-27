@@ -1,11 +1,13 @@
-//! The price of a sealed summary state (`sketch_state_bytes`) against the
-//! bytes the executor holds for it: a chain's own sealed window
+//! The price of a summary state against the bytes the executor holds for
+//! it. Sealed (`sketch_state_bytes`): a chain's own sealed window
 //! (`StateColumnUpdater::seal`) and a chain level merged from narrower
 //! windows (a `SummaryMerge` with a sealed output). A state sealed into its
 //! view layout is held as its view padded to 8 bytes and a 4-byte offset in
 //! its column (plus one per column); the offset is a byte of the state's row
-//! beside the state, so the price compared is the padded view.
-use asap_cost::node::state_bytes::{sketch_state_bytes, StateInputRows};
+//! beside the state, so the price compared is the padded view. Open
+//! (`open_sketch_state_bytes`): the owned sketch a chain's current window
+//! holds while it receives values, before it is sealed.
+use asap_cost::node::state_bytes::{open_sketch_state_bytes, sketch_state_bytes, StateInputRows};
 use asap_executor::arrow::array::{DictionaryArray, UInt32Array};
 use asap_executor::arrow::datatypes::UInt32Type;
 use asap_executor::operators::Operator;
@@ -280,4 +282,111 @@ fn a_sealed_ddsketchs_price_bounds_its_view() {
             "{input_rows} rows: held {held} B per state, price {price} B"
         );
     }
+}
+
+/// One open state of `family` per series, each fed `samples` values in a
+/// scrambled order, as a chain's current window holds them before it is
+/// sealed: the updater's open bytes per state.
+fn open_held_per_state(family: &FieldDataType, params: &SketchParams, samples: u32) -> f64 {
+    let mut updater = StateColumnUpdater::new(family, Some(params)).unwrap();
+    updater.ensure_groups(SERIES as usize).unwrap();
+    for s in 0..SERIES {
+        for sample in 0..samples {
+            let n = (s * 7_919 + sample * 104_729) % 1_000_003;
+            updater
+                .update(s, f64::from(n) * 0.5 + 1.0, i64::from(sample) * 1_000)
+                .unwrap();
+        }
+    }
+    updater.memory_bytes() as f64 / f64::from(SERIES)
+}
+
+/// P3. An open KLL's price is what the owned sketch holds while it still
+/// receives values (`Kll::memory_bytes` before `shrink_to_fit`): its
+/// struct, a slot for each of its 62 level boundaries, an item buffer
+/// doubling from 16 items and, past k, the scratch its compactions merge
+/// through. KLL (k = 200) over 1 row: 248 + 8 · 62 + 8 · 16 = 872 bytes.
+/// Exact up to k rows; past k the buffer and scratch follow the coin
+/// tosses, and the price bounds the mean open state within 1.25 times it.
+/// Guards for the other families an updater builds with a size that grows
+/// while open: KMV, held the same open or sealed, is priced exactly; an
+/// open DDSketch's price bounds it (over values of no declared range, at
+/// most 4.2 times). Collects every case that breaks it.
+#[test]
+fn an_open_states_price_is_what_the_executor_holds_before_sealing() {
+    let sketch = |algorithm| FieldDataType::Sketch(algorithm);
+    // (family, parameters, samples per state, allowed priced / held).
+    let cases = [
+        (
+            SketchAlgorithm::KLL,
+            SketchParams::Kll { k: 200 },
+            1,
+            1.0..=1.0,
+        ),
+        (
+            SketchAlgorithm::KLL,
+            SketchParams::Kll { k: 200 },
+            15,
+            1.0..=1.0,
+        ),
+        (
+            SketchAlgorithm::KLL,
+            SketchParams::Kll { k: 200 },
+            100,
+            1.0..=1.0,
+        ),
+        (
+            SketchAlgorithm::KLL,
+            SketchParams::Kll { k: 200 },
+            200,
+            1.0..=1.0,
+        ),
+        (
+            SketchAlgorithm::KLL,
+            SketchParams::Kll { k: 200 },
+            1_100,
+            1.0..=1.25,
+        ),
+        (
+            SketchAlgorithm::KLL,
+            SketchParams::Kll { k: 200 },
+            13_200,
+            1.0..=1.25,
+        ),
+        (
+            SketchAlgorithm::KLL,
+            SketchParams::Kll { k: 1_000 },
+            13_200,
+            1.0..=1.25,
+        ),
+        (
+            SketchAlgorithm::KMV,
+            SketchParams::Kmv { k: 1_024 },
+            15,
+            1.0..=1.0,
+        ),
+        (
+            SketchAlgorithm::KMV,
+            SketchParams::Kmv { k: 1_024 },
+            2_000,
+            1.0..=1.0,
+        ),
+        (
+            SketchAlgorithm::DDSketch,
+            SketchParams::DDSketch { alpha: 0.01 },
+            15,
+            1.0..=4.2,
+        ),
+    ];
+    let mut broken = Vec::new();
+    for (algorithm, params, samples, allowed) in &cases {
+        let held = open_held_per_state(&sketch(*algorithm), params, *samples);
+        let price = open_sketch_state_bytes(params, rows(*samples)) as f64;
+        if !allowed.contains(&(price / held)) {
+            broken.push(format!(
+                "{algorithm:?} {params:?}, {samples} rows: priced {price} B, held {held} B per state"
+            ));
+        }
+    }
+    assert!(broken.is_empty(), "{broken:#?}");
 }
