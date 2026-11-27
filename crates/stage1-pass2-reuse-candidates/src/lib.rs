@@ -25,7 +25,7 @@ mod rules;
 mod test_fixtures;
 #[cfg(test)]
 mod tests;
-/// Steps 4 and 5: search-space pruning rule 1, threshold θ only.
+/// Step 5: search-space pruning rule 1, threshold θ only.
 mod threshold_theta;
 
 use std::collections::BTreeSet;

@@ -301,7 +301,7 @@ fn rule1_one_quantile_keeps_the_optimum() {
     ));
 }
 
-/// The review's strict/loose pair: `quantile_over_time(0.99, m[1h])` at
+/// A strict/loose pair: `quantile_over_time(0.99, m[1h])` at
 /// relative 0.05 every 15 s and at 0.005 every 60 s, 10,000 series sampled
 /// every 100 ms: the two readers share chains whose θ must meet both.
 #[test]

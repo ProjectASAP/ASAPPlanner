@@ -10,9 +10,10 @@
 /// Which pruning rules the planner applies; [`Default`]: every rule.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SearchSpacePruning {
-    /// Rule 1, Stage 1 Pass 2: a state group keeps only the θs some reader
-    /// needs, each reader's least θ meeting its requirement and the least
-    /// θ two readers sharing the state need.
+    /// Rule 1, Stage 1 Pass 2: a θ another θ of its set does as well is
+    /// left out (same readers, same places, no larger in every size field).
+    /// Exact while a larger θ never costs less, which a measured
+    /// operation-cost table must also respect.
     pub threshold_theta: bool,
 }
 

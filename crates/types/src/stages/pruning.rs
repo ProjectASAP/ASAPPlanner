@@ -106,9 +106,9 @@ pub enum RootPruneReason {
         input: usize,
     },
     /// Search-space pruning rule 1 (`SearchSpacePruning::threshold_theta`):
-    /// the producer's θ is larger than the least θ of its shape that also
-    /// meets this consumer input (the reader's threshold), and no two
-    /// readers of its group need it to share one state.
+    /// another θ of the producer's θ set, no larger in every size field,
+    /// meets every reader the producer's θ meets, in every place it has a
+    /// candidate, so this edge out of the producer is cut.
     AboveReaderThreshold {
         consumer: CandidateForMemoGroupId,
         input: usize,
