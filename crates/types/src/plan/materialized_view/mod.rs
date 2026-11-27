@@ -64,12 +64,16 @@
 //! once. Stage 3's cost assumes this grouping; a runtime that splits a group
 //! computes the same states at a higher cost than priced.
 //!
-//! Each view's `coverage` says what its stored state is: a stable id of its
-//! definition (what it computes) and its selection (which rows went in,
-//! with time relative to the evaluation time). Two views with the same
-//! definition id and the same concrete selection (relative time made
-//! absolute at an evaluation) hold the same state, so a runtime may store
-//! it once.
+//! ## Identifying a view
+//!
+//! Within one installed plan a view is `(plan_id, node_id)`
+//! ([`MaterializedView::plan_id`]). What its stored state is, in any plan,
+//! is its [`ViewStateKey`] ([`MaterializedView::view_state_key`]): what it
+//! computes, the view node's own window and its θ. Its `coverage` adds which
+//! rows went in (the selection, with time relative to the evaluation time).
+//! Two views with the same key and the same concrete selection (relative
+//! time made absolute at an evaluation) hold the same state, so a runtime
+//! may store it once.
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -86,9 +90,15 @@ use crate::stages::EvaluationGrid;
 pub struct MaterializedView {
     /// The node whose output is materialized.
     pub node_id: PhysicalASAPNodeId,
+    /// The plan it belongs to (`PhysicalASAPDAG::plan_id`): with
+    /// `node_id`, its address in one installed plan.
+    pub(crate) plan_id: String,
+    /// What its stored state is, in any plan: from the view node alone.
+    pub(crate) view_state_key: ViewStateKey,
     /// Which run refreshes it.
     pub(crate) refresh: MaterializedViewRefresh,
-    /// What the stored state is: the node's aggregate coverage.
+    /// What it computes and which rows went in: the node's logical
+    /// aggregate coverage.
     pub(crate) coverage: ViewCoverage,
     /// What its refresh reads.
     pub inputs: MaterializedViewInputs,
@@ -109,11 +119,20 @@ impl MaterializedView {
     pub fn retention_ms(&self) -> u64 {
         self.retention_ms
     }
-}
 
-#[cfg(any(test, feature = "test-support"))]
-impl MaterializedView {
-    /// What the stored state is.
+    /// The plan the view belongs to (`PhysicalASAPDAG::plan_id`): with
+    /// `node_id`, its address in one installed plan.
+    pub fn plan_id(&self) -> &str {
+        &self.plan_id
+    }
+
+    /// What its stored state is, in any plan: a store keys states by it
+    /// and the concrete selection.
+    pub fn view_state_key(&self) -> &ViewStateKey {
+        &self.view_state_key
+    }
+
+    /// What it computes and which rows went in.
     pub fn coverage(&self) -> &ViewCoverage {
         &self.coverage
     }
@@ -324,4 +343,7 @@ pub enum InstallableDagError {
 }
 
 mod raw_data;
+mod view_state_key;
 mod views;
+
+pub use view_state_key::{ViewStateKey, ViewWindow};

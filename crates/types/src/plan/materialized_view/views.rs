@@ -8,7 +8,7 @@ use std::collections::{HashMap, HashSet};
 
 use super::{
     IngestionRefreshGroup, InstallableDagError, MaterializedView, MaterializedViewInputs,
-    MaterializedViewRefresh, RefreshWindow,
+    MaterializedViewRefresh, RefreshWindow, ViewStateKey,
 };
 use crate::ir::operator::asap::ASAPOp;
 use crate::ir::operator::node::Operator;
@@ -256,6 +256,7 @@ impl<'a> ViewIndex<'a> {
             .filter(|node| node.is_view())
             .map(|node| node.id)
             .collect();
+        let plan_id = self.dag.plan_id();
         let mut derived = Vec::new();
         for &id in self.children_first.iter().filter(|id| views.contains(id)) {
             let node = self.nodes[&id];
@@ -287,8 +288,11 @@ impl<'a> ViewIndex<'a> {
                     reason: "the plan node carries no view_coverage".into(),
                 }
             })?;
+            let view_state_key = ViewStateKey::of_view(node, &coverage, &self.nodes);
             derived.push(MaterializedView {
                 node_id: id,
+                plan_id: plan_id.clone(),
+                view_state_key,
                 refresh: if refreshed_at_ingestion {
                     MaterializedViewRefresh::AtIngestion
                 } else {

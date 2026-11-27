@@ -14,8 +14,20 @@
         "materialized_views": []
       },
       "node_id": 1,
+      "plan_id": "6656cdf755430662cfeaee0364ac65c2",
       "refresh": "at_ingestion",
-      "retention_ms": 300000
+      "retention_ms": 300000,
+      "view_state_key": {
+        "definition_id": "d4ef697d67fefe4d32e35729d739c47f",
+        "logical_properties": {
+          "parameters": null
+        },
+        "window": {
+          "tumbling": {
+            "width_ms": 10000
+          }
+        }
+      }
     },
     {
       "coverage": {
@@ -32,8 +44,20 @@
         ]
       },
       "node_id": 2,
+      "plan_id": "6656cdf755430662cfeaee0364ac65c2",
       "refresh": "at_ingestion",
-      "retention_ms": 300000
+      "retention_ms": 300000,
+      "view_state_key": {
+        "definition_id": "d4ef697d67fefe4d32e35729d739c47f",
+        "logical_properties": {
+          "parameters": null
+        },
+        "window": {
+          "tumbling": {
+            "width_ms": 60000
+          }
+        }
+      }
     }
   ],
   "queries": [

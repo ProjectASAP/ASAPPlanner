@@ -36,3 +36,19 @@ fn a_plan_file_of_an_older_wire_version_is_refused_by_version() {
     let read = InstallablePlan::from_json(&serde_json::to_string(&current).unwrap()).unwrap();
     assert_eq!(read, current);
 }
+
+/// The plan id of the DAG in a committed plan file, written by another
+/// process: a deployment that keyed states by `(plan_id, node_id)` finds
+/// them again only while this stays the same.
+#[test]
+fn the_plan_id_of_a_committed_plan_file_is_pinned() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/materialized_view_fixtures/plan_wire_version_10.json");
+    let file: Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+    let dag: asap_types::plan::physical_asap_dag::PhysicalASAPDAG =
+        serde_json::from_value(file["dag"]["dag"].clone()).unwrap();
+    assert_eq!(dag.plan_id(), PINNED_PLAN_ID);
+}
+
+/// `the_plan_id_of_a_committed_plan_file_is_pinned`'s plan id.
+const PINNED_PLAN_ID: &str = "90231c1c36f2b1660ed23d24725d635f";

@@ -52,7 +52,7 @@ impl CandidateForMemoGroup {
         let input_requirements = vec![LogicalRequirements::default(); operator.children().len()];
         Self {
             expression: CandidateExpression { operator },
-            logical_properties: LogicalProperties { parameters },
+            logical_properties: LogicalProperties::of_parameters(parameters),
             input_requirements,
             fused_groups,
             origin,
@@ -142,7 +142,8 @@ pub enum CandidateError {
 /// states) carries the θ of the states it reads.
 /// [`Memo::add_candidate`](crate::stages::Memo::add_candidate) checks θ
 /// against the candidate's group's output ([`parameters_fit`]).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct LogicalProperties {
     /// $\boldsymbol\theta_v$, from the algorithm's predefined list; `None` for
     /// an exact operator.
@@ -150,6 +151,12 @@ pub struct LogicalProperties {
 }
 
 impl LogicalProperties {
+    /// The logical properties with θ `parameters`, as a plan node carries
+    /// them (`PhysicalASAPDAGNode::parameters`).
+    pub(crate) fn of_parameters(parameters: Option<SketchParams>) -> Self {
+        Self { parameters }
+    }
+
     /// $\boldsymbol\theta_v$.
     pub fn parameters(&self) -> Option<&SketchParams> {
         self.parameters.as_ref()

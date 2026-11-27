@@ -683,3 +683,59 @@ fn a_cover_under_an_offset_covers_its_range_that_much_earlier() {
     let direct = kll_over_last_5m_of(&mut memo, shift(HOUR_MS, None, g1));
     assert_eq!(coverage(&memo, an_hour_back), coverage(&memo, direct));
 }
+
+/// Known limitation (#1494): `sum(rate(latency{job="api"}[5m]))` from the
+/// scan (the matcher below `rate`, never lifted) and from
+/// `sum by (job) (rate(latency[5m]))` filtered to `job = "api"` (the
+/// filter lifted) aggregate the same rows but get different coverages, so
+/// one stored state gets two keys.
+#[test]
+#[ignore = "known limitation: #1494"]
+fn known_limitation_1494_coverage_does_not_depend_on_where_the_filter_sits() {
+    use asap_types::test_support::memo_fixtures::aggregate;
+    let mut memo = Memo::new(&DataWorkload::default());
+    let sum_of = |memo: &mut Memo, input: MemoGroupId| {
+        memo.find_or_add_group(aggregate(
+            Reduction::by(vec![]),
+            AggIntent::Sum { col: Some(1) },
+            input,
+        ))
+        .unwrap()
+    };
+    let rate_of = |memo: &mut Memo, predicates: Vec<ScalarExpr<MemoGroupId>>| {
+        let series = memo.find_or_add_group(latency(predicates)).unwrap();
+        let window = memo
+            .find_or_add_group(range(5 * MINUTE_MS, series))
+            .unwrap();
+        memo.find_or_add_group(aggregate(Reduction::PerEntity, AggIntent::Rate, window))
+            .unwrap()
+    };
+    // From the scan: the matcher sits below `rate`.
+    let api_rate = rate_of(&mut memo, vec![job_is("api")]);
+    let from_scan = sum_of(&mut memo, api_rate);
+    // From `sum by (job)`: keep job "api" (column 0 of `[job, sum]`), then sum.
+    let rate = rate_of(&mut memo, vec![]);
+    let by_job = memo
+        .find_or_add_group(aggregate(
+            Reduction::by(vec![JOB]),
+            AggIntent::Sum { col: Some(1) },
+            rate,
+        ))
+        .unwrap();
+    let api_row = memo
+        .find_or_add_group(filter(
+            ScalarExpr::Compare {
+                left: Box::new(ScalarExpr::Column(0)),
+                op: CompareOpKind::Eq,
+                right: Box::new(ScalarExpr::Literal(ScalarValue::Utf8("api".into()))),
+                semantics: ExprSemantics::Promql,
+            },
+            by_job,
+        ))
+        .unwrap();
+    let from_rollup = sum_of(&mut memo, api_row);
+    let from_scan = view_coverage(&memo, from_scan).unwrap();
+    let from_rollup = view_coverage(&memo, from_rollup).unwrap();
+    assert_eq!(from_scan.definition_id(), from_rollup.definition_id());
+    assert_eq!(from_scan.selection(), from_rollup.selection());
+}

@@ -14,8 +14,24 @@
         "materialized_views": []
       },
       "node_id": 5,
+      "plan_id": "6d7351cc3cf7ce07c425fd0b394d9508",
       "refresh": "at_ingestion",
-      "retention_ms": 300000
+      "retention_ms": 300000,
+      "view_state_key": {
+        "definition_id": "a446d509bf79a41e64d4c7dc4e541037",
+        "logical_properties": {
+          "parameters": {
+            "Kll": {
+              "k": 547
+            }
+          }
+        },
+        "window": {
+          "tumbling": {
+            "width_ms": 60000
+          }
+        }
+      }
     }
   ],
   "planner_executor_error": "the executor cannot refresh materialized view 5 from its inputs: invalid DAG: summary time column must be a timestamp",

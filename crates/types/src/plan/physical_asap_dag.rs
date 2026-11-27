@@ -101,7 +101,8 @@ pub struct PhysicalASAPDAGNode {
     #[serde(skip)]
     pub selected_physical_candidate: Option<PhysicalCandidateId>,
     /// For a materialized view (lifetime `AcrossEvaluations`), what it
-    /// stores: its memo group's aggregate coverage, carried into the plan
+    /// computes and which rows went in: its memo group's aggregate
+    /// coverage, logical-layer information carried into the plan
     /// as a [`ViewCoverage`] (the selection, and the plan-scope content id
     /// of the definition, [`ViewCoverage::definition_id`]). Set when the
     /// plan is built from the memo, where the node's group is known; `None`
@@ -156,8 +157,12 @@ impl ViewCoverage {
             selection,
         }
     }
+}
 
-    /// The plan-scope content id of what the view computes.
+impl ViewCoverage {
+    /// The content id of what the view computes, logically: equal for two
+    /// views of different θ or tumbling-window widths, so not a store key
+    /// on its own (see `MaterializedView::view_state_key`).
     pub fn definition_id(&self) -> &str {
         &self.definition_id
     }
@@ -299,6 +304,18 @@ pub enum PhysicalASAPDAGValidationError {
         "summary aggregate node {node:?} output schema does not contain its declared summary type"
     )]
     SummaryTypeSchemaMismatch { node: PhysicalASAPNodeId },
+}
+
+impl PhysicalASAPDAG {
+    /// The content id of this plan: the 128-bit FNV-1a hash, in hex, of its
+    /// JSON as the plan file holds it (every serialized field of its nodes,
+    /// edges and roots; not `selected_physical_candidate`). Equal for equal
+    /// plans across processes and plan-file round trips; different when any
+    /// of those fields differ. With a node id, it names one view of one
+    /// installed plan. O(plan size).
+    pub fn plan_id(&self) -> String {
+        super::content_id::content_id(self)
+    }
 }
 
 impl PhysicalASAPDAG {

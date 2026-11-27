@@ -33,8 +33,20 @@
         "materialized_views": []
       },
       "node_id": 1,
+      "plan_id": "3b3f67a1f3c9d5b2763c9de99557f43e",
       "refresh": "at_ingestion",
-      "retention_ms": 3900000
+      "retention_ms": 3900000,
+      "view_state_key": {
+        "definition_id": "4979322924750ccd229ed30e06b692a0",
+        "logical_properties": {
+          "parameters": null
+        },
+        "window": {
+          "tumbling": {
+            "width_ms": 60000
+          }
+        }
+      }
     }
   ],
   "query": "histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket{job=\"order-service\"}[5m])) by (le))",

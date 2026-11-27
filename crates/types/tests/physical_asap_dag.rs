@@ -349,3 +349,89 @@ fn high_fan_in_edges_preserve_multiplicity_without_order_dependence() {
         Err(PhysicalASAPDAGValidationError::EdgeRoleMismatch { .. })
     ));
 }
+
+/// `plan()` with its `Scan` keeping `value > threshold`, exported at query
+/// time with each node's id; a float literal enters the plan's JSON.
+fn plan_with_threshold(threshold: f64) -> PhysicalASAPDAG {
+    use asap_types::ir::scalar::expr_ir::{CompareOpKind, ScalarValue};
+    use asap_types::ir::{ExprSemantics, Predicate, ScalarExpr};
+    let scan = OperatorNode::new_shared(Operator::NonASAP(NonASAPOp::Scan {
+        source: Source::Table {
+            table_ref: "t".into(),
+        },
+        predicates: vec![Predicate(ScalarExpr::Compare {
+            left: Box::new(ScalarExpr::Column(1)),
+            op: CompareOpKind::Gt,
+            right: Box::new(ScalarExpr::Literal(ScalarValue::Float64(threshold))),
+            semantics: ExprSemantics::Sql,
+        })],
+        schema: Schema::new(vec![
+            Field::plain("key", DataType::Utf8, false),
+            Field::plain("value", DataType::Float64, false),
+        ]),
+    }))
+    .unwrap();
+    let state = OperatorNode::new_shared(Operator::ASAP(ASAPOp::SummaryAgg {
+        child: scan,
+        summary_type: FieldDataType::ExactAggregate(ExactKind::Sum, ExactParams::Sum),
+        input: SummaryUpdate::column(ColumnRef::Named("value".into())),
+        reduction: Reduction::by(vec![0]),
+        filter: None,
+    }))
+    .unwrap();
+    let root = OperatorNode::new_shared(Operator::ASAP(ASAPOp::FinalizeExactAccumulator {
+        child: state,
+        counter_readout: None,
+    }))
+    .unwrap();
+    asap_types::test_support::forwarders::physical_asap_dag_at_query_time(&root).unwrap()
+}
+
+/// A plan file read back has the plan id it was written with, with a float
+/// literal whose bits `serde_json`'s default float parsing does not
+/// restore (`1.0715660391465826e-75`): the planner and a runtime that reads
+/// its plan file name the plan alike.
+#[test]
+fn the_plan_id_survives_a_plan_file_round_trip() {
+    let dag = plan_with_threshold(1.0715660391465826e-75);
+    let read: PhysicalASAPDAG =
+        serde_json::from_str(&serde_json::to_string(&dag).unwrap()).unwrap();
+    assert_eq!(read, dag);
+    assert_eq!(read.plan_id(), dag.plan_id());
+}
+
+/// The plan id changes with every field of the plan file and with nothing
+/// else: a node's retention, θ, lifetime or operator; not the in-memory
+/// `selected_physical_candidate`.
+#[test]
+fn the_plan_id_changes_with_the_plan_and_only_with_it() {
+    let dag = plan_with_threshold(10.0);
+    let plan_id = dag.plan_id();
+    assert_eq!(plan_id.len(), 32, "{plan_id}");
+    assert!(plan_id.bytes().all(|byte| byte.is_ascii_hexdigit()));
+    let changed = |change: &dyn Fn(&mut PhysicalASAPDAG)| {
+        let mut changed = dag.clone();
+        change(&mut changed);
+        changed.plan_id()
+    };
+    assert_ne!(
+        changed(&|dag| dag.nodes[0].retention_ms = Some(60_000)),
+        plan_id
+    );
+    assert_ne!(
+        changed(&|dag| {
+            dag.nodes[0].parameters = Some(asap_types::summary_type::SketchParams::Kll { k: 200 })
+        }),
+        plan_id
+    );
+    assert_ne!(
+        changed(&|dag| dag.nodes[0].lifetime = Lifetime::AcrossEvaluations(StorageMedium::Memory)),
+        plan_id
+    );
+    assert_ne!(changed(&|dag| *dag = plan_with_threshold(20.0)), plan_id);
+    assert_eq!(
+        changed(&|dag| dag.nodes[0].selected_physical_candidate =
+            Some(asap_types::stages::PhysicalCandidateId(7))),
+        plan_id
+    );
+}

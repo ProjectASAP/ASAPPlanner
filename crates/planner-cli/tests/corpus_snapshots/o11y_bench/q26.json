@@ -14,8 +14,20 @@
         "materialized_views": []
       },
       "node_id": 1,
+      "plan_id": "f413ac4f80b9ec7adf5ccc28716cc089",
       "refresh": "at_ingestion",
-      "retention_ms": 7200000
+      "retention_ms": 7200000,
+      "view_state_key": {
+        "definition_id": "466f50917756802af016b8b6f1e0cd5e",
+        "logical_properties": {
+          "parameters": null
+        },
+        "window": {
+          "tumbling": {
+            "width_ms": 60000
+          }
+        }
+      }
     },
     {
       "coverage": {
@@ -32,8 +44,20 @@
         ]
       },
       "node_id": 2,
+      "plan_id": "f413ac4f80b9ec7adf5ccc28716cc089",
       "refresh": "at_ingestion",
-      "retention_ms": 7200000
+      "retention_ms": 7200000,
+      "view_state_key": {
+        "definition_id": "466f50917756802af016b8b6f1e0cd5e",
+        "logical_properties": {
+          "parameters": null
+        },
+        "window": {
+          "tumbling": {
+            "width_ms": 300000
+          }
+        }
+      }
     },
     {
       "coverage": {
@@ -50,8 +74,20 @@
         ]
       },
       "node_id": 3,
+      "plan_id": "f413ac4f80b9ec7adf5ccc28716cc089",
       "refresh": "at_ingestion",
-      "retention_ms": 7200000
+      "retention_ms": 7200000,
+      "view_state_key": {
+        "definition_id": "466f50917756802af016b8b6f1e0cd5e",
+        "logical_properties": {
+          "parameters": null
+        },
+        "window": {
+          "tumbling": {
+            "width_ms": 900000
+          }
+        }
+      }
     }
   ],
   "query": "sum(rate(process_cpu_seconds_total[1h]))",
