@@ -93,7 +93,7 @@ Invariants:
 
 Ignored until their feature lands:
 
-* Hydra (`HydraCms` over all (job, series) keys, a heap per job) as a third
+* Hydra (`HydraCountMinSketch` over all (job, series) keys, a heap per job) as a third
   Q2 summary (#605).
 
 ## Physical ASAP-aware optimization: 72 candidates
@@ -200,7 +200,7 @@ per evaluation, within its 100 ms.
    sort + limit a physical choice. The tests require sort → limit only after
    physical ASAP-aware optimization.
 6. **Hydra's inner sketch.** The doc says "Hydra over the whole `job`
-   column" without naming the inner sketch. The test assumes `HydraCms`.
+   column" without naming the inner sketch. The test assumes `HydraCountMinSketch`.
 7. **"Shared summary charged once"** does not apply literally: the doc says
    no summary is shared in Example 1. Plan selection charges a
    `Lifetime::None` node once per consuming query and a materialized one

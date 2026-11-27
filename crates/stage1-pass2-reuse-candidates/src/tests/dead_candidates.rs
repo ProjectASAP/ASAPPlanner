@@ -27,7 +27,7 @@ fn dead_candidates_are_pruned_and_listed_before_chain_groups() {
     let mut memo = Memo::new(&with_non_negative_values("m"));
     let input = scan_group(&mut memo, "m", &["job"], vec![]);
     let window = group(&mut memo, range(300_000, input));
-    let algorithms = [SketchAlgorithm::Kll, SketchAlgorithm::DDSketch];
+    let algorithms = [SketchAlgorithm::KLL, SketchAlgorithm::DDSketch];
     let p99 = quantile_over_time_readouts(&mut memo, window, 0.99, &algorithms);
     let p50 = quantile_over_time_readouts(&mut memo, window, 0.5, &algorithms);
     let ratio = group(
@@ -51,7 +51,7 @@ fn dead_candidates_are_pruned_and_listed_before_chain_groups() {
     }
     // Every KLL build: the metric rule on its edge into a KLL readout,
     // whose output accepts only relative error.
-    for index_in_group in 0..parameter_list(SketchAlgorithm::Kll).len() {
+    for index_in_group in 0..parameter_list(SketchAlgorithm::KLL).len() {
         let build = CandidateForMemoGroupId {
             group: kll_state,
             index_in_group,
@@ -104,7 +104,7 @@ fn dead_candidates_are_pruned_and_listed_before_chain_groups() {
     assert!(groups_where(memo, |e| matches!(
         e,
         Operator::ASAP(ASAPOp::SummaryTumblingWindowChain { summary_type, .. })
-            if *summary_type == FieldDataType::Sketch(SketchAlgorithm::Kll)
+            if *summary_type == FieldDataType::Sketch(SketchAlgorithm::KLL)
     ))
     .is_empty());
     // No logical edge names a pruned candidate.

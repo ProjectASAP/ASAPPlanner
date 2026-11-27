@@ -119,13 +119,13 @@ fn value_families() -> Vec<Family> {
         exact(ExactKind::Counter, ExactParams::Counter),
         // `k` above any group's sample count (at most 600): no compaction,
         // so the random compaction coin never flips.
-        sketch(SketchAlgorithm::Kll, SketchParams::Kll { k: 1024 }),
+        sketch(SketchAlgorithm::KLL, SketchParams::Kll { k: 1024 }),
         sketch(
             SketchAlgorithm::DDSketch,
             SketchParams::DDSketch { alpha: 0.01 },
         ),
-        sketch(SketchAlgorithm::Hll, SketchParams::Hll { precision: 10 }),
-        sketch(SketchAlgorithm::Kmv, SketchParams::Kmv { k: 32 }),
+        sketch(SketchAlgorithm::HLL, SketchParams::Hll { precision: 10 }),
+        sketch(SketchAlgorithm::KMV, SketchParams::Kmv { k: 32 }),
         sketch(
             SketchAlgorithm::UnivMon,
             SketchParams::UnivMon {
@@ -142,7 +142,7 @@ fn value_families() -> Vec<Family> {
 fn keyed_families() -> Vec<Family> {
     vec![
         sketch(
-            SketchAlgorithm::CmsWithHeap,
+            SketchAlgorithm::CountMinSketchWithHeap,
             SketchParams::CmsWithHeap {
                 width: 64,
                 depth: 3,
@@ -710,7 +710,7 @@ fn an_unknown_group_is_bad_input() {
 /// A HydraCms family: one shared grid for all groups.
 fn hydra_family() -> Family {
     (
-        FieldDataType::Sketch(SketchAlgorithm::HydraCms),
+        FieldDataType::Sketch(SketchAlgorithm::HydraCountMinSketch),
         Some(SketchParams::Hydra(HydraParams::HydraCms {
             width: 64,
             depth: 3,

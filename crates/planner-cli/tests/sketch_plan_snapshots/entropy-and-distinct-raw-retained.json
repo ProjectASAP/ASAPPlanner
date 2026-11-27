@@ -15,9 +15,9 @@
       {
         "accepted_metric": "relative",
         "sketches": [
-          "Kmv"
+          "KMV"
         ],
-        "summary": "accepted relative (Kmv)"
+        "summary": "accepted relative (KMV)"
       }
     ],
     "cost": {
@@ -56,7 +56,7 @@
           "cost_per_second": 1.08171914554e-8,
           "cost_source": "analytical",
           "cpu_core_seconds_per_second": 0.000954,
-          "detail": "build Kmv into 10000 states: 200000 rows x 116.2 ops, 200000 group visits; x 0.0167/s; holds 82400000 bytes for 57.240 ms",
+          "detail": "build KMV into 10000 states: 200000 rows x 116.2 ops, 200000 group visits; x 0.0167/s; holds 82400000 bytes for 57.240 ms",
           "ingest_cpu_core_seconds_per_second": 0.0,
           "multiplier": 1,
           "operator": "SummaryAgg",
@@ -261,7 +261,7 @@
               },
               {
                 "dtype": {
-                  "Sketch": "Kmv"
+                  "Sketch": "KMV"
                 },
                 "name": "state",
                 "nullable": false
@@ -535,7 +535,7 @@
               },
               {
                 "dtype": {
-                  "Sketch": "Kmv"
+                  "Sketch": "KMV"
                 },
                 "name": "state",
                 "nullable": false
@@ -578,7 +578,7 @@
                 },
                 "reduction": "PerEntity",
                 "summary_type": {
-                  "Sketch": "Kmv"
+                  "Sketch": "KMV"
                 }
               }
             }

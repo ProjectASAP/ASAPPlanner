@@ -14,7 +14,7 @@
         "readouts": [
           "Quantile"
         ],
-        "summary_type": "Kll"
+        "summary_type": "KLL"
       }
     ]
   },
@@ -680,7 +680,7 @@
             "shareable_when_equal": true
           },
           {
-            "aggregate_coverage": "covers G2 through [SummaryAgg Kll] selecting [{\"columns\":[{\"column\":{\"source\":{\"TimeSeries\":{\"metric\":\"data\"}},\"scan_ordinal\":0,\"column\":\"ts\"},\"constraint\":{\"interval\":{\"lower\":{\"excluded\":{\"evaluation_time_plus_ms\":-300000}},\"upper\":{\"included\":{\"evaluation_time_plus_ms\":0}}}}}]}]",
+            "aggregate_coverage": "covers G2 through [SummaryAgg KLL] selecting [{\"columns\":[{\"column\":{\"source\":{\"TimeSeries\":{\"metric\":\"data\"}},\"scan_ordinal\":0,\"column\":\"ts\"},\"constraint\":{\"interval\":{\"lower\":{\"excluded\":{\"evaluation_time_plus_ms\":-300000}},\"upper\":{\"included\":{\"evaluation_time_plus_ms\":0}}}}}]}]",
             "candidate_count": 7,
             "candidate_count_by_origin": {
               "pass1": 7
@@ -693,7 +693,7 @@
                 ],
                 "fused_groups": [],
                 "index": 0,
-                "label": "SummaryAgg Kll",
+                "label": "SummaryAgg KLL",
                 "operator": {
                   "ASAP": {
                     "SummaryAgg": {
@@ -707,7 +707,7 @@
                       },
                       "reduction": "PerEntity",
                       "summary_type": {
-                        "Sketch": "Kll"
+                        "Sketch": "KLL"
                       }
                     }
                   }
@@ -729,7 +729,7 @@
                 ],
                 "fused_groups": [],
                 "index": 1,
-                "label": "SummaryAgg Kll",
+                "label": "SummaryAgg KLL",
                 "operator": {
                   "ASAP": {
                     "SummaryAgg": {
@@ -743,7 +743,7 @@
                       },
                       "reduction": "PerEntity",
                       "summary_type": {
-                        "Sketch": "Kll"
+                        "Sketch": "KLL"
                       }
                     }
                   }
@@ -765,7 +765,7 @@
                 ],
                 "fused_groups": [],
                 "index": 2,
-                "label": "SummaryAgg Kll",
+                "label": "SummaryAgg KLL",
                 "operator": {
                   "ASAP": {
                     "SummaryAgg": {
@@ -779,7 +779,7 @@
                       },
                       "reduction": "PerEntity",
                       "summary_type": {
-                        "Sketch": "Kll"
+                        "Sketch": "KLL"
                       }
                     }
                   }
@@ -801,7 +801,7 @@
                 ],
                 "fused_groups": [],
                 "index": 3,
-                "label": "SummaryAgg Kll",
+                "label": "SummaryAgg KLL",
                 "operator": {
                   "ASAP": {
                     "SummaryAgg": {
@@ -815,7 +815,7 @@
                       },
                       "reduction": "PerEntity",
                       "summary_type": {
-                        "Sketch": "Kll"
+                        "Sketch": "KLL"
                       }
                     }
                   }
@@ -837,7 +837,7 @@
                 ],
                 "fused_groups": [],
                 "index": 4,
-                "label": "SummaryAgg Kll",
+                "label": "SummaryAgg KLL",
                 "operator": {
                   "ASAP": {
                     "SummaryAgg": {
@@ -851,7 +851,7 @@
                       },
                       "reduction": "PerEntity",
                       "summary_type": {
-                        "Sketch": "Kll"
+                        "Sketch": "KLL"
                       }
                     }
                   }
@@ -873,7 +873,7 @@
                 ],
                 "fused_groups": [],
                 "index": 5,
-                "label": "SummaryAgg Kll",
+                "label": "SummaryAgg KLL",
                 "operator": {
                   "ASAP": {
                     "SummaryAgg": {
@@ -887,7 +887,7 @@
                       },
                       "reduction": "PerEntity",
                       "summary_type": {
-                        "Sketch": "Kll"
+                        "Sketch": "KLL"
                       }
                     }
                   }
@@ -909,7 +909,7 @@
                 ],
                 "fused_groups": [],
                 "index": 6,
-                "label": "SummaryAgg Kll",
+                "label": "SummaryAgg KLL",
                 "operator": {
                   "ASAP": {
                     "SummaryAgg": {
@@ -923,7 +923,7 @@
                       },
                       "reduction": "PerEntity",
                       "summary_type": {
-                        "Sketch": "Kll"
+                        "Sketch": "KLL"
                       }
                     }
                   }
@@ -955,7 +955,7 @@
             "depends_on_evaluation_time": true,
             "evaluation_grid": null,
             "id": 4,
-            "label": "SummaryAgg Kll",
+            "label": "SummaryAgg KLL",
             "operator": {
               "ASAP": {
                 "SummaryAgg": {
@@ -969,7 +969,7 @@
                   },
                   "reduction": "PerEntity",
                   "summary_type": {
-                    "Sketch": "Kll"
+                    "Sketch": "KLL"
                   }
                 }
               }
@@ -1552,7 +1552,7 @@
             "shareable_when_equal": true
           },
           {
-            "aggregate_coverage": "covers G2 through [SummaryAgg Kll] selecting [{\"columns\":[{\"column\":{\"source\":{\"TimeSeries\":{\"metric\":\"data\"}},\"scan_ordinal\":0,\"column\":\"ts\"},\"constraint\":{\"interval\":{\"lower\":{\"excluded\":{\"evaluation_time_plus_ms\":-300000}},\"upper\":{\"included\":{\"evaluation_time_plus_ms\":0}}}}}]}]",
+            "aggregate_coverage": "covers G2 through [SummaryAgg KLL] selecting [{\"columns\":[{\"column\":{\"source\":{\"TimeSeries\":{\"metric\":\"data\"}},\"scan_ordinal\":0,\"column\":\"ts\"},\"constraint\":{\"interval\":{\"lower\":{\"excluded\":{\"evaluation_time_plus_ms\":-300000}},\"upper\":{\"included\":{\"evaluation_time_plus_ms\":0}}}}}]}]",
             "candidate_count": 10,
             "candidate_count_by_origin": {
               "pass1": 7,
@@ -1578,7 +1578,7 @@
                     "group": 1
                   }
                 ],
-                "label": "SummaryAgg Kll",
+                "label": "SummaryAgg KLL",
                 "operator": {
                   "ASAP": {
                     "SummaryAgg": {
@@ -1592,7 +1592,7 @@
                       },
                       "reduction": "PerEntity",
                       "summary_type": {
-                        "Sketch": "Kll"
+                        "Sketch": "KLL"
                       }
                     }
                   }
@@ -1627,7 +1627,7 @@
                     "group": 1
                   }
                 ],
-                "label": "SummaryAgg Kll",
+                "label": "SummaryAgg KLL",
                 "operator": {
                   "ASAP": {
                     "SummaryAgg": {
@@ -1641,7 +1641,7 @@
                       },
                       "reduction": "PerEntity",
                       "summary_type": {
-                        "Sketch": "Kll"
+                        "Sketch": "KLL"
                       }
                     }
                   }
@@ -1676,7 +1676,7 @@
                     "group": 1
                   }
                 ],
-                "label": "SummaryAgg Kll",
+                "label": "SummaryAgg KLL",
                 "operator": {
                   "ASAP": {
                     "SummaryAgg": {
@@ -1690,7 +1690,7 @@
                       },
                       "reduction": "PerEntity",
                       "summary_type": {
-                        "Sketch": "Kll"
+                        "Sketch": "KLL"
                       }
                     }
                   }
@@ -1725,7 +1725,7 @@
                     "group": 1
                   }
                 ],
-                "label": "SummaryAgg Kll",
+                "label": "SummaryAgg KLL",
                 "operator": {
                   "ASAP": {
                     "SummaryAgg": {
@@ -1739,7 +1739,7 @@
                       },
                       "reduction": "PerEntity",
                       "summary_type": {
-                        "Sketch": "Kll"
+                        "Sketch": "KLL"
                       }
                     }
                   }
@@ -1774,7 +1774,7 @@
                     "group": 1
                   }
                 ],
-                "label": "SummaryAgg Kll",
+                "label": "SummaryAgg KLL",
                 "operator": {
                   "ASAP": {
                     "SummaryAgg": {
@@ -1788,7 +1788,7 @@
                       },
                       "reduction": "PerEntity",
                       "summary_type": {
-                        "Sketch": "Kll"
+                        "Sketch": "KLL"
                       }
                     }
                   }
@@ -1823,7 +1823,7 @@
                     "group": 1
                   }
                 ],
-                "label": "SummaryAgg Kll",
+                "label": "SummaryAgg KLL",
                 "operator": {
                   "ASAP": {
                     "SummaryAgg": {
@@ -1837,7 +1837,7 @@
                       },
                       "reduction": "PerEntity",
                       "summary_type": {
-                        "Sketch": "Kll"
+                        "Sketch": "KLL"
                       }
                     }
                   }
@@ -1872,7 +1872,7 @@
                     "group": 1
                   }
                 ],
-                "label": "SummaryAgg Kll",
+                "label": "SummaryAgg KLL",
                 "operator": {
                   "ASAP": {
                     "SummaryAgg": {
@@ -1886,7 +1886,7 @@
                       },
                       "reduction": "PerEntity",
                       "summary_type": {
-                        "Sketch": "Kll"
+                        "Sketch": "KLL"
                       }
                     }
                   }
@@ -2072,7 +2072,7 @@
               "phase_ms": 0
             },
             "id": 4,
-            "label": "SummaryAgg Kll",
+            "label": "SummaryAgg KLL",
             "operator": {
               "ASAP": {
                 "SummaryAgg": {
@@ -2086,7 +2086,7 @@
                   },
                   "reduction": "PerEntity",
                   "summary_type": {
-                    "Sketch": "Kll"
+                    "Sketch": "KLL"
                   }
                 }
               }
@@ -2109,7 +2109,7 @@
             "shareable_when_equal": true
           },
           {
-            "aggregate_coverage": "covers G2 through [SummaryAgg Kll] selecting [{\"columns\":[{\"column\":{\"source\":{\"TimeSeries\":{\"metric\":\"data\"}},\"scan_ordinal\":0,\"column\":\"ts\"},\"constraint\":{\"interval\":{\"lower\":{\"excluded\":{\"evaluation_time_plus_ms\":-300000}},\"upper\":{\"included\":{\"evaluation_time_plus_ms\":0}}}}}]}]",
+            "aggregate_coverage": "covers G2 through [SummaryAgg KLL] selecting [{\"columns\":[{\"column\":{\"source\":{\"TimeSeries\":{\"metric\":\"data\"}},\"scan_ordinal\":0,\"column\":\"ts\"},\"constraint\":{\"interval\":{\"lower\":{\"excluded\":{\"evaluation_time_plus_ms\":-300000}},\"upper\":{\"included\":{\"evaluation_time_plus_ms\":0}}}}}]}]",
             "candidate_count": 3,
             "candidate_count_by_origin": {
               "tumbling_windows": 3
@@ -2325,7 +2325,7 @@
             "shareable_when_equal": true
           },
           {
-            "aggregate_coverage": "covers G2 through [SummaryAgg Kll] selecting [{\"columns\":[]}]",
+            "aggregate_coverage": "covers G2 through [SummaryAgg KLL] selecting [{\"columns\":[]}]",
             "candidate_count": 3,
             "candidate_count_by_origin": {
               "tumbling_windows": 3
@@ -2350,7 +2350,7 @@
                     "group": 2
                   }
                 ],
-                "label": "SummaryTumblingWindowChain Kll tumbling_window_width_ms=60000",
+                "label": "SummaryTumblingWindowChain KLL tumbling_window_width_ms=60000",
                 "operator": {
                   "ASAP": {
                     "SummaryTumblingWindowChain": {
@@ -2364,7 +2364,7 @@
                       },
                       "reduction": "PerEntity",
                       "summary_type": {
-                        "Sketch": "Kll"
+                        "Sketch": "KLL"
                       },
                       "tumbling_window_width_ms": 60000
                     }
@@ -2400,7 +2400,7 @@
                     "group": 2
                   }
                 ],
-                "label": "SummaryTumblingWindowChain Kll tumbling_window_width_ms=60000",
+                "label": "SummaryTumblingWindowChain KLL tumbling_window_width_ms=60000",
                 "operator": {
                   "ASAP": {
                     "SummaryTumblingWindowChain": {
@@ -2414,7 +2414,7 @@
                       },
                       "reduction": "PerEntity",
                       "summary_type": {
-                        "Sketch": "Kll"
+                        "Sketch": "KLL"
                       },
                       "tumbling_window_width_ms": 60000
                     }
@@ -2450,7 +2450,7 @@
                     "group": 2
                   }
                 ],
-                "label": "SummaryTumblingWindowChain Kll tumbling_window_width_ms=60000",
+                "label": "SummaryTumblingWindowChain KLL tumbling_window_width_ms=60000",
                 "operator": {
                   "ASAP": {
                     "SummaryTumblingWindowChain": {
@@ -2464,7 +2464,7 @@
                       },
                       "reduction": "PerEntity",
                       "summary_type": {
-                        "Sketch": "Kll"
+                        "Sketch": "KLL"
                       },
                       "tumbling_window_width_ms": 60000
                     }
@@ -2501,7 +2501,7 @@
               "phase_ms": 0
             },
             "id": 6,
-            "label": "SummaryTumblingWindowChain Kll tumbling_window_width_ms=60000",
+            "label": "SummaryTumblingWindowChain KLL tumbling_window_width_ms=60000",
             "operator": {
               "ASAP": {
                 "SummaryTumblingWindowChain": {
@@ -2515,7 +2515,7 @@
                   },
                   "reduction": "PerEntity",
                   "summary_type": {
-                    "Sketch": "Kll"
+                    "Sketch": "KLL"
                   },
                   "tumbling_window_width_ms": 60000
                 }
@@ -3829,9 +3829,9 @@
       {
         "accepted_metric": "rank",
         "sketches": [
-          "Kll"
+          "KLL"
         ],
-        "summary": "accepted rank (Kll)"
+        "summary": "accepted rank (KLL)"
       }
     ],
     "cost": {
@@ -3851,7 +3851,7 @@
           "cost_per_second": 1.15266666667,
           "cost_source": "analytical",
           "cpu_core_seconds_per_second": 0.000156666666667,
-          "detail": "build Kll in tumbling windows of 60000 ms for 1000 groups: 1000 rows x 84 ops, 100 group visits, 16.7 states emitted; x 1.0000/s; keeps 7968000 bytes",
+          "detail": "build KLL in tumbling windows of 60000 ms for 1000 groups: 1000 rows x 84 ops, 100 group visits, 16.7 states emitted; x 1.0000/s; keeps 7968000 bytes",
           "multiplier": 1,
           "operator": "SummaryTumblingWindowChain",
           "timing": "ingestion_time"
@@ -3989,7 +3989,7 @@
               },
               {
                 "dtype": {
-                  "Sketch": "Kll"
+                  "Sketch": "KLL"
                 },
                 "name": "state",
                 "nullable": false
@@ -4033,7 +4033,7 @@
               },
               {
                 "dtype": {
-                  "Sketch": "Kll"
+                  "Sketch": "KLL"
                 },
                 "name": "state",
                 "nullable": false
@@ -4077,7 +4077,7 @@
               },
               {
                 "dtype": {
-                  "Sketch": "Kll"
+                  "Sketch": "KLL"
                 },
                 "name": "state",
                 "nullable": false
@@ -4251,7 +4251,7 @@
               },
               {
                 "dtype": {
-                  "Sketch": "Kll"
+                  "Sketch": "KLL"
                 },
                 "name": "state",
                 "nullable": false
@@ -4294,7 +4294,7 @@
                 },
                 "reduction": "PerEntity",
                 "summary_type": {
-                  "Sketch": "Kll"
+                  "Sketch": "KLL"
                 },
                 "tumbling_window_width_ms": 60000
               }
@@ -4325,7 +4325,7 @@
               },
               {
                 "dtype": {
-                  "Sketch": "Kll"
+                  "Sketch": "KLL"
                 },
                 "name": "state",
                 "nullable": false
@@ -4385,7 +4385,7 @@
               },
               {
                 "dtype": {
-                  "Sketch": "Kll"
+                  "Sketch": "KLL"
                 },
                 "name": "state",
                 "nullable": false

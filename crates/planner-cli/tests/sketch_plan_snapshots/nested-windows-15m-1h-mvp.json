@@ -58,7 +58,7 @@
       }
     ],
     "cost": {
-      "cost_per_second": 5.73348028975e-6,
+      "cost_per_second": 5.71305047031e-6,
       "cpu_core_seconds_per_second": 0.467976233333,
       "per_node": {
         "0": {
@@ -76,10 +76,10 @@
           "timing": "ingestion_time"
         },
         "1": {
-          "cost_per_second": 5.43681112249e-6,
+          "cost_per_second": 5.41997243781e-6,
           "cost_source": "analytical",
           "cpu_core_seconds_per_second": 0.448586666667,
-          "detail": "build DDSketch in tumbling windows of 60000 ms for 10000 groups: 2000000 rows x 210 ops, 1000 group visits, 166.7 states emitted; x 1.0000/s; keeps 341600000 bytes",
+          "detail": "build DDSketch in tumbling windows of 60000 ms for 10000 groups: 2000000 rows x 210 ops, 1000 group visits, 166.7 states emitted; x 1.0000/s; keeps 326960000 bytes",
           "ingest_cpu_core_seconds_per_second": 0.44817,
           "multiplier": 1,
           "operator": "SummaryTumblingWindowChain",
@@ -104,10 +104,10 @@
           "timing": "query_time"
         },
         "2": {
-          "cost_per_second": 8.39724918218e-8,
+          "cost_per_second": 8.03839196773e-8,
           "cost_source": "analytical",
           "cpu_core_seconds_per_second": 0.0005,
-          "detail": "merge tumbling windows of 60000 ms into 300000 ms for 10000 groups: 166.7 states merged, 33.3 states emitted; x 1.0000/s; keeps 68120000 bytes",
+          "detail": "merge tumbling windows of 60000 ms into 300000 ms for 10000 groups: 166.7 states merged, 33.3 states emitted; x 1.0000/s; keeps 65000000 bytes",
           "ingest_cpu_core_seconds_per_second": 0.0,
           "multiplier": 1,
           "operator": "SummaryMergeWindows",
@@ -118,10 +118,10 @@
           "timing": "ingestion_time"
         },
         "3": {
-          "cost_per_second": 3.13332816795e-10,
+          "cost_per_second": 3.13332816026e-10,
           "cost_source": "analytical",
           "cpu_core_seconds_per_second": 0.0000278666666667,
-          "detail": "time range cover 3600s: 11.20 + 4.00 tumbling windows of states per level; x 0.0167/s; holds 524 bytes for 1.672 ms",
+          "detail": "time range cover 3600s: 11.20 + 4.00 tumbling windows of states per level; x 0.0167/s; holds 500 bytes for 1.672 ms",
           "ingest_cpu_core_seconds_per_second": 0.0,
           "multiplier": 1,
           "operator": "TimeRangeCover",
@@ -132,10 +132,10 @@
           "timing": "query_time"
         },
         "4": {
-          "cost_per_second": 7.34856686431e-8,
+          "cost_per_second": 7.34838697563e-8,
           "cost_source": "analytical",
           "cpu_core_seconds_per_second": 0.00651666666667,
-          "detail": "merge 152000 states into 10000; x 0.0167/s; holds 28320000 bytes for 391.000 ms",
+          "detail": "merge 152000 states into 10000; x 0.0167/s; holds 28080000 bytes for 391.000 ms",
           "ingest_cpu_core_seconds_per_second": 0.0,
           "multiplier": 1,
           "operator": "SummaryMerge",
@@ -174,10 +174,10 @@
           "timing": "query_time"
         },
         "7": {
-          "cost_per_second": 1.27806806851e-10,
+          "cost_per_second": 1.27806806537e-10,
           "cost_source": "analytical",
           "cpu_core_seconds_per_second": 0.0000113666666667,
-          "detail": "time range cover 900s: 2.20 + 4.00 tumbling windows of states per level; x 0.0167/s; holds 524 bytes for 0.682 ms",
+          "detail": "time range cover 900s: 2.20 + 4.00 tumbling windows of states per level; x 0.0167/s; holds 500 bytes for 0.682 ms",
           "ingest_cpu_core_seconds_per_second": 0.0,
           "multiplier": 1,
           "operator": "TimeRangeCover",
@@ -188,10 +188,10 @@
           "timing": "query_time"
         },
         "8": {
-          "cost_per_second": 3.11985191682e-8,
+          "cost_per_second": 3.11977554464e-8,
           "cost_source": "analytical",
           "cpu_core_seconds_per_second": 0.00276666666667,
-          "detail": "merge 62000 states into 10000; x 0.0167/s; holds 28320000 bytes for 166.000 ms",
+          "detail": "merge 62000 states into 10000; x 0.0167/s; holds 28080000 bytes for 166.000 ms",
           "ingest_cpu_core_seconds_per_second": 0.0,
           "multiplier": 1,
           "operator": "SummaryMerge",
@@ -218,7 +218,7 @@
       },
       "source": "analytical-cost-v2 (illustrative statistics)",
       "usage": {
-        "average_memory_bytes": 409982904.021,
+        "average_memory_bytes": 392220676.02,
         "cpu_ops_per_second": 461576233.333,
         "disk_bytes": 0,
         "latency_per_query": [
@@ -240,7 +240,7 @@
           }
         ],
         "peak_cpu_cores": 3,
-        "peak_memory_bytes": 466361144,
+        "peak_memory_bytes": 448121096,
         "precompute_load": 0.000916666666667,
         "recommended_configuration": {
           "ingest": {

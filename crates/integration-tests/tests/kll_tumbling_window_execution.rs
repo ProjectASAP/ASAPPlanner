@@ -32,7 +32,7 @@ use std::{
 const TUMBLING_WINDOW_WIDTH_MS: i64 = 60_000;
 
 fn kll() -> FieldDataType {
-    FieldDataType::Sketch(SketchAlgorithm::Kll)
+    FieldDataType::Sketch(SketchAlgorithm::KLL)
 }
 /// `t(ts, value)`, time index `ts`.
 fn table_schema() -> Schema {

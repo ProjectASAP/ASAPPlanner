@@ -95,18 +95,18 @@ fn summary_candidates_keep_the_hand_written_lists() {
     let cases = [
         (
             AggIntent::Quantile { col: None, q: 0.99 },
-            vec![S::Kll, S::DDSketch],
+            vec![S::KLL, S::DDSketch],
         ),
-        (cardinality(vec![]), vec![S::Hll, S::Kmv, S::UnivMon]),
-        (cardinality(vec![1]), vec![S::Hll, S::Kmv, S::UnivMon]),
-        (cardinality(vec![1, 2]), vec![S::Hll, S::Kmv]),
+        (cardinality(vec![]), vec![S::HLL, S::KMV, S::UnivMon]),
+        (cardinality(vec![1]), vec![S::HLL, S::KMV, S::UnivMon]),
+        (cardinality(vec![1, 2]), vec![S::HLL, S::KMV]),
         (AggIntent::FrequencyL2 { col: None }, vec![S::UnivMon]),
         (AggIntent::FrequencyEntropy { col: None }, vec![S::UnivMon]),
         (
             AggIntent::TopK { k: 10 },
-            vec![S::CmsWithHeap, S::CountSketchWithHeap],
+            vec![S::CountMinSketchWithHeap, S::CountSketchWithHeap],
         ),
-        (AggIntent::Count, vec![S::Cms, S::UnivMon]),
+        (AggIntent::Count, vec![S::CountMinSketch, S::UnivMon]),
         (AggIntent::Sum { col: None }, vec![]),
     ];
     for (intent, want) in cases {
@@ -124,9 +124,9 @@ fn an_algorithm_without_the_readout_is_not_offered() {
     let answers = |algorithm| {
         SummaryTypeCapability::of(&FieldDataType::Sketch(algorithm)).answers(&statistic)
     };
-    assert!(!answers(SketchAlgorithm::Cms));
-    assert!(answers(SketchAlgorithm::CmsWithHeap));
+    assert!(!answers(SketchAlgorithm::CountMinSketch));
+    assert!(answers(SketchAlgorithm::CountMinSketchWithHeap));
     let offered = summary_candidates(&top_k);
-    assert!(!offered.contains(&SketchAlgorithm::Cms));
+    assert!(!offered.contains(&SketchAlgorithm::CountMinSketch));
     assert!(offered.iter().all(|algorithm| answers(*algorithm)));
 }

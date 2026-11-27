@@ -137,7 +137,7 @@ fn kll_kernel_rejects_a_k_above_the_library_cap() {
     use planner_types::ir::scalar::ColumnRef;
     use planner_types::summary_type::{SketchAlgorithm, SketchParams, SummaryUpdate};
     let update = SummaryUpdate::column(ColumnRef::SampleValue);
-    let kll = FieldDataType::Sketch(SketchAlgorithm::Kll);
+    let kll = FieldDataType::Sketch(SketchAlgorithm::KLL);
     let params = |k| SketchParams::Kll { k };
     assert!(validate_summary_kernel(&kll, Some(&params(26_602)), &update).is_ok());
     assert!(validate_summary_kernel(&kll, Some(&params(26_603)), &update).is_err());
@@ -177,7 +177,7 @@ fn summary_capability_levels_are_distinct() {
     use asap_executor::planner::summary_type::SketchStatistic;
     use planner_types::ir::scalar::ColumnRef;
     use planner_types::summary_type::{SketchAlgorithm, SummaryUpdate};
-    let cms = FieldDataType::Sketch(SketchAlgorithm::Cms);
+    let cms = FieldDataType::Sketch(SketchAlgorithm::CountMinSketch);
     let update = SummaryUpdate {
         item: Some(planner_types::summary_type::SummaryInputExpr::Column(
             ColumnRef::Named("host".into()),
@@ -206,7 +206,7 @@ fn summary_capability_levels_are_distinct() {
         }
     )
     .is_err());
-    let kll = FieldDataType::Sketch(SketchAlgorithm::Kll);
+    let kll = FieldDataType::Sketch(SketchAlgorithm::KLL);
     assert!(validate_native_family(&kll).is_ok());
     assert!(validate_sketch_evaluation(&kll, &SketchStatistic::Quantile { q: 1.5 }).is_err());
     assert!(validate_sketch_evaluation(&kll, &SketchStatistic::Cardinality).is_err());

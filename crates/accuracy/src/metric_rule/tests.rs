@@ -77,7 +77,7 @@ fn quantile_readouts(memo: &mut Memo, q: f64) -> QuantileReadouts {
         memo,
         window,
         q,
-        &[SketchAlgorithm::Kll, SketchAlgorithm::DDSketch],
+        &[SketchAlgorithm::KLL, SketchAlgorithm::DDSketch],
     )
 }
 
@@ -87,7 +87,7 @@ fn quantile_readouts(memo: &mut Memo, q: f64) -> QuantileReadouts {
 #[test]
 fn a_ratio_reads_no_rank_error() {
     let mut memo = Memo::new(&DataWorkload::default());
-    let (_, state, p99) = quantile_over_time(&mut memo, SketchAlgorithm::Kll, 0.99, 300);
+    let (_, state, p99) = quantile_over_time(&mut memo, SketchAlgorithm::KLL, 0.99, 300);
     let p50 = estimate(&mut memo, state, SketchStatistic::Quantile { q: 0.5 });
     let ratio = group(&mut memo, arithmetic(ArithmeticOpKind::Div, p99, p50));
     let target = AccuracyTarget::max_error(0.05).accuracy_metric(AccuracyMetric::Relative);
@@ -120,7 +120,7 @@ fn the_metric_rule_cuts_the_readout_edges_and_keeps_the_exact_division() {
         &mut memo,
         window,
         0.9,
-        &[SketchAlgorithm::Kll, SketchAlgorithm::DDSketch],
+        &[SketchAlgorithm::KLL, SketchAlgorithm::DDSketch],
     );
     let ratio = group(
         &mut memo,
@@ -491,7 +491,7 @@ fn a_count_reads_its_input_in_any_metric() {
 #[test]
 fn a_counts_input_edge_from_a_readout_holds_in_a_metric_its_output_does_not_allow() {
     let mut memo = Memo::new(&DataWorkload::default());
-    let (_, _, p99) = quantile_over_time(&mut memo, SketchAlgorithm::Kll, 0.99, 300);
+    let (_, _, p99) = quantile_over_time(&mut memo, SketchAlgorithm::KLL, 0.99, 300);
     let count = group(
         &mut memo,
         Operator::NonASAP(NonASAPOp::Aggregate {

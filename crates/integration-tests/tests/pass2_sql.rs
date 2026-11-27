@@ -32,7 +32,7 @@ fn a_global_distinct_count_keeps_its_whole_failure_probability() {
                     if memo.groups()[summary_input.0 as usize]
                         .group_properties
                         .sketch_algorithm_of_state()
-                        == Some(SketchAlgorithm::Kmv) =>
+                        == Some(SketchAlgorithm::KMV) =>
                 {
                     let required = candidate.input_requirements[0]
                         .required_accuracy
@@ -44,7 +44,7 @@ fn a_global_distinct_count_keeps_its_whole_failure_probability() {
                     kmv_readouts += 1;
                 }
                 Operator::ASAP(ASAPOp::SummaryAgg {
-                    summary_type: FieldDataType::Sketch(SketchAlgorithm::Kmv),
+                    summary_type: FieldDataType::Sketch(SketchAlgorithm::KMV),
                     ..
                 }) if live => {
                     if let Some(SketchParams::Kmv { k }) = candidate.logical_properties.parameters()
@@ -75,7 +75,7 @@ fn kll_readouts(logical: &LogicalASAPMemoCandidates) -> Vec<(bool, Option<f64>)>
             if memo.groups()[summary_input.0 as usize]
                 .group_properties
                 .sketch_algorithm_of_state()
-                != Some(SketchAlgorithm::Kll)
+                != Some(SketchAlgorithm::KLL)
             {
                 continue;
             }

@@ -60,7 +60,7 @@ fn each_query_reads_only_the_readouts_in_its_targets_metric() {
         ),
     ]);
     let exact_only = &logical.exact_only_groups_of_query;
-    let kll = readout_groups(&logical, SketchAlgorithm::Kll);
+    let kll = readout_groups(&logical, SketchAlgorithm::KLL);
     let ddsketch = readout_groups(&logical, SketchAlgorithm::DDSketch);
     assert!(!kll.is_empty() && !ddsketch.is_empty());
     for (group, rank_query_reads_it) in kll
@@ -131,7 +131,7 @@ fn an_exact_query_reads_every_sketch_readout_only_exactly() {
         (query, json!({"max_error": 0.01, "accuracy_metric": "rank"})),
     ]);
     let exact_only = &logical.exact_only_groups_of_query;
-    let kll = readout_groups(&logical, SketchAlgorithm::Kll);
+    let kll = readout_groups(&logical, SketchAlgorithm::KLL);
     assert!(!kll.is_empty());
     for group in kll {
         assert!(live(&logical, group), "G{} survives", group.0);

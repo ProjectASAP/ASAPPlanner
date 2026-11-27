@@ -617,7 +617,7 @@ mod tests {
     fn summary_agg() -> Operator<u32> {
         Operator::ASAP(ASAPOp::SummaryAgg {
             child: 0,
-            summary_type: FieldDataType::Sketch(SketchAlgorithm::Kll),
+            summary_type: FieldDataType::Sketch(SketchAlgorithm::KLL),
             input: SummaryUpdate::column(ColumnRef::SampleValue),
             reduction: Reduction::PerEntity,
             filter: None,
@@ -627,7 +627,7 @@ mod tests {
     fn chain_one_minute() -> Operator<u32> {
         Operator::ASAP(ASAPOp::SummaryTumblingWindowChain {
             child: 0,
-            summary_type: FieldDataType::Sketch(SketchAlgorithm::Kll),
+            summary_type: FieldDataType::Sketch(SketchAlgorithm::KLL),
             input: SummaryUpdate::column(ColumnRef::SampleValue),
             reduction: Reduction::PerEntity,
             filter: None,

@@ -510,7 +510,7 @@ fn cms_dims(params: &SketchParams) -> (usize, usize) {
             (*depth as usize, *width as usize)
         }
         other => unreachable!(
-            "accumulator_spec() paired SketchAlgorithm::Cms/CountSketch with unexpected params: {other:?}"
+            "accumulator_spec() paired SketchAlgorithm::CountMinSketch/CountSketch with unexpected params: {other:?}"
         ),
     }
 }
@@ -526,7 +526,10 @@ pub fn create_planner_accumulator(
     input: &planner_types::summary_type::SummaryUpdate,
 ) -> Result<Box<dyn AccumulatorUpdater>, String> {
     crate::capability::validate_summary_kernel(family, parameters, input)?;
-    if matches!(family, SummaryFamilyType::Sketch(SketchAlgorithm::HydraCms)) {
+    if matches!(
+        family,
+        SummaryFamilyType::Sketch(SketchAlgorithm::HydraCountMinSketch)
+    ) {
         return Err(
             "HydraCms has one state for all groups; build it with `create_hydra_cms`".into(),
         );
@@ -546,7 +549,7 @@ pub fn create_planner_accumulator(
         return Err("a sketch summary needs its parameters θ".into());
     };
     let updater: Box<dyn AccumulatorUpdater> = match (kind, params) {
-        (SketchAlgorithm::Kll, SketchParams::Kll { k, .. }) => {
+        (SketchAlgorithm::KLL, SketchParams::Kll { k, .. }) => {
             if *k > planner_types::summary_type::KLL_MAX_K {
                 return Err("KLL k exceeds runtime bound".into());
             }
@@ -557,7 +560,7 @@ pub fn create_planner_accumulator(
         (SketchAlgorithm::DDSketch, SketchParams::DDSketch { alpha }) => {
             Box::new(DDSketchAccumulatorUpdater::new(*alpha))
         }
-        (SketchAlgorithm::Cms, params @ SketchParams::Cms { .. }) => {
+        (SketchAlgorithm::CountMinSketch, params @ SketchParams::Cms { .. }) => {
             let (r, c) = cms_dims(params);
             Box::new(CmsAccumulatorUpdater::new(r, c)?)
         }
@@ -568,7 +571,7 @@ pub fn create_planner_accumulator(
                     .map_err(|e| e.to_string())?,
             )
         }
-        (SketchAlgorithm::CmsWithHeap | SketchAlgorithm::CountSketchWithHeap, _) => {
+        (SketchAlgorithm::CountMinSketchWithHeap | SketchAlgorithm::CountSketchWithHeap, _) => {
             let (algorithm, width, depth, capacity) =
                 WeightedFrequency::configuration(kind, params).map_err(|e| e.to_string())?;
             Box::new(
@@ -576,10 +579,10 @@ pub fn create_planner_accumulator(
                     .map_err(|e| e.to_string())?,
             )
         }
-        (SketchAlgorithm::Hll, SketchParams::Hll { precision, .. }) => Box::new(HllUpdater {
+        (SketchAlgorithm::HLL, SketchParams::Hll { precision, .. }) => Box::new(HllUpdater {
             acc: HllSketchAccumulator::new(*precision).map_err(|e| e.to_string())?,
         }),
-        (SketchAlgorithm::Kmv, SketchParams::Kmv { k, .. }) => {
+        (SketchAlgorithm::KMV, SketchParams::Kmv { k, .. }) => {
             Box::new(crate::summary_kernels::kmv::KmvAccumulator::new(*k))
         }
         (

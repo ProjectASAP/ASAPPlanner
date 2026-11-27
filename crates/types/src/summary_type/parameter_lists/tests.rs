@@ -9,21 +9,21 @@ use super::*;
 #[test]
 fn parameter_list_holds_its_algorithm_without_repeats() {
     let listed = [
-        SketchAlgorithm::Kll,
+        SketchAlgorithm::KLL,
         SketchAlgorithm::DDSketch,
-        SketchAlgorithm::Hll,
-        SketchAlgorithm::Kmv,
-        SketchAlgorithm::Cms,
+        SketchAlgorithm::HLL,
+        SketchAlgorithm::KMV,
+        SketchAlgorithm::CountMinSketch,
         SketchAlgorithm::CountSketch,
-        SketchAlgorithm::CmsWithHeap,
+        SketchAlgorithm::CountMinSketchWithHeap,
         SketchAlgorithm::CountSketchWithHeap,
         SketchAlgorithm::UnivMon,
     ];
     for algorithm in listed.iter().copied().chain([
-        SketchAlgorithm::HydraCms,
+        SketchAlgorithm::HydraCountMinSketch,
         SketchAlgorithm::HydraCountSketch,
-        SketchAlgorithm::HydraKll,
-        SketchAlgorithm::HllHip,
+        SketchAlgorithm::HydraKLL,
+        SketchAlgorithm::HLLHip,
     ]) {
         let list = parameter_list(algorithm);
         assert_eq!(
@@ -52,10 +52,16 @@ fn parameter_list_holds_its_algorithm_without_repeats() {
             })
             .collect()
     };
-    assert_eq!(depths(SketchAlgorithm::Cms), [5, 7, 10, 12]);
+    assert_eq!(depths(SketchAlgorithm::CountMinSketch), [5, 7, 10, 12]);
     assert_eq!(depths(SketchAlgorithm::CountSketch), [47, 81, 117, 155]);
-    assert_eq!(depths(SketchAlgorithm::CmsWithHeap), [5, 5, 5, 5]);
-    assert_eq!(parameter_list(SketchAlgorithm::Cms).len(), 28);
-    assert_eq!(parameter_list(SketchAlgorithm::CmsWithHeap).len(), 280);
+    assert_eq!(
+        depths(SketchAlgorithm::CountMinSketchWithHeap),
+        [5, 5, 5, 5]
+    );
+    assert_eq!(parameter_list(SketchAlgorithm::CountMinSketch).len(), 28);
+    assert_eq!(
+        parameter_list(SketchAlgorithm::CountMinSketchWithHeap).len(),
+        280
+    );
     assert_eq!(parameter_list(SketchAlgorithm::UnivMon).len(), 40);
 }

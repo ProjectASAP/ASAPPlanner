@@ -333,7 +333,7 @@ pub fn column_lineage_text(
 /// on, and an aggregate's coverage ([`aggregate_coverage_text`]):
 /// `State ts=latency.ts:Unknown state=G4.1:Unknown · depends on the
 /// evaluation time · scans latency · every 60000 ms · covers G1 through
-/// [SummaryAgg Kll] selecting [...]`.
+/// [SummaryAgg KLL] selecting [...]`.
 fn group_properties_text(group: &MemoGroup, grid: Option<Option<&EvaluationGrid>>) -> String {
     let properties = &group.group_properties;
     let columns: Vec<String> = properties
@@ -380,7 +380,7 @@ fn group_properties_text(group: &MemoGroup, grid: Option<Option<&EvaluationGrid>
 /// group (`a scan` when the scan's matchers are lifted too), its
 /// operators not lifted into the selection, top down, and its selection as
 /// JSON, the input group named by `group_id`. Example: `covers G1 through
-/// [SummaryAgg Kll] selecting [{"columns":[...]}]`.
+/// [SummaryAgg KLL] selecting [{"columns":[...]}]`.
 pub fn aggregate_coverage_text(
     coverage: &AggregateCoverage,
     group_id: impl Fn(MemoGroupId) -> u32,
@@ -448,11 +448,11 @@ enum MemoStep<'a> {
 /// ([`write_stored_logical_edges`]), and a pruned one lists none:
 ///
 /// ```text
-/// G9:  SummaryAgg CmsWithHeap  <- G1
-///     [0..279]  Pass1  SummaryAgg CmsWithHeap <- G1  fuses=[G4]
+/// G9:  SummaryAgg CountMinSketchWithHeap  <- G1
+///     [0..279]  Pass1  SummaryAgg CountMinSketchWithHeap <- G1  fuses=[G4]
 ///         θ: depth ∈ {5, 7, 10, 12}, heap_size ∈ {10..10000} (7 values), width ∈ {28..2719} (10 values)
 ///         280 candidates: 278 pruned (BelowRequiredAccuracy 270, MetricRule 8), 2 kept
-///     [57]  Pass1  SummaryAgg CmsWithHeap <- G1  θ=CmsWithHeap(depth=7, heap_size=10, width=544)  fuses=[G4]
+///     [57]  Pass1  SummaryAgg CountMinSketchWithHeap <- G1  θ=CmsWithHeap(depth=7, heap_size=10, width=544)  fuses=[G4]
 ///         input 0 <- G1: ✓ G1[0]
 /// ```
 fn write_memo(out: &mut String, memo: &Memo, step: Option<MemoStep<'_>>, verbose: bool) {
@@ -920,7 +920,7 @@ fn candidate_id_text(id: CandidateForMemoGroupId) -> String {
     format!("G{}[{}]", id.group.0, id.index_in_group)
 }
 
-/// A candidate on one line: `SummaryAgg Kll <- G1  θ=Kll(k=269)` (θ only
+/// A candidate on one line: `SummaryAgg KLL <- G1  θ=Kll(k=269)` (θ only
 /// with `parameters`), then `fuses=[..]` and `requires=[..]` when it has
 /// them.
 fn candidate_text(candidate: &CandidateForMemoGroup, parameters: bool) -> String {

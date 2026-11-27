@@ -114,7 +114,8 @@ mod tests {
     // at ranks ⌊q (n − 1)⌋ and ⌈q (n − 1)⌉, as PromQL `quantile_over_time`
     // and SQL `percentile_cont` do: [20, 40] at q = 0.9 is 38 (nearest rank
     // read 40), within α of the interpolated value; q = 0 and q = 1 read the
-    // exact minimum and maximum.
+    // lowest and highest occupied bucket, within α of the minimum and
+    // maximum (the sketch keeps no exact minimum or maximum).
     #[test]
     fn quantile_interpolates_between_adjacent_order_statistics() {
         let alpha = 0.01;
@@ -124,8 +125,8 @@ mod tests {
         }
         let at = |q| dd.estimate(&SketchStatistic::Quantile { q }).unwrap();
         assert!((at(0.9) - 38.0).abs() <= alpha * 38.0, "{}", at(0.9));
-        assert_eq!(at(0.0), 20.0);
-        assert_eq!(at(1.0), 40.0);
+        assert!((at(0.0) - 20.0).abs() <= alpha * 20.0, "{}", at(0.0));
+        assert!((at(1.0) - 40.0).abs() <= alpha * 40.0, "{}", at(1.0));
         let mut four = DDSketchAccumulator::new(alpha);
         for v in [1.0, 2.0, 3.0, 4.0] {
             four.inner.add(&v);

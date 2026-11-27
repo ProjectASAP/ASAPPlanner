@@ -25,7 +25,7 @@ fn update_weights_follow_the_measure() {
     );
     query(&mut memo, counts, None);
     let memo = pass1_memo(memo, &[]).unwrap();
-    let (_, update) = state_group(&memo, SketchAlgorithm::Cms);
+    let (_, update) = state_group(&memo, SketchAlgorithm::CountMinSketch);
     assert_eq!(update.weight, SummaryInputExpr::Constant(1.0));
     let mut memo = Memo::new(&DataWorkload::default());
     let rows = selector(&mut memo, TimeRangeKind::Instant, "m", &["job"]);

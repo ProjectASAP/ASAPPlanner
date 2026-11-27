@@ -30,7 +30,7 @@ fn scan() -> Rc<OperatorNode> {
 }
 
 fn kll() -> FieldDataType {
-    FieldDataType::Sketch(SketchAlgorithm::Kll)
+    FieldDataType::Sketch(SketchAlgorithm::KLL)
 }
 
 /// 1-min KLL tumbling windows per series over `input`.

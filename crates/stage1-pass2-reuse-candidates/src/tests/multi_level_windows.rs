@@ -56,7 +56,7 @@ fn covers_merged_by(memo: &Memo, state: MemoGroupId) -> BTreeSet<Vec<u64>> {
 #[test]
 fn a_long_range_gets_wider_levels() {
     let mut memo = Memo::new(&DataWorkload::default());
-    let (_, state, readout) = quantile_over_time(&mut memo, SketchAlgorithm::Kll, 0.99, 3_600);
+    let (_, state, readout) = quantile_over_time(&mut memo, SketchAlgorithm::KLL, 0.99, 3_600);
     query(&mut memo, readout, None);
     let logical = pass2(memo, &[entry(15_000)]);
     let memo = &logical.memo;
@@ -104,7 +104,7 @@ fn a_long_range_gets_wider_levels() {
 #[test]
 fn a_short_range_gets_no_wider_level() {
     let mut memo = Memo::new(&DataWorkload::default());
-    let (_, state, readout) = quantile_over_time(&mut memo, SketchAlgorithm::Kll, 0.99, 60);
+    let (_, state, readout) = quantile_over_time(&mut memo, SketchAlgorithm::KLL, 0.99, 60);
     query(&mut memo, readout, None);
     let logical = pass2(memo, &[entry(15_000)]);
     assert_eq!(chain_widths(&logical.memo), BTreeSet::from([15_000]));

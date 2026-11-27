@@ -7,7 +7,7 @@ use super::{ExactKind, SketchAlgorithm};
 use crate::ir::schema::FieldDataType;
 
 /// The family of a summary state without its parameters: a sketch
-/// algorithm or an exact accumulator kind. JSON: `{"sketch": "Kll"}`,
+/// algorithm or an exact accumulator kind. JSON: `{"sketch": "KLL"}`,
 /// `{"exact": "Sum"}`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -17,7 +17,7 @@ pub enum SummaryFamily {
 }
 
 impl SummaryFamily {
-    /// `Sketch(Kll)` for `FieldDataType::Sketch(Kll)`, `Exact(Sum)` for
+    /// `Sketch(KLL)` for `FieldDataType::Sketch(KLL)`, `Exact(Sum)` for
     /// `ExactAggregate(Sum, _)`, `None` for any other field type.
     pub fn of(summary_type: &FieldDataType) -> Option<Self> {
         match summary_type {
@@ -39,8 +39,8 @@ mod tests {
     #[test]
     fn summary_family_of_a_field_type() {
         assert_eq!(
-            SummaryFamily::of(&FieldDataType::Sketch(SketchAlgorithm::Kll)),
-            Some(SummaryFamily::Sketch(SketchAlgorithm::Kll))
+            SummaryFamily::of(&FieldDataType::Sketch(SketchAlgorithm::KLL)),
+            Some(SummaryFamily::Sketch(SketchAlgorithm::KLL))
         );
         assert_eq!(
             SummaryFamily::of(&FieldDataType::ExactAggregate(

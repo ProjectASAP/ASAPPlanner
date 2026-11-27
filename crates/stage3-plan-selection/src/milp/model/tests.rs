@@ -661,7 +661,7 @@ fn a_query_reads_its_exact_only_groups_through_exact_candidates_only() {
     let mut memo = empty_memo();
     let m = scan(&mut memo);
     let window = range(&mut memo, 300, m);
-    let quantile = quantile_over_time_readouts(&mut memo, window, 0.9, &[SketchAlgorithm::Kll]);
+    let quantile = quantile_over_time_readouts(&mut memo, window, 0.9, &[SketchAlgorithm::KLL]);
     let state = quantile.by_algorithm[0].state;
     query(&mut memo, quantile.result, None);
     query(&mut memo, quantile.result, None);
@@ -752,7 +752,7 @@ fn queries_differing_in_exact_only_groups_with_a_materialized_answer(
     let mut memo = empty_memo();
     let m = scan(&mut memo);
     let window = range(&mut memo, 300, m);
-    let quantile = quantile_over_time_readouts(&mut memo, window, 0.9, &[SketchAlgorithm::Kll]);
+    let quantile = quantile_over_time_readouts(&mut memo, window, 0.9, &[SketchAlgorithm::KLL]);
     let state = quantile.by_algorithm[0].state;
     query(&mut memo, quantile.result, None);
     query(&mut memo, quantile.result, None);
@@ -876,7 +876,7 @@ fn the_bound_leaves_out_of_each_query_only_what_it_must_not_read() {
     let mut memo = empty_memo();
     let m = scan(&mut memo);
     let window = range(&mut memo, 300, m);
-    let quantile = quantile_over_time_readouts(&mut memo, window, 0.9, &[SketchAlgorithm::Kll]);
+    let quantile = quantile_over_time_readouts(&mut memo, window, 0.9, &[SketchAlgorithm::KLL]);
     let state = quantile.by_algorithm[0].state;
     query(&mut memo, quantile.result, None);
     query(&mut memo, quantile.result, None);
@@ -2105,7 +2105,7 @@ fn k_charges_a_top_k_readout_for_every_estimate_it_ranks() {
         let (top_k, _) = readouts_of(
             &mut memo,
             "m",
-            SketchAlgorithm::CmsWithHeap,
+            SketchAlgorithm::CountMinSketchWithHeap,
             SketchStatistic::TopK { k: 3 },
             AccuracyMetric::Relative,
             &[(0.01, level)],
@@ -2136,7 +2136,7 @@ fn set_operator_over_top_k(
     let (top_k, _) = readouts_of(
         &mut memo,
         "m",
-        SketchAlgorithm::CmsWithHeap,
+        SketchAlgorithm::CountMinSketchWithHeap,
         SketchStatistic::TopK { k: 3 },
         AccuracyMetric::Relative,
         &[(0.01, top_k_level)],

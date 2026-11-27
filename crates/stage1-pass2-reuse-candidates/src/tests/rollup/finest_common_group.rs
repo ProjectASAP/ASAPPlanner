@@ -40,13 +40,13 @@ fn a_finest_common_group_no_query_asks_for_serves_both() {
     let by_host = sketch_state(
         &mut memo,
         all_window,
-        SketchAlgorithm::Kll,
+        SketchAlgorithm::KLL,
         Reduction::by(vec![3]),
     );
     let by_job = sketch_state(
         &mut memo,
         xxx_window,
-        SketchAlgorithm::Kll,
+        SketchAlgorithm::KLL,
         Reduction::by(vec![2]),
     );
     for state in [by_host, by_job] {
@@ -58,7 +58,7 @@ fn a_finest_common_group_no_query_asks_for_serves_both() {
     let finest = group_of(
         memo,
         &state_grouped_by(
-            FieldDataType::Sketch(SketchAlgorithm::Kll),
+            FieldDataType::Sketch(SketchAlgorithm::KLL),
             Reduction::by(vec![2, 3]),
             all_window,
         ),
@@ -69,7 +69,7 @@ fn a_finest_common_group_no_query_asks_for_serves_both() {
             .iter()
             .filter(|c| c.expression.operator == memo.groups()[finest.0 as usize].expression)
             .count(),
-        parameter_list(SketchAlgorithm::Kll).len()
+        parameter_list(SketchAlgorithm::KLL).len()
     );
     let merges = |state: MemoGroupId| -> Vec<Operator<MemoGroupId>> {
         candidates_of(memo, state)
@@ -78,7 +78,7 @@ fn a_finest_common_group_no_query_asks_for_serves_both() {
             .map(|c| c.expression.operator.clone())
             .collect()
     };
-    let listed = parameter_list(SketchAlgorithm::Kll).len();
+    let listed = parameter_list(SketchAlgorithm::KLL).len();
     // One merge per θ of G*'s builds.
     assert_eq!(
         merges(by_host),

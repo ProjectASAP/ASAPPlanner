@@ -71,15 +71,15 @@ fn validate_sketch_parameters(
     use SketchParams as P;
     let keyed = match (algorithm, parameters) {
         // `asap_sketchlib` silently caps a larger `k`.
-        (A::Kll, P::Kll { k }) if (8..=planner_types::summary_type::KLL_MAX_K).contains(k) => false,
+        (A::KLL, P::Kll { k }) if (8..=planner_types::summary_type::KLL_MAX_K).contains(k) => false,
         (A::DDSketch, P::DDSketch { alpha })
             if alpha.is_finite() && *alpha > 0.0 && *alpha < 1.0 =>
         {
             false
         }
-        (A::Hll, P::Hll { precision }) if HLL_PRECISIONS.contains(precision) => false,
-        (A::Kmv, P::Kmv { k }) if *k >= crate::summary_kernels::kmv::KMV_MIN_K => false,
-        (A::Cms, P::Cms { width, depth }) if valid_matrix(*width, *depth) => true,
+        (A::HLL, P::Hll { precision }) if HLL_PRECISIONS.contains(precision) => false,
+        (A::KMV, P::Kmv { k }) if *k >= crate::summary_kernels::kmv::KMV_MIN_K => false,
+        (A::CountMinSketch, P::Cms { width, depth }) if valid_matrix(*width, *depth) => true,
         // The kernel's shape rules (an odd depth, for the median).
         (A::CountSketch, P::CountSketch { width, depth })
             if valid_matrix(*width, *depth)
@@ -92,7 +92,7 @@ fn validate_sketch_parameters(
         {
             true
         }
-        (A::CmsWithHeap | A::CountSketchWithHeap, _)
+        (A::CountMinSketchWithHeap | A::CountSketchWithHeap, _)
             if weighted_frequency::WeightedFrequency::configuration(algorithm, parameters)
                 .is_ok_and(|(_, width, depth, _)| valid_matrix(width as u32, depth as u32)) =>
         {
@@ -176,7 +176,7 @@ pub(crate) fn constant_row_weight(weight: f64) -> Result<std::num::NonZeroU32, S
 /// A HydraCms family: the only Hydra algorithm with a kernel.
 fn validate_hydra_cms_family(family: &SummaryFamilyType) -> Result<(), String> {
     match family {
-        SummaryFamilyType::Sketch(SketchAlgorithm::HydraCms) => Ok(()),
+        SummaryFamilyType::Sketch(SketchAlgorithm::HydraCountMinSketch) => Ok(()),
         _ => Err("a Hydra algorithm other than HydraCms has no registered kernel".into()),
     }
 }
@@ -252,14 +252,14 @@ pub fn validate_native_family(family: &SummaryFamilyType) -> Result<(), Error> {
         // is native as stored state only: it merges and reads its bare
         // count, but the DAG does not build it from rows.
         SummaryFamilyType::Sketch(
-            A::HydraCms
-            | A::Cms
-            | A::CmsWithHeap
+            A::HydraCountMinSketch
+            | A::CountMinSketch
+            | A::CountMinSketchWithHeap
             | A::CountSketchWithHeap
-            | A::Kll
+            | A::KLL
             | A::DDSketch
-            | A::Hll
-            | A::Kmv
+            | A::HLL
+            | A::KMV
             | A::UnivMon,
         ) => true,
         _ => false,
@@ -281,12 +281,15 @@ pub fn validate_native_family(family: &SummaryFamilyType) -> Result<(), Error> {
 /// grid; KLL's rank; UnivMon's G-sum). Plain Count Sketch is built but read
 /// from nothing.
 pub(crate) const EVALUATED_READOUTS: &[(SketchAlgorithm, &[StatisticKind])] = &[
-    (SketchAlgorithm::Cms, &[StatisticKind::Total]),
-    (SketchAlgorithm::CmsWithHeap, &[StatisticKind::TopK]),
+    (SketchAlgorithm::CountMinSketch, &[StatisticKind::Total]),
+    (
+        SketchAlgorithm::CountMinSketchWithHeap,
+        &[StatisticKind::TopK],
+    ),
     (SketchAlgorithm::CountSketchWithHeap, &[StatisticKind::TopK]),
-    (SketchAlgorithm::Hll, &[StatisticKind::Distinct]),
-    (SketchAlgorithm::Kmv, &[StatisticKind::Distinct]),
-    (SketchAlgorithm::Kll, &[StatisticKind::Quantile]),
+    (SketchAlgorithm::HLL, &[StatisticKind::Distinct]),
+    (SketchAlgorithm::KMV, &[StatisticKind::Distinct]),
+    (SketchAlgorithm::KLL, &[StatisticKind::Quantile]),
     (SketchAlgorithm::DDSketch, &[StatisticKind::Quantile]),
     (
         SketchAlgorithm::UnivMon,
@@ -303,7 +306,9 @@ pub(crate) const EVALUATED_READOUTS: &[(SketchAlgorithm, &[StatisticKind])] = &[
 /// family-capability table row answers it.
 fn evaluates(family: &SummaryFamilyType, readout: StatisticKind) -> bool {
     match family {
-        SummaryFamilyType::Sketch(SketchAlgorithm::HydraCms | SketchAlgorithm::HydraKll) => true,
+        SummaryFamilyType::Sketch(
+            SketchAlgorithm::HydraCountMinSketch | SketchAlgorithm::HydraKLL,
+        ) => true,
         SummaryFamilyType::Sketch(kind) => EVALUATED_READOUTS
             .iter()
             .any(|(family, readouts)| family == kind && readouts.contains(&readout)),
@@ -324,7 +329,10 @@ pub fn validate_sketch_evaluation(
     // HydraCms answers a group's item frequency. A group's total needs a
     // group-mass query asap_sketchlib's Hydra lacks.
     if readout == StatisticKind::Total
-        && matches!(family, SummaryFamilyType::Sketch(SketchAlgorithm::HydraCms))
+        && matches!(
+            family,
+            SummaryFamilyType::Sketch(SketchAlgorithm::HydraCountMinSketch)
+        )
     {
         return Err(Error::Invalid(
             "HydraCms does not answer a group total: asap_sketchlib's Hydra has no group-mass \

@@ -317,13 +317,13 @@ fn states_record_their_input_sign_and_readouts_read_it() {
     let g2 = add(&mut memo, range(MINUTE_MS, g1));
     let g3 = add(
         &mut memo,
-        state(FieldDataType::Sketch(SketchAlgorithm::Kll), g2),
+        state(FieldDataType::Sketch(SketchAlgorithm::KLL), g2),
     );
     let g4 = add(&mut memo, shift(MINUTE_MS, None, g1));
     let g5 = add(&mut memo, range(MINUTE_MS, g4));
     let g6 = add(
         &mut memo,
-        state(FieldDataType::Sketch(SketchAlgorithm::Kll), g5),
+        state(FieldDataType::Sketch(SketchAlgorithm::KLL), g5),
     );
     let g7 = add(
         &mut memo,
@@ -340,7 +340,7 @@ fn states_record_their_input_sign_and_readouts_read_it() {
     let g10 = add(&mut memo, range(MINUTE_MS, g9));
     let g11 = add(
         &mut memo,
-        state(FieldDataType::Sketch(SketchAlgorithm::Hll), g10),
+        state(FieldDataType::Sketch(SketchAlgorithm::HLL), g10),
     );
     let g12 = add(&mut memo, readout(SketchStatistic::Cardinality, g11));
     // [ts, state, host]
@@ -437,7 +437,7 @@ fn a_result_depends_on_the_evaluation_time_under_a_time_range_or_now() {
     let g3 = add(&mut memo, range(MINUTE_MS, g1));
     let g4 = add(
         &mut memo,
-        state(FieldDataType::Sketch(SketchAlgorithm::Kll), g3),
+        state(FieldDataType::Sketch(SketchAlgorithm::KLL), g3),
     );
     let g5 = add(
         &mut memo,
@@ -449,7 +449,7 @@ fn a_result_depends_on_the_evaluation_time_under_a_time_range_or_now() {
     );
     let g6 = add(
         &mut memo,
-        state(FieldDataType::Sketch(SketchAlgorithm::Kll), g5),
+        state(FieldDataType::Sketch(SketchAlgorithm::KLL), g5),
     );
     let g7 = add(&mut memo, shift(MINUTE_MS, Some(AtModifier::End), g3));
     let g8 = add(
@@ -644,7 +644,7 @@ fn group_properties_come_from_input_groups() {
     let g3 = add(&mut memo, range(MINUTE_MS, g2));
     let g4 = add(
         &mut memo,
-        state(FieldDataType::Sketch(SketchAlgorithm::Kll), g3),
+        state(FieldDataType::Sketch(SketchAlgorithm::KLL), g3),
     );
     let readout = memo
         .find_or_add_group(Operator::ASAP(ASAPOp::SummaryEstimate {
@@ -698,7 +698,7 @@ fn a_count_sketch_point_count_has_no_sign_a_count_min_one_keeps_it() {
         )
     };
     let count_sketch = point_count(&mut memo, SketchAlgorithm::CountSketch);
-    let count_min = point_count(&mut memo, SketchAlgorithm::Cms);
+    let count_min = point_count(&mut memo, SketchAlgorithm::CountMinSketch);
     // [ts, count, host]: the count is the state's column.
     let value = |group: MemoGroupId| {
         let schema = &memo.groups()[group.0 as usize].group_properties.schema;
@@ -733,7 +733,7 @@ fn a_quantile_outside_the_unit_interval_has_no_sign() {
     let g2 = add(&mut memo, range(MINUTE_MS, g1));
     let kll = add(
         &mut memo,
-        state(FieldDataType::Sketch(SketchAlgorithm::Kll), g2),
+        state(FieldDataType::Sketch(SketchAlgorithm::KLL), g2),
     );
     let read = add(
         &mut memo,

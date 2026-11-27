@@ -69,7 +69,7 @@ pub struct CandidateExclusion {
 }
 
 /// A statistic read from a sketch algorithm's state, e.g. a quantile from
-/// a KLL. JSON: `{"summary_type": "Kll", "statistic": "Quantile"}`.
+/// a KLL. JSON: `{"summary_type": "KLL", "statistic": "Quantile"}`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SketchReadout {

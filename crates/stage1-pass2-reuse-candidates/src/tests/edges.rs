@@ -21,7 +21,7 @@ use asap_types::test_support::memo_fixtures::arithmetic;
 #[test]
 fn without_targets_every_edge_is_admissible() {
     let mut memo = Memo::new(&DataWorkload::default());
-    let (_, _, p99) = quantile_over_time(&mut memo, SketchAlgorithm::Kll, 0.99, 300);
+    let (_, _, p99) = quantile_over_time(&mut memo, SketchAlgorithm::KLL, 0.99, 300);
     let p50 = estimate(
         &mut memo,
         MemoGroupId(2),
@@ -84,8 +84,8 @@ fn every_candidate_of_an_input_group_is_an_edge_of_matching_parameters() {
 #[test]
 fn a_merge_is_judged_by_the_parameters_it_carries() {
     let mut memo = Memo::new(&DataWorkload::default());
-    let (_, p_state, p_readout) = quantile_over_time(&mut memo, SketchAlgorithm::Kll, 0.9, 300);
-    let (_, _, q_readout) = quantile_over_time(&mut memo, SketchAlgorithm::Kll, 0.9, 600);
+    let (_, p_state, p_readout) = quantile_over_time(&mut memo, SketchAlgorithm::KLL, 0.9, 300);
+    let (_, _, q_readout) = quantile_over_time(&mut memo, SketchAlgorithm::KLL, 0.9, 600);
     query(&mut memo, p_readout, Some(AccuracyTarget::max_error(0.005)));
     query(&mut memo, q_readout, Some(AccuracyTarget::max_error(0.01)));
     let logical = pass2(memo, &[entry(60_000), entry(60_000)]);
@@ -214,7 +214,7 @@ fn measured_accuracy_keeps_a_smaller_kll_that_theory_prunes() {
     let k1404 = SketchParams::Kll { k: 1404 };
 
     let (memo, state, readout) =
-        p99_with_per_value_target(SketchAlgorithm::Kll, AccuracyMetric::Rank, 0.0025);
+        p99_with_per_value_target(SketchAlgorithm::KLL, AccuracyMetric::Rank, 0.0025);
     let theory = pass2(memo, &[entry(60_000)]);
     assert!(
         pruned_below_required_accuracy(&theory, build_with(&theory, state, &k547)),
@@ -227,7 +227,7 @@ fn measured_accuracy_keeps_a_smaller_kll_that_theory_prunes() {
     );
 
     let (memo, state, readout) =
-        p99_with_per_value_target(SketchAlgorithm::Kll, AccuracyMetric::Rank, 0.0025);
+        p99_with_per_value_target(SketchAlgorithm::KLL, AccuracyMetric::Rank, 0.0025);
     let measured = measured_p99(k547.clone(), AccuracyMetric::Rank, 0.0024);
     let with_table = pass2_with_evidence(memo, &[entry(60_000)], &measured);
     let build_547 = build_with(&with_table, state, &k547);

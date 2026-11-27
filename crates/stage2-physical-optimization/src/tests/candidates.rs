@@ -206,7 +206,7 @@ fn unsupported_summaries_and_readouts_are_pruned() {
 
     let kll_total_only = DeploymentCapabilities {
         supported_summaries: Some(vec![SupportedSummary {
-            summary_type: SketchAlgorithm::Kll,
+            summary_type: SketchAlgorithm::KLL,
             readouts: vec![StatisticKind::Total],
         }]),
         ..retaining_everything()
@@ -492,7 +492,7 @@ fn a_count_min_build_needs_weights_proven_non_negative() {
             &mut memo,
             Operator::ASAP(ASAPOp::SummaryAgg {
                 child: scan,
-                summary_type: FieldDataType::Sketch(SketchAlgorithm::CmsWithHeap),
+                summary_type: FieldDataType::Sketch(SketchAlgorithm::CountMinSketchWithHeap),
                 input: SummaryUpdate {
                     item: Some(SummaryInputExpr::EntityIdentity(
                         EntityIdentity::PromqlLabelSet { excluding: vec![] },
@@ -502,7 +502,7 @@ fn a_count_min_build_needs_weights_proven_non_negative() {
                 reduction: Reduction::Reduce(Default::default()),
                 filter: None,
             }),
-            SketchAlgorithm::CmsWithHeap,
+            SketchAlgorithm::CountMinSketchWithHeap,
             1,
         );
         query(&mut memo, state, None);

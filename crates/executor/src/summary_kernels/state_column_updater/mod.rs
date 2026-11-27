@@ -87,12 +87,12 @@ impl StateColumnUpdater {
     pub fn new(family: &FieldDataType, parameters: Option<&SketchParams>) -> Result<Self, Error> {
         crate::values::validate_family(family)?;
         let states = match family {
-            FieldDataType::Sketch(planner_types::summary_type::SketchAlgorithm::HydraCms) => {
-                GroupStates::Hydra {
-                    grid: Box::new(create_hydra_cms(family, parameters).map_err(Error::Invalid)?),
-                    names: Vec::new(),
-                }
-            }
+            FieldDataType::Sketch(
+                planner_types::summary_type::SketchAlgorithm::HydraCountMinSketch,
+            ) => GroupStates::Hydra {
+                grid: Box::new(create_hydra_cms(family, parameters).map_err(Error::Invalid)?),
+                names: Vec::new(),
+            },
             FieldDataType::ExactAggregate(..) if parameters.is_some() => {
                 return Err(Error::Invalid(
                     "an exact summary has no parameters θ".into(),
@@ -103,7 +103,7 @@ impl StateColumnUpdater {
                 states: Vec::new(),
             },
             FieldDataType::Sketch(
-                algorithm @ (planner_types::summary_type::SketchAlgorithm::CmsWithHeap
+                algorithm @ (planner_types::summary_type::SketchAlgorithm::CountMinSketchWithHeap
                 | planner_types::summary_type::SketchAlgorithm::CountSketchWithHeap),
             ) => {
                 let Some(parameters) = parameters else {

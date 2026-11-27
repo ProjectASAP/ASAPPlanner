@@ -19,7 +19,7 @@ fn every_listed_parameters_has_a_guarantee_at_one_percent() {
     };
     for (algorithm, statistic, metric) in [
         (
-            SketchAlgorithm::Kll,
+            SketchAlgorithm::KLL,
             SketchStatistic::Quantile { q: 0.5 },
             AccuracyMetric::Rank,
         ),
@@ -29,12 +29,12 @@ fn every_listed_parameters_has_a_guarantee_at_one_percent() {
             AccuracyMetric::Relative,
         ),
         (
-            SketchAlgorithm::Kmv,
+            SketchAlgorithm::KMV,
             SketchStatistic::Cardinality,
             AccuracyMetric::Relative,
         ),
         (
-            SketchAlgorithm::Cms,
+            SketchAlgorithm::CountMinSketch,
             point.clone(),
             AccuracyMetric::ABSOLUTE_STREAM_L1,
         ),
@@ -44,7 +44,7 @@ fn every_listed_parameters_has_a_guarantee_at_one_percent() {
             AccuracyMetric::ABSOLUTE_STREAM_L2,
         ),
         (
-            SketchAlgorithm::CmsWithHeap,
+            SketchAlgorithm::CountMinSketchWithHeap,
             SketchStatistic::TopK { k: 10 },
             AccuracyMetric::ABSOLUTE_STREAM_L1,
         ),
@@ -69,7 +69,7 @@ fn every_listed_parameters_has_a_guarantee_at_one_percent() {
         assert!(!errors.is_empty(), "{algorithm:?}");
         if matches!(
             algorithm,
-            SketchAlgorithm::Kll | SketchAlgorithm::DDSketch | SketchAlgorithm::Kmv
+            SketchAlgorithm::KLL | SketchAlgorithm::DDSketch | SketchAlgorithm::KMV
         ) {
             assert!(
                 errors.windows(2).all(|pair| pair[1] <= pair[0]),
@@ -85,7 +85,7 @@ fn every_listed_parameters_has_a_guarantee_at_one_percent() {
 #[test]
 fn a_guarantee_is_evaluated_at_the_required_failure_probability() {
     let quantile = SketchStatistic::Quantile { q: 0.5 };
-    let kll = FieldDataType::Sketch(SketchAlgorithm::Kll);
+    let kll = FieldDataType::Sketch(SketchAlgorithm::KLL);
     let k = SketchParams::Kll { k: 547 };
     let error_at = |delta| {
         theoretical_guarantee(&kll, &k, &quantile, delta, None, None)
@@ -97,7 +97,7 @@ fn a_guarantee_is_evaluated_at_the_required_failure_probability() {
     };
     assert_eq!(error_at(1.0), error_at(0.01));
     assert!(error_at(1e-6) > error_at(0.01));
-    let cms = FieldDataType::Sketch(SketchAlgorithm::Cms);
+    let cms = FieldDataType::Sketch(SketchAlgorithm::CountMinSketch);
     let point = SketchStatistic::PointCount {
         key: ColumnRef::SampleValue,
         value: None,

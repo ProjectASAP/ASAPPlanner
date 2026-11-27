@@ -58,10 +58,10 @@ fn running_example_gives_one_build_per_theta_and_separate_readouts() {
     query(&mut memo, g6, None);
     let memo = pass1_memo(memo, &[]).unwrap();
     println!("{}", memo_printout(&memo));
-    let (kll, _) = state_group(&memo, SketchAlgorithm::Kll);
+    let (kll, _) = state_group(&memo, SketchAlgorithm::KLL);
     let (ddsketch, _) = state_group(&memo, SketchAlgorithm::DDSketch);
     for (state, algorithm) in [
-        (kll, SketchAlgorithm::Kll),
+        (kll, SketchAlgorithm::KLL),
         (ddsketch, SketchAlgorithm::DDSketch),
     ] {
         let thetas: Vec<SketchParams> = candidates_of(&memo, state)

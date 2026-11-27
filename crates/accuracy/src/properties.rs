@@ -67,12 +67,14 @@ fn probability() -> impl Strategy<Value = f64> {
 fn parameters() -> impl Strategy<Value = (SketchAlgorithm, SketchParams)> {
     let size = || prop_oneof![Just(0u32), Just(1), Just(u32::MAX), 0..100_000u32];
     prop_oneof![
-        (0..KLL_MAX_K + 10).prop_map(|k| (SketchAlgorithm::Kll, SketchParams::Kll { k })),
-        size().prop_map(|k| (SketchAlgorithm::Kmv, SketchParams::Kmv { k })),
-        (size(), 0..64u32)
-            .prop_map(|(width, depth)| (SketchAlgorithm::Cms, SketchParams::Cms { width, depth })),
+        (0..KLL_MAX_K + 10).prop_map(|k| (SketchAlgorithm::KLL, SketchParams::Kll { k })),
+        size().prop_map(|k| (SketchAlgorithm::KMV, SketchParams::Kmv { k })),
+        (size(), 0..64u32).prop_map(|(width, depth)| (
+            SketchAlgorithm::CountMinSketch,
+            SketchParams::Cms { width, depth }
+        )),
         (size(), 0..64u32, size()).prop_map(|(width, depth, heap_size)| (
-            SketchAlgorithm::CmsWithHeap,
+            SketchAlgorithm::CountMinSketchWithHeap,
             SketchParams::CmsWithHeap {
                 width,
                 depth,
@@ -91,7 +93,7 @@ fn parameters() -> impl Strategy<Value = (SketchAlgorithm, SketchParams)> {
                 heap_size
             }
         )),
-        (0..=32u8).prop_map(|precision| (SketchAlgorithm::Hll, SketchParams::Hll { precision })),
+        (0..=32u8).prop_map(|precision| (SketchAlgorithm::HLL, SketchParams::Hll { precision })),
         prop_oneof![
             Just(f64::MIN_POSITIVE),
             Just(1.0 - f64::EPSILON),
@@ -181,8 +183,8 @@ fn is_a_bound(error: Option<f64>) -> bool {
 /// The statistic each algorithm's guarantee is for.
 fn statistic_of(algorithm: SketchAlgorithm) -> SketchStatistic {
     match algorithm {
-        SketchAlgorithm::Kll | SketchAlgorithm::DDSketch => SketchStatistic::Quantile { q: 0.5 },
-        SketchAlgorithm::Kmv | SketchAlgorithm::Hll => SketchStatistic::Cardinality,
+        SketchAlgorithm::KLL | SketchAlgorithm::DDSketch => SketchStatistic::Quantile { q: 0.5 },
+        SketchAlgorithm::KMV | SketchAlgorithm::HLL => SketchStatistic::Cardinality,
         SketchAlgorithm::UnivMon => SketchStatistic::FrequencyL2,
         _ => SketchStatistic::PointCount {
             key: ColumnRef::SampleValue,
@@ -251,10 +253,12 @@ fn grown(parameters: &SketchParams, factor: u32) -> SketchParams {
 /// at sizes the planner lists (Count Sketch depth odd).
 fn valid_parameters() -> impl Strategy<Value = (SketchAlgorithm, SketchParams)> {
     prop_oneof![
-        (2..KLL_MAX_K).prop_map(|k| (SketchAlgorithm::Kll, SketchParams::Kll { k })),
-        (2..100_000u32).prop_map(|k| (SketchAlgorithm::Kmv, SketchParams::Kmv { k })),
-        (1..100_000u32, 1..32u32)
-            .prop_map(|(width, depth)| (SketchAlgorithm::Cms, SketchParams::Cms { width, depth })),
+        (2..KLL_MAX_K).prop_map(|k| (SketchAlgorithm::KLL, SketchParams::Kll { k })),
+        (2..100_000u32).prop_map(|k| (SketchAlgorithm::KMV, SketchParams::Kmv { k })),
+        (1..100_000u32, 1..32u32).prop_map(|(width, depth)| (
+            SketchAlgorithm::CountMinSketch,
+            SketchParams::Cms { width, depth }
+        )),
         (1..100_000u32, 0..16u32).prop_map(|(width, half)| (
             SketchAlgorithm::CountSketch,
             SketchParams::CountSketch {
@@ -262,7 +266,7 @@ fn valid_parameters() -> impl Strategy<Value = (SketchAlgorithm, SketchParams)> 
                 depth: 2 * half + 1
             }
         )),
-        (4..=18u8).prop_map(|precision| (SketchAlgorithm::Hll, SketchParams::Hll { precision })),
+        (4..=18u8).prop_map(|precision| (SketchAlgorithm::HLL, SketchParams::Hll { precision })),
         (1e-6..0.5f64)
             .prop_map(|alpha| (SketchAlgorithm::DDSketch, SketchParams::DDSketch { alpha })),
     ]
@@ -429,7 +433,7 @@ proptest! {
     fn meeting_a_readout_level_is_monotone(
         (algorithm, parameters) in valid_parameters()
             .prop_filter("HLL needs a declared distinct bound", |(algorithm, _)| {
-                *algorithm != SketchAlgorithm::Hll
+                *algorithm != SketchAlgorithm::HLL
             }),
         failure_probability in probability(),
         slack in 0.5..2.0f64,
@@ -500,7 +504,7 @@ proptest! {
             Just(ArithmeticOpKind::Div),
         ],
     ) {
-        let (memo, operand) = state_memo(SketchAlgorithm::Kll);
+        let (memo, operand) = state_memo(SketchAlgorithm::KLL);
         let consumer = arithmetic(kind.clone(), operand, operand);
         for metric in AccuracyMetric::ALL {
             let Some(contract) = error_contract(&memo, &consumer, metric) else {
@@ -587,7 +591,7 @@ fn binary_operators(
 /// sample).
 #[test]
 fn contracts_never_shrink_an_input_error() {
-    let (memo, operand) = state_memo(SketchAlgorithm::Kll);
+    let (memo, operand) = state_memo(SketchAlgorithm::KLL);
     for consumer in binary_operators(operand, operand) {
         for metric in AccuracyMetric::ALL {
             let Some(ErrorContract {
@@ -617,7 +621,7 @@ fn contracts_never_shrink_an_input_error() {
 /// (1, 0) in every metric.
 #[test]
 fn symmetric_operators_have_order_independent_contracts() {
-    let (mut memo, source, left) = scan_and_state_memo(SketchAlgorithm::Kll);
+    let (mut memo, source, left) = scan_and_state_memo(SketchAlgorithm::KLL);
     let right = memo
         .find_or_add_group(state(
             FieldDataType::Sketch(SketchAlgorithm::DDSketch),

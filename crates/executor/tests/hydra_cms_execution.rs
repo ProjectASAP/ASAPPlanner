@@ -48,7 +48,7 @@ fn hydra_params() -> SketchParams {
 }
 
 fn family() -> FieldDataType {
-    FieldDataType::Sketch(SketchAlgorithm::HydraCms)
+    FieldDataType::Sketch(SketchAlgorithm::HydraCountMinSketch)
 }
 
 fn schema(fields: Vec<Field>) -> Schema {

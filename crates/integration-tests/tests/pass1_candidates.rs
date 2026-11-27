@@ -191,12 +191,14 @@ fn topk_offers_both_heap_algorithms() {
     assert_eq!(
         algorithms,
         [
-            SketchAlgorithm::CmsWithHeap,
+            SketchAlgorithm::CountMinSketchWithHeap,
             SketchAlgorithm::CountSketchWithHeap
         ]
     );
     let count = sketch_builds(promql("count by (job) (m)"));
-    assert!(count.iter().any(|(kind, _)| *kind == SketchAlgorithm::Cms));
+    assert!(count
+        .iter()
+        .any(|(kind, _)| *kind == SketchAlgorithm::CountMinSketch));
 }
 
 /// Top-K over a grouped sum is a whole-expression heap: it absorbs the
@@ -892,7 +894,8 @@ async fn heap_updates_over(fields: Vec<Field>, sql: &str) -> Vec<(String, String
             Operator::ASAP(ASAPOp::SummaryAgg {
                 summary_type:
                     FieldDataType::Sketch(
-                        SketchAlgorithm::CmsWithHeap | SketchAlgorithm::CountSketchWithHeap,
+                        SketchAlgorithm::CountMinSketchWithHeap
+                        | SketchAlgorithm::CountSketchWithHeap,
                     ),
                 input,
                 ..

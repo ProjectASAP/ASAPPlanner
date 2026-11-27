@@ -73,13 +73,13 @@ Based on our requirement, each field should contain the following information.
    | Term | Code | Values | KLL example |
    |---|---|---|---|
    | Family | `FieldDataType` variant | `ExactAggregate`, `Sketch`, `SummarySample`, `Wavelet`, `StatModel` | `Sketch` |
-   | Algorithm | `SketchAlgorithm` (other families: `ExactKind`, `SamplingKind`, …) | `Kll`, `Cms`, `Hll`, `DDSketch`, `HydraKll`, … | `Kll` |
-   | Summary type | family and algorithm: one `FieldDataType` value, the column's type | `FieldDataType::Sketch(SketchAlgorithm)`, … | `Sketch(Kll)` |
+   | Algorithm | `SketchAlgorithm` (other families: `ExactKind`, `SamplingKind`, …) | `KLL`, `CountMinSketch`, `HLL`, `DDSketch`, `HydraKLL`, … | `KLL` |
+   | Summary type | family and algorithm: one `FieldDataType` value, the column's type | `FieldDataType::Sketch(SketchAlgorithm)`, … | `Sketch(KLL)` |
    | Parameters θ | `SketchParams` (other families: `ExactParams`, `SamplingParams`, …), on the candidate's `LogicalProperties`, not in the type | per algorithm, from `parameter_list(algorithm)` | `Kll { k: 547 }` |
 
    - The summary type is the operator's `summary_type` argument (`SummaryAgg`, the chain). θ is structure only (sizes, no sized-for error fields) and lives on the candidate, so builds that differ only in θ are candidates of one memo group.
-   - A shared multi-subpopulation structure (Hydra) is an algorithm of its own (`HydraKll`, `HydraCms`, `HydraCountSketch`, …), not a separate grouping dimension.
-   - So a quantile KLL sketch with `k = 547` has the type `Sketch(Kll)` and θ `Kll { k: 547 }`. Which statistics a summary type answers is its row of the capability table (`SummaryTypeCapability`), not part of the type.
+   - A shared multi-subpopulation structure (Hydra) is an algorithm of its own (`HydraKLL`, `HydraCountMinSketch`, `HydraCountSketch`, …), not a separate grouping dimension.
+   - So a quantile KLL sketch with `k = 547` has the type `Sketch(KLL)` and θ `Kll { k: 547 }`. Which statistics a summary type answers is its row of the capability table (`SummaryTypeCapability`), not part of the type.
 
 2. **What query intent the summarized ASAP Primitive can support.** This is not stored in the field: it follows from the type in item 1. There are two kinds of intent:
 
@@ -87,9 +87,9 @@ Based on our requirement, each field should contain the following information.
 
      | Intent | Candidate types | Evaluation |
      |---|---|---|
-     | `Quantile` | `Sketch`: `Kll`, `DDSketch` | `SummaryEstimate(Quantile { q })` |
-     | `Cardinality` | `Sketch`: `Hll`, `Kmv`, `UnivMon` (one column only) | `SummaryEstimate(Cardinality)` |
-     | `Count` (approximate) | `Sketch`: `Cms`, `UnivMon` | `SummaryEstimate(PointCount { .. })` |
+     | `Quantile` | `Sketch`: `KLL`, `DDSketch` | `SummaryEstimate(Quantile { q })` |
+     | `Cardinality` | `Sketch`: `HLL`, `KMV`, `UnivMon` (one column only) | `SummaryEstimate(Cardinality)` |
+     | `Count` (approximate) | `Sketch`: `CountMinSketch`, `UnivMon` | `SummaryEstimate(PointCount { .. })` |
      | `TopK` | `Sketch`: `CmsWithHeap`, `CountSketchWithHeap` | `SummaryEstimate(TopK { k })` |
      | `FrequencyL2`, `FrequencyEntropy` | `Sketch`: `UnivMon` | `SummaryEstimate(FrequencyL2 \| FrequencyEntropy)` |
      | `Sum`, `Count`, `Min`, `Max`, `Rate`, `IRate`, `Increase` (exact) | `ExactAggregate(ExactKind, …)` | `FinalizeExactAccumulator` |
@@ -965,7 +965,7 @@ MemoGroup.group_properties.aggregate_coverage: AggregateCoverage   §6.6
 | §6.5 Update input and evaluations | `SummaryUpdate`, `SketchStatistic`, `MaintainedPopulation`, `PopulationStatistic` | fields of the `ASAPOp` variants in §6.2 |
 | §6.6 Aggregate coverage | `AggregateCoverage`, `AggregateDefinition`, `SelectionBox`, `Constraint` | `GroupProperties::aggregate_coverage` of aggregate memo groups |
 
-**Example: the p99 latency state of §5.1.** The `SummaryAgg` node (§6.1) holds `ASAPOp::SummaryAgg` (§6.2) with `summary_type = Sketch(Kll)` (§6.3, §6.4) and `input = SummaryUpdate::column(latency)` (§6.5); its candidate's θ is `Kll { k: 200 }`. Its `schema` (§6.3) is `(job Utf8, state Sketch(Kll))`: the `state` field has the same type as `summary_type`. A `SummaryEstimate` above it holds `query = Quantile { q: 0.99 }` (§6.5). The memo derives the `SummaryAgg` group's `AggregateCoverage` (§6.6) and stores it in the group's `GroupProperties::aggregate_coverage`.
+**Example: the p99 latency state of §5.1.** The `SummaryAgg` node (§6.1) holds `ASAPOp::SummaryAgg` (§6.2) with `summary_type = Sketch(KLL)` (§6.3, §6.4) and `input = SummaryUpdate::column(latency)` (§6.5); its candidate's θ is `Kll { k: 200 }`. Its `schema` (§6.3) is `(job Utf8, state Sketch(KLL))`: the `state` field has the same type as `summary_type`. A `SummaryEstimate` above it holds `query = Quantile { q: 0.99 }` (§6.5). The memo derives the `SummaryAgg` group's `AggregateCoverage` (§6.6) and stores it in the group's `GroupProperties::aggregate_coverage`.
 
 ### 6.1 DAG node (`crates/types/src/ir/operator/node.rs`)
 
@@ -1192,8 +1192,8 @@ pub enum DataType {
 pub enum ExactKind   { Sum, Count, Min, Max, Increase, Rate, IRate }
 pub enum ExactParams { Sum, Count, Min, Max, Increase, Rate, IRate }
 
-/// `asap_sketchlib`'s algorithm enum, the Hydra algorithms (`HydraKll`,
-/// `HydraCms`, `HydraCountSketch`, …) included. Which statistics each
+/// `asap_sketchlib`'s algorithm enum, the Hydra algorithms (`HydraKLL`,
+/// `HydraCountMinSketch`, `HydraCountSketch`, …) included. Which statistics each
 /// answers is its row of the capability table (`SummaryTypeCapability`).
 pub use asap_sketchlib::SketchAlgorithm;
 

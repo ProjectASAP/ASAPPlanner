@@ -12,7 +12,7 @@ use asap_types::ir::schema::FieldDataType;
 use asap_types::summary_type::{SketchAlgorithm, SketchParams, SketchStatistic};
 
 fn kll() -> FieldDataType {
-    FieldDataType::Sketch(SketchAlgorithm::Kll)
+    FieldDataType::Sketch(SketchAlgorithm::KLL)
 }
 
 fn p99() -> SketchStatistic {
@@ -337,7 +337,7 @@ fn the_returned_guarantee_states_the_recorded_failure_probability() {
 /// for a state merged from that many windows.
 #[test]
 fn a_measured_entry_supplies_a_guarantee_where_theory_states_no_failure_probability() {
-    let hll = FieldDataType::Sketch(SketchAlgorithm::Hll);
+    let hll = FieldDataType::Sketch(SketchAlgorithm::HLL);
     let parameters = SketchParams::Hll { precision: 13 };
     let table = MeasuredSketchAccuracy {
         entries: vec![MeasuredAccuracyEntry {

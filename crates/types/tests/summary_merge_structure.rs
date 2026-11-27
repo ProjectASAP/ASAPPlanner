@@ -15,7 +15,7 @@ use std::rc::Rc;
 /// KLL over `value` for one `region`, so states of different regions are
 /// disjoint.
 fn state(_k: u32, region: &str) -> Rc<OperatorNode> {
-    family_state(FieldDataType::Sketch(SketchAlgorithm::Kll), region)
+    family_state(FieldDataType::Sketch(SketchAlgorithm::KLL), region)
 }
 /// A `family` state over `value` for one `region`.
 fn family_state(family: FieldDataType, region: &str) -> Rc<OperatorNode> {
@@ -83,13 +83,13 @@ fn exact(kind: ExactKind, params: ExactParams) -> FieldDataType {
     FieldDataType::ExactAggregate(kind, params)
 }
 fn kll() -> FieldDataType {
-    sketch(SketchAlgorithm::Kll)
+    sketch(SketchAlgorithm::KLL)
 }
 fn hll() -> FieldDataType {
-    sketch(SketchAlgorithm::Hll)
+    sketch(SketchAlgorithm::HLL)
 }
 fn cms_with_heap() -> FieldDataType {
-    sketch(SketchAlgorithm::CmsWithHeap)
+    sketch(SketchAlgorithm::CountMinSketchWithHeap)
 }
 fn merge(children: Vec<Rc<OperatorNode>>) -> Result<Rc<OperatorNode>, String> {
     OperatorNode::new_shared(Operator::ASAP(ASAPOp::SummaryMerge {
@@ -176,32 +176,35 @@ fn summary_type_capability_table() {
         )
     };
     let sketches = [
-        (kll(), SketchAlgorithm::Kll),
+        (kll(), SketchAlgorithm::KLL),
         (sketch(SketchAlgorithm::DDSketch), SketchAlgorithm::DDSketch),
-        (hll(), SketchAlgorithm::Hll),
-        (sketch(SketchAlgorithm::Cms), SketchAlgorithm::Cms),
+        (hll(), SketchAlgorithm::HLL),
+        (
+            sketch(SketchAlgorithm::CountMinSketch),
+            SketchAlgorithm::CountMinSketch,
+        ),
         (
             sketch(SketchAlgorithm::CountSketch),
             SketchAlgorithm::CountSketch,
         ),
         (sketch(SketchAlgorithm::UnivMon), SketchAlgorithm::UnivMon),
-        (sketch(SketchAlgorithm::Kmv), SketchAlgorithm::Kmv),
-        (cms_with_heap(), SketchAlgorithm::CmsWithHeap),
+        (sketch(SketchAlgorithm::KMV), SketchAlgorithm::KMV),
+        (cms_with_heap(), SketchAlgorithm::CountMinSketchWithHeap),
         (
             sketch(SketchAlgorithm::CountSketchWithHeap),
             SketchAlgorithm::CountSketchWithHeap,
         ),
         (
-            FieldDataType::Sketch(SketchAlgorithm::HydraCms),
-            SketchAlgorithm::HydraCms,
+            FieldDataType::Sketch(SketchAlgorithm::HydraCountMinSketch),
+            SketchAlgorithm::HydraCountMinSketch,
         ),
         (
             FieldDataType::Sketch(SketchAlgorithm::HydraCountSketch),
             SketchAlgorithm::HydraCountSketch,
         ),
         (
-            FieldDataType::Sketch(SketchAlgorithm::HydraKll),
-            SketchAlgorithm::HydraKll,
+            FieldDataType::Sketch(SketchAlgorithm::HydraKLL),
+            SketchAlgorithm::HydraKLL,
         ),
     ];
     let rows = rows
@@ -329,7 +332,7 @@ fn estimate(family: FieldDataType, query: SketchStatistic) -> Result<Rc<Operator
 /// readout of an exact accumulator. What the table answers builds.
 #[test]
 fn a_statistic_the_family_does_not_answer_is_rejected() {
-    let cms = sketch(SketchAlgorithm::Cms);
+    let cms = sketch(SketchAlgorithm::CountMinSketch);
     let ddsketch = sketch(SketchAlgorithm::DDSketch);
     let total = || SketchStatistic::PointCount {
         key: ColumnRef::SampleValue,
@@ -360,13 +363,13 @@ fn accepted_by_category(algorithm: &SketchAlgorithm, query: &SketchStatistic) ->
     use SketchAlgorithm as A;
     use SketchStatistic as Q;
     match algorithm {
-        A::Kll | A::DDSketch => matches!(query, Q::Quantile { .. }),
-        A::Hll | A::Kmv => matches!(query, Q::Cardinality),
-        A::Cms | A::CountSketch => matches!(query, Q::PointCount { .. }),
-        A::CmsWithHeap | A::CountSketchWithHeap => matches!(query, Q::TopK { .. }),
+        A::KLL | A::DDSketch => matches!(query, Q::Quantile { .. }),
+        A::HLL | A::KMV => matches!(query, Q::Cardinality),
+        A::CountMinSketch | A::CountSketch => matches!(query, Q::PointCount { .. }),
+        A::CountMinSketchWithHeap | A::CountSketchWithHeap => matches!(query, Q::TopK { .. }),
         A::UnivMon => !matches!(query, Q::Quantile { .. }),
-        A::HydraKll => matches!(query, Q::Quantile { .. }),
-        A::HydraCms | A::HydraCountSketch => matches!(query, Q::PointCount { .. }),
+        A::HydraKLL => matches!(query, Q::Quantile { .. }),
+        A::HydraCountMinSketch | A::HydraCountSketch => matches!(query, Q::PointCount { .. }),
         _ => unreachable!("{algorithm:?} is not probed"),
     }
 }
@@ -381,13 +384,13 @@ fn accepted_by_category(algorithm: &SketchAlgorithm, query: &SketchStatistic) ->
 fn estimate_validation_matches_the_category_match_except_the_fixed_rows() {
     use SketchAlgorithm as A;
     let mut families: Vec<FieldDataType> = [
-        A::Kll,
+        A::KLL,
         A::DDSketch,
-        A::Hll,
-        A::Kmv,
-        A::Cms,
+        A::HLL,
+        A::KMV,
+        A::CountMinSketch,
         A::CountSketch,
-        A::CmsWithHeap,
+        A::CountMinSketchWithHeap,
         A::CountSketchWithHeap,
         A::UnivMon,
     ]
@@ -395,9 +398,9 @@ fn estimate_validation_matches_the_category_match_except_the_fixed_rows() {
     .map(sketch)
     .collect();
     families.extend([
-        FieldDataType::Sketch(SketchAlgorithm::HydraCms),
+        FieldDataType::Sketch(SketchAlgorithm::HydraCountMinSketch),
         FieldDataType::Sketch(SketchAlgorithm::HydraCountSketch),
-        FieldDataType::Sketch(SketchAlgorithm::HydraKll),
+        FieldDataType::Sketch(SketchAlgorithm::HydraKLL),
     ]);
     let statistics = [
         SketchStatistic::PointCount {
@@ -428,7 +431,7 @@ fn estimate_validation_matches_the_category_match_except_the_fixed_rows() {
                     SketchAlgorithm::CountSketch | SketchAlgorithm::HydraCountSketch,
                     StatisticKind::Total
                 ) | (
-                    SketchAlgorithm::CmsWithHeap | SketchAlgorithm::CountSketchWithHeap,
+                    SketchAlgorithm::CountMinSketchWithHeap | SketchAlgorithm::CountSketchWithHeap,
                     StatisticKind::ItemFrequency,
                 )
             );

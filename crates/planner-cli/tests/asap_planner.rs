@@ -673,7 +673,7 @@ fn a_quantile_target_without_a_metric_accepts_rank_or_relative() {
         .get("default_metric")
         .is_some_and(Value::is_null));
     let labels = memo_labels(&unset, "pass1");
-    for family in ["Kll", "DDSketch"] {
+    for family in ["KLL", "DDSketch"] {
         assert!(
             labels.iter().any(|l| l.contains(family)),
             "{family}: {labels:?}"
@@ -687,7 +687,7 @@ fn a_quantile_target_without_a_metric_accepts_rank_or_relative() {
     let rank = query(Some("rank"));
     let accepted = summary(&rank);
     assert!(
-        accepted == "accepted rank (Kll)" || accepted == "accepted exact",
+        accepted == "accepted rank (KLL)" || accepted == "accepted exact",
         "{accepted}"
     );
 }
@@ -823,14 +823,14 @@ fn deployment_capabilities_flag_sets_the_capabilities_and_shows_them() {
         })
     );
     let kll_kept = with_capabilities(
-        r#"{"supported_summaries": [{"summary_type": "Kll", "readouts": ["Quantile"]}],
+        r#"{"supported_summaries": [{"summary_type": "KLL", "readouts": ["Quantile"]}],
             "query_time_results_retained": true}"#,
         &["--ignore-accuracy-guarantees"],
     );
     assert_eq!(
         kll_kept["deployment_capabilities"],
         json!({
-            "supported_summaries": [{ "summary_type": "Kll", "readouts": ["Quantile"] }],
+            "supported_summaries": [{ "summary_type": "KLL", "readouts": ["Quantile"] }],
             "raw_data_retained": true,
             "query_time_results_retained": true,
             "counter_semantics": { "reset_handling": true, "extrapolation": true },
@@ -1071,7 +1071,7 @@ fn undeclared_supported_summaries_default_to_the_executors_families() {
         ],
     );
     let labels = memo_labels(&document, "pass1");
-    for family in ["FinalizeExactAccumulator", "Cms", "UnivMon"] {
+    for family in ["FinalizeExactAccumulator", "CountMinSketch", "UnivMon"] {
         assert!(
             labels.iter().any(|label| label.contains(family)),
             "missing {family}: {labels:?}"
@@ -2065,8 +2065,8 @@ fn milp_search_selects_checked_plans_on_ratio_and_rollupheavy() {
     let milp = milp_args(&capabilities);
     let tables = catalog_tables(Path::new(&memo_example("sql/tables.json")));
     for (workload, pruned_family) in [
-        ("promql/ratio-of-quantiles-5m.json", "Kll"),
-        ("sql/rollupheavy-t11-service-endpoint-5m.json", "Hll"),
+        ("promql/ratio-of-quantiles-5m.json", "KLL"),
+        ("sql/rollupheavy-t11-service-endpoint-5m.json", "HLL"),
     ] {
         let path = memo_example(workload);
         let mut args = vec!["--workload", path.as_str()];
@@ -2618,7 +2618,7 @@ fn summary_families_come_from_the_deployment_capabilities() {
         planned_with(&["--deployment-capabilities", &every_family]),
         declared["supported_summaries"]
     );
-    let kll = json!([{"summary_type": "Kll", "readouts": ["Quantile"]}]);
+    let kll = json!([{"summary_type": "KLL", "readouts": ["Quantile"]}]);
     let kll_only = TempFile::json(&json!({ "supported_summaries": kll }));
     assert_eq!(
         planned_with(&["--deployment-capabilities", kll_only.path()]),
