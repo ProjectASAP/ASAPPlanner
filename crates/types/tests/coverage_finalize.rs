@@ -9,7 +9,9 @@ use asap_types::ir::scalar::ColumnRef;
 use asap_types::ir::schema::FieldDataType;
 use asap_types::ir::{ASAPOp, ExprSemantics, Operator, Predicate};
 use asap_types::stages::{AggregateCoverage, Memo, MemoGroupId};
-use asap_types::summary_type::{CounterReadout, ExactKind, ExactParams, SummaryUpdate};
+use asap_types::summary_type::{
+    CounterReadout, ExactKind, ExactParams, SummaryInputExpr, SummaryUpdate,
+};
 use asap_types::test_support::memo_builders::{candidate, group, scan_group};
 use asap_types::test_support::memo_fixtures::{
     aggregate, aggregate_with, compare, range, state, state_grouped_by,
@@ -196,4 +198,35 @@ fn a_finalized_rate_and_increase_of_one_counter_differ() {
     let increase = add(&mut memo, finalize(counter, Some(CounterReadout::Increase)));
     assert!(coverage(&memo, rate).is_some());
     assert_ne!(coverage(&memo, rate), coverage(&memo, increase));
+}
+
+/// A build of a constant input finalizes to no `Aggregate` the front ends
+/// write, so it has no coverage, unless it counts rows: a count reads no
+/// column, and `SummaryAgg[Count](1.0)` finalizes to `count_over_time`.
+#[test]
+fn a_finalized_state_of_a_constant_input_has_coverage_only_when_it_counts() {
+    let (mut memo, last_5m) = memo_over_last_5m();
+    let of_constant = |kind| {
+        Operator::ASAP(ASAPOp::SummaryAgg {
+            child: last_5m,
+            summary_type: FieldDataType::exact(kind),
+            input: SummaryUpdate {
+                item: None,
+                weight: SummaryInputExpr::Constant(1.0),
+            },
+            reduction: Reduction::PerEntity,
+            filter: None,
+        })
+    };
+    let sum_state = add(&mut memo, of_constant(ExactKind::Sum));
+    let sum = add(&mut memo, finalize(sum_state, None));
+    let count_state = add(&mut memo, of_constant(ExactKind::Count));
+    let count = add(&mut memo, finalize(count_state, None));
+    let direct_count = add(
+        &mut memo,
+        aggregate(Reduction::PerEntity, AggIntent::Count, last_5m),
+    );
+    assert_eq!(coverage(&memo, sum), None);
+    assert!(coverage(&memo, direct_count).is_some());
+    assert_eq!(coverage(&memo, count), coverage(&memo, direct_count));
 }

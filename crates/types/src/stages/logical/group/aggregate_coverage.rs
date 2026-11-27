@@ -234,14 +234,14 @@ pub(super) fn aggregate_coverage<'m>(
             child,
             counter_readout,
         }) => {
-            let build = child.operator();
+            let operator = child.operator();
             let Operator::ASAP(
                 build @ ASAPOp::SummaryAgg {
                     summary_type: FieldDataType::ExactAggregate(kind, _),
                     input,
                     ..
                 },
-            ) = &build
+            ) = &operator
             else {
                 return Err(CoverageError::NoCoverage);
             };
@@ -263,11 +263,12 @@ pub(super) fn aggregate_coverage<'m>(
                 measures, filters, ..
             } = &mut aggregate
             {
-                if let Some(measure) = kind
-                    .measure(None, *counter_readout)
-                    .filter(|_| reads_sample_value)
-                {
-                    measures[0] = measure;
+                if reads_sample_value {
+                    // `finalized_aggregate` made this kind's measure with
+                    // this readout, so one exists without a column too.
+                    measures[0] = kind
+                        .measure(None, *counter_readout)
+                        .expect("a measure for this kind and readout");
                 }
                 // No filter list when unfiltered.
                 filters.retain(Option::is_some);
