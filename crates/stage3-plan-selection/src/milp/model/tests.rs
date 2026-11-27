@@ -483,6 +483,179 @@ fn a_materialized_chain_runs_once_and_retains_what_its_consumers_read_back() {
     assert_eq!(chain_node.retention_ms, Some(300_000));
 }
 
+/// The chain of [`a_materialized_chain_runs_once_and_retains_what_its_consumers_read_back`]:
+/// its $h_v$, in seconds, would be at least 60 or 300 times a read, an
+/// unbounded column with whole-number coefficients that HiGHS's presolve
+/// takes for an integer (#1533). Every continuous
+/// variable of its selection model is within $[0, 1]$: $h_v$ is held as a
+/// share of the 300 s the longest read needs, and the optimum still
+/// retains 300 s.
+#[test]
+fn retention_is_a_share_of_the_longest_need() {
+    let mut memo = empty_memo();
+    let m = scan(&mut memo);
+    let chain = group(
+        &mut memo,
+        Operator::ASAP(ASAPOp::SummaryTumblingWindowChain {
+            child: m,
+            summary_type: FieldDataType::ExactAggregate(ExactKind::Sum, ExactParams::Sum),
+            input: SummaryUpdate::column(ColumnRef::SampleValue),
+            reduction: Reduction::PerEntity,
+            filter: None,
+            tumbling_window_width_ms: 10_000,
+        }),
+    );
+    let last_1m = range(&mut memo, 60, chain);
+    let last_5m = range(&mut memo, 300, chain);
+    query(&mut memo, last_1m, None);
+    query(&mut memo, last_5m, None);
+    let physical = physical(
+        memo,
+        &[
+            (own_candidate(m), NONE),
+            (own_candidate(chain), ACROSS_EVALUATIONS),
+            (own_candidate(last_1m), NONE),
+            (own_candidate(last_5m), NONE),
+        ],
+    );
+    let entries = [every(10_000), every(20_000)];
+    let (selectable, costs) = selection_inputs(
+        &physical,
+        &entries,
+        &[1.0, 1.0, 1.0, 1.0],
+        &[],
+        &[(1, 1e-3)],
+    );
+    let inputs = SelectionInputs {
+        physical: &physical,
+        entries: &entries,
+        selectable: &selectable,
+        costs: &costs,
+        kept_query_time_results: None,
+        answer_cache: None,
+    };
+    let mut problem = ProblemVariables::new();
+    let kept = vec![true; selectable.executions().len()];
+    selection_model(&inputs, &kept, None, &mut problem);
+    let continuous: Vec<(f64, f64)> = problem
+        .iter_variables_with_def()
+        .filter(|(_, definition)| !definition.is_integer())
+        .map(|(_, definition)| (definition.get_min(), definition.get_max()))
+        .collect();
+    assert!(!continuous.is_empty());
+    assert!(
+        continuous
+            .iter()
+            .all(|&(min, max)| min >= 0.0 && max <= 1.0),
+        "{continuous:?}"
+    );
+    let solved = solve_selection(&inputs).unwrap();
+    assert_eq!(
+        solved.retention_ms.get(&PhysicalCandidateId(1)),
+        Some(&300_000)
+    );
+    let optimum = solved.milp_optimum_per_second.unwrap();
+    assert!((optimum - 4.3).abs() <= 1e-9 * 4.3, "{optimum}");
+}
+
+/// The chain of [`a_materialized_chain_runs_once_and_retains_what_its_consumers_read_back`]
+/// under a window cache: its 1 m reader keeps 6 windows resident, its 5 m
+/// reader 30, at 2 per window. $r_v$ is the most over the selected reads,
+/// 30, held as a share of the most any read keeps: in $[0, 1]$, its term
+/// 2 · 30 per unit. Unbounded and in windows (whole numbers), HiGHS's
+/// presolve takes it for an integer and its root reduced-cost fixing steps
+/// through up to 1,024 of its values at every root LP solve (#1533).
+#[test]
+fn resident_windows_are_a_share_of_the_most_any_read_keeps() {
+    let mut memo = empty_memo();
+    let m = scan(&mut memo);
+    let chain = group(
+        &mut memo,
+        Operator::ASAP(ASAPOp::SummaryTumblingWindowChain {
+            child: m,
+            summary_type: FieldDataType::ExactAggregate(ExactKind::Sum, ExactParams::Sum),
+            input: SummaryUpdate::column(ColumnRef::SampleValue),
+            reduction: Reduction::PerEntity,
+            filter: None,
+            tumbling_window_width_ms: 10_000,
+        }),
+    );
+    let last_1m = range(&mut memo, 60, chain);
+    let last_5m = range(&mut memo, 300, chain);
+    query(&mut memo, last_1m, None);
+    query(&mut memo, last_5m, None);
+    let physical = physical(
+        memo,
+        &[
+            (own_candidate(m), NONE),
+            (own_candidate(chain), ACROSS_EVALUATIONS),
+            (own_candidate(last_1m), NONE),
+            (own_candidate(last_5m), NONE),
+        ],
+    );
+    let entries = [every(10_000), every(20_000)];
+    let (selectable, mut costs) =
+        selection_inputs(&physical, &entries, &[1.0, 1.0, 1.0, 1.0], &[], &[]);
+    let executions = selectable.executions();
+    costs.resident_reads = selectable
+        .edges()
+        .iter()
+        .enumerate()
+        .filter(|(_, edge)| executions[edge.producer].candidate == PhysicalCandidateId(1))
+        .map(|(position, edge)| {
+            let reader = executions[edge.consumer].candidate;
+            crate::resident_windows::ResidentRead {
+                execution: edge.producer,
+                reader: crate::selectable::Reader::Edge(position),
+                resident_windows: if reader == PhysicalCandidateId(2) {
+                    6.0
+                } else {
+                    30.0
+                },
+                bytes_read_from_disk_per_second: 0.0,
+                most_bytes_read_from_disk_per_run: 0.0,
+            }
+        })
+        .collect();
+    assert_eq!(costs.resident_reads.len(), 2);
+    costs.per_resident_window = HashMap::from([(PhysicalCandidateId(1), 2.0)]);
+    let mut problem = ProblemVariables::new();
+    let y: BTreeMap<usize, Variable> = (0..selectable.edges().len())
+        .map(|position| (position, problem.add(variable().binary())))
+        .collect();
+    let mut rows = Vec::new();
+    let terms = resident_window_terms(
+        &costs,
+        &selectable,
+        &y,
+        &BTreeMap::new(),
+        &mut problem,
+        &mut rows,
+    );
+    let [(per_unit, share)] = terms[..] else {
+        panic!("one r_v: {terms:?}");
+    };
+    assert_eq!(per_unit, 2.0 * 30.0);
+    let (_, definition) = problem
+        .iter_variables_with_def()
+        .find(|&(variable, _)| variable == share)
+        .unwrap();
+    assert_eq!((definition.get_min(), definition.get_max()), (0.0, 1.0));
+    assert_eq!(rows.len(), 2);
+    let solved = solve_selection(&SelectionInputs {
+        physical: &physical,
+        entries: &entries,
+        selectable: &selectable,
+        costs: &costs,
+        kept_query_time_results: None,
+        answer_cache: None,
+    })
+    .unwrap();
+    let optimum = solved.milp_optimum_per_second.unwrap();
+    assert!((optimum - 64.0).abs() <= 1e-9 * 64.0, "{optimum}");
+    assert!((solved.cost_per_second_without_request_overhead - optimum).abs() <= 1e-9 * optimum);
+}
+
 /// A chain of 10 s windows materialized across evaluations, read every
 /// 10 s at its newest output only (no range above it): no read needs a
 /// retention, but a store always keeps the newest output, so the chain
