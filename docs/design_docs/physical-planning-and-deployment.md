@@ -580,10 +580,9 @@ views `SummaryAgg(TimeRange(1m, TimeShift(i·1m, Scan)))`, `i = 0..4`,
 share one key, and each minute's state is filed once under it and its
 absolute interval.
 
-Known limitations: the key is only as good as the coverage it carries. A
-finalized exact aggregate has no coverage (#1493), and a coverage depends
-on where a filter sits, not only on which rows are aggregated (#1494), so
-one stored state can get two keys.
+Known limitation: the key is only as good as the coverage it carries. A
+coverage depends on where a filter sits, not only on which rows are
+aggregated (#1494), so one stored state can get two keys.
 
 ### Input slots and compilation
 
