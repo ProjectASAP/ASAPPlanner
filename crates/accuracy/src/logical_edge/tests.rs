@@ -112,10 +112,12 @@ fn a_distinct_count_readout_without_an_evaluable_guarantee_serves_no_query_with_
 #[test]
 fn a_heap_smaller_than_k_fails_the_topk_readouts_edge() {
     use asap_types::test_support::memo_builders::{
-        estimate, group, own_candidate, scan_group, sketch_state,
+        estimate, group, own_candidate, scan_group, sketch_state, with_non_negative_values,
     };
     use asap_types::test_support::memo_fixtures::range;
-    let mut memo = Memo::new(&DataWorkload::default());
+    // `x` non-negative: a Count-Min heap over weights not proven
+    // non-negative lists no build (`listed_build_parameters`).
+    let mut memo = Memo::new(&with_non_negative_values("x"));
     let input = scan_group(&mut memo, "x", &["job"], vec![]);
     let window = group(&mut memo, range(300_000, input));
     let state = sketch_state(

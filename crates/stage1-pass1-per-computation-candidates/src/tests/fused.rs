@@ -15,7 +15,7 @@ use asap_types::workload::DataWorkload;
 /// state lists no build (its weights are not proven non-negative), while
 /// the Count Sketch heap, which needs no sign, lists every θ.
 #[test]
-fn a_count_min_heap_over_weights_of_unknown_sign_lists_no_build() {
+fn a_count_min_heap_over_weights_not_proven_non_negative_lists_no_build() {
     let mut memo = Memo::new(&DataWorkload::default());
     let rows = selector(&mut memo, TimeRangeKind::Range, "m", &["job"]);
     let per_series = aggregate_group(&mut memo, rows, Reduction::PerEntity, vec![sum()], None);

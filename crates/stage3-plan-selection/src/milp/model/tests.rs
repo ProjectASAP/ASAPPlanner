@@ -1560,9 +1560,9 @@ fn readouts_of(
     (group, readouts)
 }
 
-/// A memo over sources each declaring only its series count.
-fn memo_with_series(series: &[(&str, u64)]) -> Memo {
-    Memo::new(&DataWorkload {
+/// A data workload over sources each declaring only its series count.
+fn series_workload(series: &[(&str, u64)]) -> DataWorkload {
+    DataWorkload {
         sources: series
             .iter()
             .map(|&(metric, series_count)| {
@@ -1576,29 +1576,25 @@ fn memo_with_series(series: &[(&str, u64)]) -> Memo {
             })
             .collect(),
         ..DataWorkload::default()
-    })
+    }
+}
+
+/// A memo over sources each declaring only its series count.
+fn memo_with_series(series: &[(&str, u64)]) -> Memo {
+    Memo::new(&series_workload(series))
 }
 
 /// [`memo_with_series`] with every metric's values declared non-negative,
 /// so a Count-Min state over them lists its builds
 /// (`listed_build_parameters`).
 fn memo_with_non_negative_series(series: &[(&str, u64)]) -> Memo {
-    Memo::new(&DataWorkload {
-        sources: series
-            .iter()
-            .map(|&(metric, series_count)| {
-                (
-                    metric.to_string(),
-                    SourceFacts {
-                        series_count: Some(series_count),
-                        column_signs: [("value".to_string(), ValueSign::NonNegative)].into(),
-                        ..SourceFacts::default()
-                    },
-                )
-            })
-            .collect(),
-        ..DataWorkload::default()
-    })
+    let mut data = series_workload(series);
+    for facts in data.sources.values_mut() {
+        facts
+            .column_signs
+            .insert("value".to_string(), ValueSign::NonNegative);
+    }
+    Memo::new(&data)
 }
 
 /// Every candidate of `memo` at query time, `OneEvaluation`.
