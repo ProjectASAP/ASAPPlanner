@@ -1,11 +1,15 @@
 //! The summary states of one batch column.
-use super::mapped_states::{MappedSketchKernel, MappedSketches};
+use super::mapped_states::{
+    exact_record_bytes, state_view_bytes, MappedRecords, MappedSketchKernel, MappedSketches,
+    ViewLayout,
+};
 use crate::summary_kernels::exact::{ExactAccumulator, ScalarState};
 use crate::summary_kernels::increase::IncreaseAccumulator;
 use crate::AggregateCore;
 use arrow::buffer::BooleanBuffer;
 use planner_types::ir::schema::FieldDataType;
 use planner_types::summary_type::ExactKind;
+use std::borrow::Cow;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -43,7 +47,7 @@ pub(crate) enum StateStorage {
     /// Sketch states in their view layout, read through read-only views
     /// ([`super::mapped_states`]): sealed windows the run holds in that
     /// layout ([`StateColumn::from_sealed_views`]), or stored ones something
-    /// outside the run holds (charged nothing).
+    /// outside the run holds ([`StateColumn::from_views`], charged nothing).
     Mapped(MappedSketches),
 }
 
@@ -64,6 +68,9 @@ pub(crate) enum ExactRecords {
     Counter(Optional<IncreaseAccumulator>),
     /// irate: the last two samples.
     LastTwoSamples(Box<[LastTwoSamples]>),
+    /// Records of any exact kind in their view layout, in bytes something
+    /// outside the run holds ([`StateColumn::from_views`]).
+    Mapped(MappedRecords),
 }
 
 /// An irate record: the last two samples, `(time, value)`, the newer second.
@@ -184,6 +191,7 @@ impl ExactRecords {
             Self::Max(records) => ScalarState::Max(records.get(index)),
             Self::Counter(records) => ScalarState::Counter(records.get(index)),
             Self::LastTwoSamples(records) => ScalarState::LastTwoSamples(records[index]),
+            Self::Mapped(records) => records.get(index),
         }
     }
 
@@ -195,6 +203,7 @@ impl ExactRecords {
             Self::Min(records) | Self::Max(records) => records.values.len(),
             Self::Counter(records) => records.values.len(),
             Self::LastTwoSamples(records) => records.len(),
+            Self::Mapped(records) => records.len(),
         }
     }
 
@@ -206,6 +215,8 @@ impl ExactRecords {
             Self::Min(records) | Self::Max(records) => records.memory_bytes(),
             Self::Counter(records) => records.memory_bytes(),
             Self::LastTwoSamples(records) => std::mem::size_of_val(&**records),
+            // Held outside the run; `StateColumn::from_views` sizes them.
+            Self::Mapped(_) => 0,
         }
     }
 }
@@ -294,6 +305,47 @@ impl StateColumn {
         ))
     }
 
+    /// The column of `family` states a runtime stored as view bytes
+    /// ([`Self::view_bytes`]) and hands back over bytes it holds: state `i`
+    /// at `bytes[offsets[i]..offsets[i + 1]]`, read where it lies (a buffer
+    /// over a mapped file stays mapped). A sketch view must start 8-byte
+    /// aligned and may end in zero padding; exact records lie back to back
+    /// from the start of `bytes` (`offsets[i]` is `i` times the record's
+    /// size). Each state is checked here, once. The run is not charged for
+    /// the states (they are held outside it); their stored size is the
+    /// bytes the offsets span plus the offsets. Fails with
+    /// [`crate::Error::Invalid`] for a family with no view layout
+    /// ([`super::family_has_view_layout`]), offsets out of order or past
+    /// `bytes`, or a state that is not a view of `family`.
+    pub fn from_views(
+        family: FieldDataType,
+        bytes: arrow::buffer::Buffer,
+        offsets: arrow::buffer::ScalarBuffer<u32>,
+    ) -> Result<Self, crate::Error> {
+        let stored_bytes = match (offsets.first(), offsets.last()) {
+            (Some(&first), Some(&last)) => last.saturating_sub(first) as usize,
+            _ => 0,
+        } + std::mem::size_of_val(&*offsets);
+        let storage = match ViewLayout::of(&family) {
+            Some(ViewLayout::Sketch(kernel)) => {
+                StateStorage::Mapped(MappedSketches::over(kernel, bytes, offsets)?)
+            }
+            Some(ViewLayout::Record(kind)) => {
+                // The family's parameters must be those of its kind.
+                ExactAccumulator::new(family.clone(), false).map_err(crate::Error::Invalid)?;
+                StateStorage::Exact(ExactRecords::Mapped(MappedRecords::over(
+                    kind, bytes, offsets,
+                )?))
+            }
+            None => {
+                return Err(crate::Error::Invalid(format!(
+                    "{family:?} has no view layout"
+                )))
+            }
+        };
+        Ok(Self::mapped_column(family, storage, stored_bytes))
+    }
+
     /// The column of view-layout `storage` the run holds, charged
     /// `state_memory_bytes`.
     pub(crate) fn stored_views(
@@ -310,12 +362,17 @@ impl StateColumn {
         }
     }
 
-    /// The column of mapped `storage`: held outside any run, charged nothing.
-    pub(crate) fn mapped_column(family: FieldDataType, storage: StateStorage) -> Self {
+    /// The column of mapped `storage`: held outside any run, so charged
+    /// nothing, with `state_memory_bytes` its stored size.
+    pub(crate) fn mapped_column(
+        family: FieldDataType,
+        storage: StateStorage,
+        state_memory_bytes: usize,
+    ) -> Self {
         Self {
             family,
             storage,
-            state_memory_bytes: 0,
+            state_memory_bytes,
             held_outside_run: AtomicBool::new(true),
             objects_held_outside_run: None,
         }
@@ -337,6 +394,36 @@ impl StateColumn {
             StateStorage::Objects(states) => states.len(),
             StateStorage::Exact(states) => states.len(),
             StateStorage::Mapped(states) => states.len(),
+        }
+    }
+
+    /// State `index` in its view layout, the bytes [`Self::from_views`]
+    /// reads back: a sketch's `asap_sketchlib` view (read back, it must
+    /// start at an 8-byte-aligned address), or an exact state's fixed
+    /// record. Borrowed where the column already holds it in that layout,
+    /// else written. `None` for a family with no view layout
+    /// ([`super::family_has_view_layout`]) or a keyed exact state.
+    pub fn view_bytes(&self, index: usize) -> Option<Cow<'_, [u8]>> {
+        match &self.storage {
+            StateStorage::Mapped(sketches) => Some(Cow::Borrowed(sketches.state_bytes(index))),
+            StateStorage::Exact(ExactRecords::Mapped(records)) => {
+                Some(Cow::Borrowed(records.record_bytes(index)))
+            }
+            StateStorage::Exact(records) => {
+                Some(Cow::Owned(exact_record_bytes(&records.get(index))))
+            }
+            StateStorage::Objects(states) => {
+                let state = states[index].as_ref();
+                match ViewLayout::of(&self.family)? {
+                    ViewLayout::Sketch(kernel) => state_view_bytes(kernel, state),
+                    ViewLayout::Record(_) => state
+                        .as_any()
+                        .downcast_ref::<ExactAccumulator>()?
+                        .scalar()
+                        .map(exact_record_bytes),
+                }
+                .map(Cow::Owned)
+            }
         }
     }
 
