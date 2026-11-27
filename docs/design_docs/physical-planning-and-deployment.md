@@ -574,7 +574,9 @@ chain and 60-second windows merged from it); their keys differ in
 `logical_properties` and in `window`. Equivalent implementations in one
 memo group with equal θ share a key:
 `SummaryMerge(TimeRange(5m, Chain[1m]))` and
-`SummaryMerge(TimeRange(5m, Chain[5m]))` hold one state. Views that differ
+`SummaryMerge(TimeRange(5m, Chain[5m]))` hold one state. This relies on the
+planner's rule that a chain serves only readers evaluated on its grid (a
+multiple of its width), so both read the same interval. Views that differ
 only in refresh mode, retention or storage medium share a key too. Five
 views `SummaryAgg(TimeRange(1m, TimeShift(i·1m, Scan)))`, `i = 0..4`,
 share one key, and each minute's state is filed once under it and its
@@ -635,7 +637,7 @@ pub struct MaterializedViewRequest<'a> {
 
 | | `read_raw_data` | `read_materialized_view` |
 | --- | --- | --- |
-| Keyed by | `Source` | `MaterializedView` (its `view_state_key` and selection; in one installed plan, `(plan_id, node_id)`) |
+| Keyed by | `Source` | `MaterializedView` (its `view_state_key` and concrete selection; in one installed plan, `(plan_id, node_id)`) |
 | Time range | optional, a hint | always given, exact |
 | Predicates | a hint | none |
 | Executor re-filters | yes | no |
@@ -643,7 +645,7 @@ pub struct MaterializedViewRequest<'a> {
 
 - A **time series** is a table `(ts, value, *labels)`, as `Source::TimeSeries` declares.
 - A **SQL table** is a table with a time index.
-- A **materialized view** read returns exactly the states whose intervals tile the requested range. The store never counts an observation twice, never returns the state of another `view_state_key` or selection, and never treats missing state as empty; it returns an error instead.
+- A **materialized view** read returns exactly the states whose intervals tile the requested range. The store never counts an observation twice, never returns the state of another `view_state_key` or concrete selection, and never treats missing state as empty; it returns an error instead.
 
 Only the definition side of the deployment's summary store crosses the
 interface (the view's `view_state_key`, coverage and schema). Instances (their interval, group
@@ -849,7 +851,7 @@ operator/runtime fixtures:
 | --- | --- |
 | `kll_tumbling_window_execution::five_tumbling_windows_roundtrip_and_shared_merge_runs_once` | One-minute tumbling window refreshes from raw data → five materialized view slots → shared native merge → p50/p99; counts every sample once, checks adjacent aligned windows and instruments one merge start per run |
 | `kll_tumbling_window_execution::a_store_keyed_by_view_state_key_and_time_range_answers_the_tumbling_windows` | A store that finds states only by `(view_state_key, time range)` answers the five-tumbling-window query: the tumbling windows share one key and request the five ranges that tile the window; with `k = 400` views over `k = 200` states, the read fails instead of answering (`…_misses_states_of_another_sketch_parameter`) |
-| `view_state_key::*` | θ-only and view-node-width-only differences give different keys; refresh, retention and medium do not; equivalent merges over 1-minute and 5-minute chains share a key; the three planned views of one coverage in `chains-10m-5m-3m-10s` get distinct keys; a view keeps its key across two workloads; the key is pinned and round-trips through JSON |
+| `view_state_key::*` (and `kll_tumbling_window_execution::views_differing_only_in_sketch_parameters_have_different_view_state_keys` for θ) | view-node-width-only differences give different keys; refresh, retention and medium do not; equivalent merges over 1-minute and 5-minute chains share a key; the three planned views of one coverage in `chains-10m-5m-3m-10s` get distinct keys; a view keeps its key across two workloads; the key is pinned and round-trips through JSON |
 | `runtime_install::tumbling_windows_of_one_refresh_window_read_each_raw_window_once` | A KLL chain and a DDSketch chain of 10 s tumbling windows over one `Scan` are one refresh group: each tumbling window window is read from raw data once, in one ingestion run that builds both tumbling windows; each state equals that of a run of its view alone, and both queries answer as the query-time reference |
 | `kll_tumbling_window_execution::tumbling_windows_reject_parameters_schema_and_missing_binding` | Parameter relabelling, incompatible schemas and missing views fail explicitly |
 | `precompute_candidates::grouped_rate_can_be_materialized_before_or_after_grouped_sum` | Stored counter state and stored Sum state answer like query time; summing counters before Rate does not |

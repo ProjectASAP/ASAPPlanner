@@ -52,7 +52,7 @@ impl CandidateForMemoGroup {
         let input_requirements = vec![LogicalRequirements::default(); operator.children().len()];
         Self {
             expression: CandidateExpression { operator },
-            logical_properties: LogicalProperties { parameters },
+            logical_properties: LogicalProperties::of_parameters(parameters),
             input_requirements,
             fused_groups,
             origin,

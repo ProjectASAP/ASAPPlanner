@@ -2,12 +2,14 @@
 //! ([`ViewStateKey`]): logical-layer information carried on the view's
 //! physical node, like its coverage.
 
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
 
 use crate::ir::operator::asap::ASAPOp;
 use crate::ir::operator::node::Operator;
 use crate::ir::operator::non_asap::NonASAPOp;
-use crate::plan::physical_asap_dag::{PhysicalASAPDAGNode, PhysicalASAPNodeId};
+use crate::plan::physical_asap_dag::{PhysicalASAPDAGNode, PhysicalASAPNodeId, ViewCoverage};
 use crate::stages::LogicalProperties;
 
 /// What a view's stored state is, in any plan and process, from the view
@@ -39,18 +41,17 @@ pub struct ViewStateKey {
 }
 
 impl ViewStateKey {
-    /// The key of the view at `node`, whose coverage's definition is
-    /// `definition_id`, from the node alone: the windows its rows are
-    /// ([`ViewWindow::of_node`]; `node_of` looks up the nodes it selects
-    /// windows from) and its θ.
-    pub(super) fn of_view<'a>(
-        node: &'a PhysicalASAPDAGNode,
-        definition_id: &str,
-        node_of: impl Fn(PhysicalASAPNodeId) -> &'a PhysicalASAPDAGNode,
+    /// The key of the view at `node` with `coverage`, from the node alone:
+    /// its definition, the windows its rows are ([`ViewWindow::of_node`]
+    /// over `nodes`, the DAG's nodes by id) and its θ.
+    pub(super) fn of_view(
+        node: &PhysicalASAPDAGNode,
+        coverage: &ViewCoverage,
+        nodes: &HashMap<PhysicalASAPNodeId, &PhysicalASAPDAGNode>,
     ) -> Self {
         ViewStateKey {
-            definition_id: definition_id.to_owned(),
-            window: ViewWindow::of_node(node, &node_of),
+            definition_id: coverage.definition_id().to_owned(),
+            window: ViewWindow::of_node(node, nodes),
             logical_properties: LogicalProperties::of_parameters(node.parameters.clone()),
         }
     }
@@ -79,9 +80,9 @@ impl ViewWindow {
     ///
     /// Example: `TimeRange(5m, Chain[1m])` is `Tumbling { width_ms: 60000 }`;
     /// `SummaryMerge(TimeRange(5m, Chain[1m]))` is `None`.
-    fn of_node<'a>(
-        node: &'a PhysicalASAPDAGNode,
-        node_of: &impl Fn(PhysicalASAPNodeId) -> &'a PhysicalASAPDAGNode,
+    fn of_node(
+        node: &PhysicalASAPDAGNode,
+        nodes: &HashMap<PhysicalASAPNodeId, &PhysicalASAPDAGNode>,
     ) -> Option<Self> {
         match &node.payload {
             Operator::ASAP(
@@ -98,16 +99,21 @@ impl ViewWindow {
             }),
             Operator::NonASAP(
                 NonASAPOp::TimeRange { child, .. } | NonASAPOp::TimeShift { child, .. },
-            ) => Self::of_node(node_of(*child), node_of),
+            ) => Self::of_node(nodes[child], nodes),
             Operator::NonASAP(NonASAPOp::TimeRangeCover { levels, .. }) => {
                 let widths_ms = levels
                     .iter()
-                    .map(|&level| match Self::of_node(node_of(level), node_of) {
+                    .map(|level| match Self::of_node(nodes[level], nodes) {
                         Some(ViewWindow::Tumbling { width_ms }) => Some(width_ms),
                         _ => None,
                     })
-                    .collect::<Option<Vec<u64>>>()?;
-                Some(ViewWindow::TumblingLevels { widths_ms })
+                    .collect::<Option<Vec<u64>>>();
+                // Every level of a cover is a chain of one build: a planner bug
+                // otherwise, which a key without the window would hide.
+                debug_assert!(widths_ms.is_some(), "a TimeRangeCover level is no chain");
+                Some(ViewWindow::TumblingLevels {
+                    widths_ms: widths_ms?,
+                })
             }
             _ => None,
         }

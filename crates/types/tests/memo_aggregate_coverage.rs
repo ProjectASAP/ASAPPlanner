@@ -684,42 +684,6 @@ fn a_cover_under_an_offset_covers_its_range_that_much_earlier() {
     assert_eq!(coverage(&memo, an_hour_back), coverage(&memo, direct));
 }
 
-/// `rate(latency[5m])` computed as `FinalizeExactAccumulator { Rate }` over
-/// an exact counter state and as `Aggregate(Rate)` over the same rows has
-/// one view coverage (one `definition_id`, one selection), so a view of
-/// either form gets one view state key.
-#[test]
-fn a_finalized_counter_rate_has_the_view_coverage_of_the_rate() {
-    use asap_types::summary_type::{CounterReadout, ExactParams};
-    let mut memo = Memo::new(&DataWorkload::default());
-    let series = memo.find_or_add_group(latency(vec![])).unwrap();
-    let window = memo
-        .find_or_add_group(range(5 * MINUTE_MS, series))
-        .unwrap();
-    let by_aggregate = memo
-        .find_or_add_group(asap_types::test_support::memo_fixtures::aggregate(
-            Reduction::PerEntity,
-            AggIntent::Rate,
-            window,
-        ))
-        .unwrap();
-    let counter = memo
-        .find_or_add_group(state(
-            FieldDataType::ExactAggregate(ExactKind::Counter, ExactParams::Counter),
-            window,
-        ))
-        .unwrap();
-    let by_finalize = memo
-        .find_or_add_group(Operator::ASAP(ASAPOp::FinalizeExactAccumulator {
-            child: counter,
-            counter_readout: Some(CounterReadout::Rate),
-        }))
-        .unwrap();
-    let expected = view_coverage(&memo, by_aggregate).expect("Aggregate(Rate) has a coverage");
-    let finalized = view_coverage(&memo, by_finalize).expect("the finalized rate has a coverage");
-    assert_eq!(finalized, expected);
-}
-
 /// Known limitation (#1494): `sum(rate(latency{job="api"}[5m]))` from the
 /// scan (the matcher below `rate`, never lifted) and from
 /// `sum by (job) (rate(latency[5m]))` filtered to `job = "api"` (the

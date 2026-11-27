@@ -288,8 +288,7 @@ impl<'a> ViewIndex<'a> {
                     reason: "the plan node carries no view_coverage".into(),
                 }
             })?;
-            let view_state_key =
-                ViewStateKey::of_view(node, coverage.definition_id(), |id| self.nodes[&id]);
+            let view_state_key = ViewStateKey::of_view(node, &coverage, &self.nodes);
             derived.push(MaterializedView {
                 node_id: id,
                 plan_id: plan_id.clone(),

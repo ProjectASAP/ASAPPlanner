@@ -34,7 +34,7 @@ pub trait DataStore {
     /// state)`; any other view's group columns and one state column). Exact: the executor never re-filters them,
     /// so the store never counts an observation twice, never returns the
     /// state of another view state key (`MaterializedView::view_state_key`)
-    /// or selection, and never treats missing state as empty; it returns
+    /// or concrete selection, and never treats missing state as empty; it returns
     /// an error instead. The states are the store's: a run is not charged
     /// for them.
     fn read_materialized_view(

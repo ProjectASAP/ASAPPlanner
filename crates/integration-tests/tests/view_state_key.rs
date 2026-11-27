@@ -96,23 +96,30 @@ fn view_at(dag: &mut PhysicalASAPDAG, id: usize) -> MaterializedView {
     views_at(dag, &[id as u64]).unwrap().remove(0)
 }
 
-/// The merge of `chain_dag(width_ms)` as a view refreshed on first read,
-/// over its chain kept as a view refreshed at ingestion.
-fn merge_view(width_ms: u64) -> MaterializedView {
-    let (mut dag, chain, merge) = chain_dag(width_ms);
-    let node = node_mut(&mut dag, merge);
+/// The node of `chain_dag(width_ms)` whose operator `is_view` picks, as a
+/// view refreshed on first read (θ `k = 200`, the coverage these tests
+/// share), over its chain kept as a view refreshed at ingestion.
+fn view_over_chain(width_ms: u64, is_view: fn(&Operator<usize>) -> bool) -> MaterializedView {
+    let (mut dag, chain, _) = chain_dag(width_ms);
+    let view = dag.nodes.iter().find(|node| is_view(&node.payload)).unwrap().id;
+    let node = node_mut(&mut dag, view);
     node.lifetime = Lifetime::AcrossEvaluations(StorageMedium::Memory);
     node.retention_ms = Some(5 * MINUTE_MS);
+    node.parameters = Some(SketchParams::Kll { k: 200 });
     node.view_coverage = Some(ViewCoverage::new("kll of t.value".into(), vec![]));
-    node_mut(&mut dag, chain).view_coverage = Some(ViewCoverage::new(
-        format!("kll of t.value in {width_ms} ms windows"),
-        vec![],
-    ));
-    views_at(&mut dag, &[chain as u64, merge as u64])
+    views_at(&mut dag, &[chain as u64, view as u64])
         .unwrap()
         .into_iter()
-        .find(|view| view.node_id == merge)
+        .find(|materialized| materialized.node_id == view)
         .unwrap()
+}
+
+fn is_merge(operator: &Operator<usize>) -> bool {
+    matches!(operator, Operator::ASAP(ASAPOp::SummaryMerge { .. }))
+}
+
+fn is_time_range(operator: &Operator<usize>) -> bool {
+    matches!(operator, Operator::NonASAP(NonASAPOp::TimeRange { .. }))
 }
 
 /// Chains of 1-minute and of 5-minute windows that differ in nothing else
@@ -128,43 +135,104 @@ fn chain_views_differing_only_in_window_width_have_different_view_state_keys() {
     assert_ne!(one_minute.view_state_key(), five_minutes.view_state_key());
 }
 
-/// The `TimeRange(5m)` over `chain_dag(width_ms)`'s chain as a view refreshed
-/// on first read, over its chain kept as a view refreshed at ingestion.
-fn range_view(width_ms: u64) -> MaterializedView {
-    let (mut dag, chain, _) = chain_dag(width_ms);
-    let range = dag
-        .nodes
-        .iter()
-        .find(|node| matches!(node.payload, Operator::NonASAP(NonASAPOp::TimeRange { .. })))
-        .unwrap()
-        .id;
-    let node = node_mut(&mut dag, range);
-    node.lifetime = Lifetime::AcrossEvaluations(StorageMedium::Memory);
-    node.retention_ms = Some(5 * MINUTE_MS);
-    node.parameters = Some(SketchParams::Kll { k: 200 });
-    node.view_coverage = Some(ViewCoverage::new("kll of t.value".into(), vec![]));
-    node_mut(&mut dag, chain).view_coverage = Some(ViewCoverage::new(
-        format!("kll of t.value in {width_ms} ms windows"),
-        vec![],
-    ));
-    views_at(&mut dag, &[chain as u64, range as u64])
-        .unwrap()
-        .into_iter()
-        .find(|view| view.node_id == range)
-        .unwrap()
-}
-
 /// The last 5 minutes of a 1-minute chain are five window rows, of a
 /// 5-minute chain one: a `TimeRange` view over a chain keeps the chain's
 /// windows, so the two have different keys.
 #[test]
 fn time_range_views_over_chains_of_different_widths_have_different_view_state_keys() {
-    let over_one_minute = range_view(MINUTE_MS);
-    let over_five_minutes = range_view(5 * MINUTE_MS);
+    let over_one_minute = view_over_chain(MINUTE_MS, is_time_range);
+    let over_five_minutes = view_over_chain(5 * MINUTE_MS, is_time_range);
     assert_eq!(over_one_minute.coverage(), over_five_minutes.coverage());
     assert_ne!(
         over_one_minute.view_state_key(),
         over_five_minutes.view_state_key()
+    );
+}
+
+/// A `TimeRangeCover` of the last 10 minutes over a 5-minute and a 1-minute
+/// chain of one scan of `t`, as a view refreshed on first read (KLL
+/// `k = 200`), over its chains kept as views refreshed at ingestion.
+fn cover_view() -> MaterializedView {
+    let new = |operator| OperatorNode::new_shared(operator).unwrap();
+    let scan = new(Operator::NonASAP(NonASAPOp::Scan {
+        source: Source::Table {
+            table_ref: "t".into(),
+        },
+        predicates: vec![],
+        schema: Schema::with_time_index(
+            vec![
+                Field::plain("ts", DataType::Timestamp, false),
+                Field::plain("value", DataType::Float64, false),
+            ],
+            0,
+            vec![],
+        ),
+    }));
+    let chain = |width_ms: u64| {
+        new(Operator::ASAP(ASAPOp::SummaryTumblingWindowChain {
+            child: scan.clone(),
+            summary_type: FieldDataType::Sketch(SketchAlgorithm::Kll),
+            input: SummaryUpdate::column(ColumnRef::Named("value".into())),
+            reduction: Reduction::Reduce(GroupKeys::default()),
+            filter: None,
+            tumbling_window_width_ms: width_ms,
+        }))
+    };
+    let cover = new(Operator::NonASAP(NonASAPOp::TimeRangeCover {
+        range: std::time::Duration::from_millis(10 * MINUTE_MS),
+        offset_ms: 0,
+        levels: vec![chain(5 * MINUTE_MS), chain(MINUTE_MS)],
+    }));
+    let merge = new(Operator::ASAP(ASAPOp::SummaryMerge {
+        children: vec![cover],
+        group_by: None,
+    }));
+    let p50 = new(Operator::ASAP(ASAPOp::SummaryEstimate {
+        summary_input: merge,
+        query: SketchStatistic::Quantile { q: 0.5 },
+    }));
+    let mut dag = asap_types::test_support::forwarders::physical_asap_dag_at_query_time(&p50)
+        .unwrap();
+    set_build_parameters(&mut dag.nodes, Some(&SketchParams::Kll { k: 200 }));
+    let chains: Vec<u64> = dag
+        .nodes
+        .iter()
+        .filter(|node| {
+            matches!(
+                node.payload,
+                Operator::ASAP(ASAPOp::SummaryTumblingWindowChain { .. })
+            )
+        })
+        .map(|node| node.id as u64)
+        .collect();
+    let cover = dag
+        .nodes
+        .iter()
+        .find(|node| matches!(node.payload, Operator::NonASAP(NonASAPOp::TimeRangeCover { .. })))
+        .unwrap()
+        .id;
+    let node = node_mut(&mut dag, cover);
+    node.lifetime = Lifetime::AcrossEvaluations(StorageMedium::Memory);
+    node.retention_ms = Some(10 * MINUTE_MS);
+    node.parameters = Some(SketchParams::Kll { k: 200 });
+    node.view_coverage = Some(ViewCoverage::new("kll of t.value".into(), vec![]));
+    let mut ids = chains;
+    ids.push(cover as u64);
+    views_at(&mut dag, &ids)
+        .unwrap()
+        .into_iter()
+        .find(|view| view.node_id == cover)
+        .unwrap()
+}
+
+/// A `TimeRangeCover` view's rows are windows of each of its levels: its
+/// key's window lists the levels' widths, widest first.
+#[test]
+fn a_time_range_cover_view_keys_its_levels_widths() {
+    let view = cover_view();
+    assert_eq!(
+        serde_json::to_value(&view.view_state_key().window).unwrap(),
+        serde_json::json!({"tumbling_levels": {"widths_ms": [300000, 60000]}})
     );
 }
 
@@ -173,8 +241,8 @@ fn time_range_views_over_chains_of_different_widths_have_different_view_state_ke
 /// below the view says how the state is computed, not what it is.
 #[test]
 fn merges_of_one_range_over_chains_of_different_widths_share_a_view_state_key() {
-    let over_one_minute = merge_view(MINUTE_MS);
-    let over_five_minutes = merge_view(5 * MINUTE_MS);
+    let over_one_minute = view_over_chain(MINUTE_MS, is_merge);
+    let over_five_minutes = view_over_chain(5 * MINUTE_MS, is_merge);
     assert_eq!(over_one_minute.coverage(), over_five_minutes.coverage());
     assert_eq!(
         over_one_minute.view_state_key(),

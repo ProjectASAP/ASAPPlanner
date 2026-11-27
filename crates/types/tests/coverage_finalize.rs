@@ -58,6 +58,11 @@ fn a_finalized_rate_covers_what_the_rate_covers() {
     let finalized = add(&mut memo, finalize(counter, Some(CounterReadout::Rate)));
     assert!(coverage(&memo, rate).is_some());
     assert_eq!(coverage(&memo, finalized), coverage(&memo, rate));
+    // So a view of either form has one view coverage, and one view state key.
+    assert_eq!(
+        asap_types::plan::view_coverage(&memo, finalized),
+        asap_types::plan::view_coverage(&memo, rate)
+    );
 }
 
 /// Each exact kind's finalize covers what its aggregate over the same rows
