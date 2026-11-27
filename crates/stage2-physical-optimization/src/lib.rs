@@ -43,14 +43,15 @@ use candidate::{offered_physical_properties, OfferedPhysicalProperties};
 /// decision-tree prune rule removes ([`candidate`]; among them those one of
 /// the deployment's `exclusions` matches, `DeploymentCapabilities::exclusions`
 /// as the facade expanded them, e.g. every query-time scan when raw data is
-/// not retained), then those
-/// that cannot be built or that no query output can read ([`pruning`]). Not
-/// offered and not recorded: a value outside a dimension's declared value
-/// set (`AcrossEvaluations` on a candidate of a time-dependent group with
-/// no known grid), and, under `search_space_pruning`'s
-/// `one_evaluation_by_readers` (rule 5), `OneEvaluation` on a candidate at
-/// most one reader reads in an evaluation. Costs nothing, and cannot fail; alignment with each
-/// execution context is Stage 3's check (`PhysicalASAPMemoCandidates::delivers_on`).
+/// not retained), then those that cannot be built or that no query output
+/// can read ([`pruning`]). Not offered and not recorded: a value outside a
+/// dimension's declared value set (`AcrossEvaluations` on a candidate of a
+/// time-dependent group with no known grid), and, under
+/// `search_space_pruning`'s `one_evaluation_by_readers` (rule 5),
+/// `OneEvaluation` on a candidate at most one reader reads in an
+/// evaluation. Costs nothing, and cannot fail; alignment with each
+/// execution context is Stage 3's check
+/// (`PhysicalASAPMemoCandidates::delivers_on`).
 pub fn generate_physical_asap_memo_candidates(
     logical: &LogicalASAPMemoCandidates,
     data: &DataWorkload,

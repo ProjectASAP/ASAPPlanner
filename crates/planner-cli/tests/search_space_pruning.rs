@@ -404,9 +404,9 @@ fn logical_key(physical: &Value) -> CandidateKey {
     )
 }
 
-/// A single quantile: every candidate has one reader, so no physical
-/// candidate is kept for one evaluation; the plan costs the same as with
-/// the twins.
+/// A single quantile: a candidate one reader reads gets no
+/// `OneEvaluation` twin, there are fewer twins than with the rule off, and
+/// the plan costs the same.
 #[test]
 fn rule5_a_result_read_once_per_evaluation_gets_no_one_evaluation_twin() {
     let workload = promql(
