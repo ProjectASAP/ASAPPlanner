@@ -22,8 +22,9 @@ pub struct SearchSpacePruning {
     /// Read once, its `None` form does all the `OneEvaluation` one does at
     /// no more cost: the only `OneEvaluation` medium offered is memory,
     /// which holds at least what `None` holds while its one consumer runs;
-    /// retention, raw data on disk and kept results are charged alike to
-    /// both forms; and `None` delivers on every context. Readers are
+    /// retention and raw data on disk are charged alike to both forms, and
+    /// kept results to `OneEvaluation` only; and `None` delivers on every
+    /// context. Readers are
     /// counted per logical consumer: an optimal plan never selects two
     /// lifetimes of one consumer in one context.
     pub one_evaluation_by_readers: bool,

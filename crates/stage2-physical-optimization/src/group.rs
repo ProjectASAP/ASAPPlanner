@@ -3,7 +3,8 @@
 //! offered `AcrossEvaluations`. Each is computed once per group, over the
 //! candidates Pass 2 kept (an eliminated candidate reads nothing). Also,
 //! per candidate, whether it is offered `OneEvaluation` under search-space
-//! pruning rule 5.
+//! pruning rule 5, which counts every satisfied logical edge (an
+//! over-count, which only keeps more twins).
 
 use std::collections::{HashMap, HashSet};
 
