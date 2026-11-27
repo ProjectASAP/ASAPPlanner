@@ -255,7 +255,8 @@ fn the_assumed_ddsketch_range_is_named_only_when_the_bytes_use_it() {
 /// and the retained items. E.g. a 10 s tumbling window of a series sampled
 /// every 15 s sees one sample: 40 + 8 + 8 = 56 bytes, where an owned shrunk
 /// sketch holds 272 and an open one 872. A state still receiving values is
-/// charged as the owned sketch.
+/// charged as the open (unshrunk) owned sketch: 248 + 8 · 62 + 8 · 16 = 872
+/// bytes for that one sample.
 #[test]
 fn kll_state_bytes_grow_with_the_samples_it_sees() {
     let k = 269;
@@ -278,6 +279,7 @@ fn kll_state_bytes_grow_with_the_samples_it_sees() {
     let open =
         |rows_per_state| open_sketch_state_bytes(&SketchParams::Kll { k }, rows(rows_per_state));
     let view_bytes = |n: u32, seed: u64| library(n, seed).to_view_bytes().len() as u64;
+    let open_bytes = |n: u32, seed: u64| library(n, seed).memory_bytes() as u64;
     let shrunk_bytes = |n: u32| {
         let mut sketch = library(n, 1);
         sketch.shrink_to_fit();
@@ -285,28 +287,38 @@ fn kll_state_bytes_grow_with_the_samples_it_sees() {
     };
     assert_eq!(view_bytes(1, 1), 56);
     assert_eq!(shrunk_bytes(1), 272);
+    assert_eq!(open_bytes(1, 1), 872);
     // Up to `k` samples nothing compacts: sealed, the view holds every
-    // sample; open, the owned sketch its struct, two level boundaries and
-    // the samples (as shrunk).
+    // sample; open, the unshrunk sketch its struct, 62 level slots and a
+    // buffer doubling from 16 items.
     for n in [1, 4, 16, 17, 100, k] {
         assert_eq!(sealed(Some(u64::from(n))), view_bytes(n, 1), "{n} samples");
-        assert_eq!(open(Some(u64::from(n))), shrunk_bytes(n), "{n} samples");
+        assert_eq!(open(Some(u64::from(n))), open_bytes(n, 1), "{n} samples");
     }
-    // Past `k`, sealed: the most items the compaction schedule leaves over
-    // its seeds 1 to 16, the library's own coin; open: the grown buffer, at
-    // least what the shrunk sketch holds.
+    // Past `k`, the most the compaction schedule leaves over its seeds 1 to
+    // 16, the library's own coin: sealed, of the view's levels and items;
+    // open, of the buffer and of the compaction scratch.
     for n in [k + 1, 1_000, 5_000, 100_000] {
-        let most = (1..=16).map(|seed| view_bytes(n, seed)).max().unwrap();
-        assert_eq!(sealed(Some(u64::from(n))), most, "{n} samples");
-        assert!(shrunk_bytes(n) <= open(Some(u64::from(n))), "{n} samples");
+        let most = |bytes: &dyn Fn(u32, u64) -> u64| (1..=16).map(|seed| bytes(n, seed)).max();
+        assert_eq!(
+            sealed(Some(u64::from(n))),
+            most(&view_bytes).unwrap(),
+            "{n} samples"
+        );
+        // The buffer's and the scratch's most can come from two seeds:
+        // at least the most any one seed holds, within 1%.
+        let (open, most_open) = (open(Some(u64::from(n))), most(&open_bytes).unwrap());
+        assert!(
+            most_open <= open && open as f64 <= 1.01 * most_open as f64,
+            "{n} samples: {open} priced, {most_open} held"
+        );
     }
-    // 5,000 rows fill 6 levels: 7 boundaries.
-    assert_eq!(open(Some(5_000)), 248 + 8 * 7 + 8 * 1_206);
     // A state assumed to see no sample holds at least one; unknown
-    // samples fill every level to its capacity.
+    // samples fill every level to its capacity, and open, the buffer of
+    // all of them (1,206 items) and the scratch bound `2 (k - 1)`.
     assert_eq!(sealed(Some(0)), 56);
     assert_eq!(sealed(None), 40 + 4 * 62 + 8 * 1_206);
-    assert_eq!(open(None), 248 + 8 * 62 + 8 * 1_206);
+    assert_eq!(open(None), 248 + 8 * 62 + 8 * (1_206 + 2 * 268));
 }
 
 /// Plan selection prices each state the executor builds per group at
@@ -320,13 +332,14 @@ fn kll_state_bytes_grow_with_the_samples_it_sees() {
 /// the sketch's bytes plus the accumulator's own fields, named per
 /// family. It equals the priced bytes where `asap_sketchlib`'s estimate
 /// is exact (Count-Min, Count Sketch, HLL, KMV at `n` distinct items) and
-/// for KLL up to `k` rows. DDSketch is priced at what it is expected to
+/// for KLL up to `k` rows (priced open, unshrunk). DDSketch is priced at what it is expected to
 /// hold, within 1.5 times either way. For the heap sketches and UnivMon
 /// the price bounds it, by at most [`BYTES_AGREEMENT_FACTOR`] times once
 /// the state is full;
 /// UnivMon's price also bounds the bytes its sketch holds.
-/// KLL past `k` rows is priced at an open sketch's grown buffer, at least
-/// what the sealed (shrunk) sketch holds.
+/// KLL past `k` rows is priced at the most an open sketch's buffer and
+/// scratch grow to over 16 coin seeds; the executor's coin is unseeded, so
+/// it holds at most 1.25 times less than priced, and at most 5% more.
 ///
 /// HydraCms is left out: plan selection prices an independent Count-Min
 /// per group, the executor one shared grid, so the two agree only at
@@ -343,8 +356,8 @@ fn state_bytes_bound_the_executors_charge() {
     /// How the priced bytes relate to the sketch's.
     enum Priced {
         Exact,
-        /// Exact up to `k` rows (sealed); past them at most the price
-        /// (an open sketch's grown buffer).
+        /// Exact up to `k` rows (open); past them within 0.95 to 1.25
+        /// times the price (the coin is unseeded).
         Kll {
             k: u32,
         },
@@ -507,8 +520,12 @@ fn state_bytes_bound_the_executors_charge() {
                 }
             }
             // As the executor seals a window: a DDSketch into its view
-            // layout, any other sketch shrunk.
-            updater.shrink_to_fit();
+            // layout, any other sketch shrunk; a KLL or Count-Min
+            // accumulator is the owned sketch before it is sealed into its
+            // view, priced open, so a KLL stays unshrunk.
+            if !matches!(algorithm, A::KLL) {
+                updater.shrink_to_fit();
+            }
             let state = updater.into_accumulator();
             let charged = match params {
                 SketchParams::DDSketch { alpha } => {
@@ -516,8 +533,6 @@ fn state_bytes_bound_the_executors_charge() {
                 }
                 _ => state.approx_memory_bytes(),
             };
-            // A KLL or Count-Min accumulator is the owned sketch before it
-            // is sealed into its view: priced open.
             let price = match params {
                 SketchParams::Kll { .. } | SketchParams::Cms { .. } => open_sketch_state_bytes,
                 _ => sketch_state_bytes,
@@ -536,8 +551,11 @@ fn state_bytes_bound_the_executors_charge() {
             match priced_as {
                 Priced::Exact => assert_eq!(charged, priced, "{context}"),
                 Priced::Kll { k } if n <= *k => assert_eq!(charged, priced, "{context}"),
-                // Past `k` rows, the open buffer: at least the sealed sketch.
-                Priced::Kll { .. } => assert!(charged <= priced, "{context}, {charged} charged"),
+                // Past `k` rows, the open buffer and scratch over 16 seeds.
+                Priced::Kll { .. } => assert!(
+                    (0.95..=1.25).contains(&(priced as f64 / charged as f64)),
+                    "{context}, {charged} charged"
+                ),
                 // One value can be a zero, which no store holds.
                 Priced::WideMargin if n == 1 => assert!(charged <= priced, "{context}"),
                 Priced::WideMargin => assert!(
@@ -785,7 +803,7 @@ fn priced_bytes_agree_with_the_executor() {
         // As the executor seals a window, except a KLL past `k` rows. A
         // KLL or Count-Min accumulator is the owned sketch before it is
         // sealed into its view: priced open (past `k` rows, a KLL's open
-        // buffer, what a merge holds).
+        // buffer and compaction scratch).
         if !matches!(family, FieldDataType::Sketch(A::KLL)) {
             updater.shrink_to_fit();
         }
@@ -1119,8 +1137,8 @@ fn stored_ddsketch_states_are_priced_at_their_view_layout() {
 /// it is: its struct, and per store one 128-slot first block (1 KiB) plus
 /// an 8-byte count per bucket beyond the first, above the stored layout.
 /// A KLL and a Count-Min are also priced open as owned sketches, above
-/// their views (100 rows of KLL k = 200: 248 + 16 + 800 = 1,064 bytes
-/// owned, 40 + 8 + 800 = 848 as a view); every family with no view layout
+/// their views (100 rows of KLL k = 200: 248 + 8 · 62 + 8 · 128 = 1,768
+/// bytes open, 40 + 8 + 800 = 848 as a view); every family with no view layout
 /// is priced the same open or stored.
 #[test]
 fn open_ddsketch_states_hold_their_first_blocks() {
@@ -1138,7 +1156,7 @@ fn open_ddsketch_states_hold_their_first_blocks() {
         assert_eq!((open - struct_bytes) % 8, 0);
     }
     let kll = SketchParams::Kll { k: 200 };
-    assert_eq!(open_sketch_state_bytes(&kll, rows(true)), 1_064);
+    assert_eq!(open_sketch_state_bytes(&kll, rows(true)), 1_768);
     assert_eq!(sketch_state_bytes(&kll, rows(true)), 848);
     let cms = SketchParams::Cms {
         width: 64,

@@ -10,7 +10,7 @@ use asap_types::summary_type::{SketchAlgorithm, SketchParams};
 use asap_types::workload::ValueMagnitudeRange;
 
 mod kll;
-use kll::{kll_owned_bytes, kll_view_bytes};
+use kll::{kll_open_bytes, kll_view_bytes};
 
 /// Bytes of one output row: each column at [`column_bytes`].
 pub fn row_bytes(schema: &Schema) -> u64 {
@@ -256,15 +256,16 @@ impl StateInputRows {
 /// [`sketch_state_bytes`] of a sketch still receiving values (the current
 /// window of a chain, a query-time build before it is sealed, a merge
 /// target), held as an owned sketch: a DDSketch's stores as they grow
-/// ([`ddsketch_open_state_bytes`]), a KLL's growing buffer
-/// (`kll_owned_bytes`), a Count-Min's struct and counters; every family
+/// ([`ddsketch_open_state_bytes`]), an unshrunk KLL's level slots, growing
+/// buffer and compaction scratch (`kll_open_bytes`), a Count-Min's struct
+/// and counters; every family
 /// with no view layout as sealed.
 pub fn open_sketch_state_bytes(params: &SketchParams, input_rows: StateInputRows) -> u64 {
     match params {
         SketchParams::DDSketch { alpha } if *alpha > 0.0 && *alpha < 1.0 => {
             ddsketch_open_state_bytes(*alpha, input_rows)
         }
-        SketchParams::Kll { k } => kll_owned_bytes(*k, input_rows),
+        SketchParams::Kll { k } => kll_open_bytes(*k, input_rows),
         SketchParams::Cms { width, depth } => {
             asap_sketchlib::CountMinF64::theoretical_memory_bytes(*depth as usize, *width as usize)
                 as u64

@@ -10,20 +10,20 @@
       {
         "accepted_metric": "rank",
         "sketches": [
-          "KLL"
+          "Kll"
         ],
-        "summary": "accepted rank (KLL)"
+        "summary": "accepted rank (Kll)"
       },
       {
         "accepted_metric": "rank",
         "sketches": [
-          "KLL"
+          "Kll"
         ],
-        "summary": "accepted rank (KLL)"
+        "summary": "accepted rank (Kll)"
       }
     ],
     "cost": {
-      "cost_per_second": 2.26495532185e-8,
+      "cost_per_second": 2.26551624328e-8,
       "cpu_core_seconds_per_second": 0.00199766666667,
       "per_node": {
         "0": {
@@ -55,10 +55,10 @@
           "timing": "query_time"
         },
         "2": {
-          "cost_per_second": 9.52412691073e-9,
+          "cost_per_second": 9.52973612504e-9,
           "cost_source": "analytical",
           "cpu_core_seconds_per_second": 0.000846666666667,
-          "detail": "build KLL into 10000 states: 200000 rows x 84 ops, 200000 group visits; x 0.0167/s; holds 4320000 bytes for 50.800 ms",
+          "detail": "build Kll into 10000 states: 200000 rows x 84 ops, 200000 group visits; x 0.0167/s; holds 10080000 bytes for 50.800 ms",
           "ingest_cpu_core_seconds_per_second": 0.0,
           "multiplier": 1,
           "operator": "SummaryAgg",
@@ -127,7 +127,7 @@
       },
       "source": "analytical-cost-v2 (illustrative statistics)",
       "usage": {
-        "average_memory_bytes": 3657.601632,
+        "average_memory_bytes": 8534.401632,
         "cpu_ops_per_second": 1987000.0,
         "disk_bytes": 6400000,
         "latency_per_query": [
@@ -149,7 +149,7 @@
           }
         ],
         "peak_cpu_cores": 2,
-        "peak_memory_bytes": 4320128,
+        "peak_memory_bytes": 10080128,
         "precompute_load": -0.0,
         "recommended_configuration": {
           "ingest": {
@@ -277,7 +277,7 @@
               },
               {
                 "dtype": {
-                  "Sketch": "KLL"
+                  "Sketch": "Kll"
                 },
                 "name": "state",
                 "nullable": false
@@ -365,7 +365,7 @@
               },
               {
                 "dtype": {
-                  "Sketch": "KLL"
+                  "Sketch": "Kll"
                 },
                 "name": "state",
                 "nullable": false
@@ -593,7 +593,7 @@
               },
               {
                 "dtype": {
-                  "Sketch": "KLL"
+                  "Sketch": "Kll"
                 },
                 "name": "state",
                 "nullable": false
@@ -636,7 +636,7 @@
                 },
                 "reduction": "PerEntity",
                 "summary_type": {
-                  "Sketch": "KLL"
+                  "Sketch": "Kll"
                 }
               }
             }

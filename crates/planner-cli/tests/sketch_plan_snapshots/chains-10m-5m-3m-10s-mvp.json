@@ -82,8 +82,8 @@
       }
     ],
     "cost": {
-      "cost_per_second": 3.84144961567e-7,
-      "cpu_core_seconds_per_second": 0.03144629914,
+      "cost_per_second": 4.21393310534e-7,
+      "cpu_core_seconds_per_second": 0.033541623812,
       "per_node": {
         "0": {
           "cost_per_second": 3.14989416e-11,
@@ -100,10 +100,10 @@
           "timing": "ingestion_time"
         },
         "1": {
-          "cost_per_second": 1.28845168642e-8,
+          "cost_per_second": 1.9509573131e-8,
           "cost_source": "analytical",
           "cpu_core_seconds_per_second": 0.000262089333333,
-          "detail": "build Kll in tumbling windows of 300000 ms for 10000 groups: 667 rows x 84 ops, 667 group visits, 33.3 states emitted; x 1.0000/s; keeps 8640000 bytes",
+          "detail": "build Kll in tumbling windows of 300000 ms for 10000 groups: 667 rows x 84 ops, 667 group visits, 33.3 states emitted; x 1.0000/s; keeps 14400000 bytes",
           "ingest_cpu_core_seconds_per_second": 0.000178756,
           "multiplier": 1,
           "operator": "SummaryTumblingWindowChain",
@@ -114,10 +114,10 @@
           "timing": "ingestion_time"
         },
         "10": {
-          "cost_per_second": 4.65905584606e-8,
+          "cost_per_second": 5.34916587385e-8,
           "cost_source": "analytical",
           "cpu_core_seconds_per_second": 0.002678756,
-          "detail": "build Kll in tumbling windows of 10000 ms for 10000 groups: 667 rows x 84 ops, 667 group visits, 1000.0 states emitted; x 1.0000/s; keeps 14320000 bytes",
+          "detail": "build Kll in tumbling windows of 10000 ms for 10000 groups: 667 rows x 84 ops, 667 group visits, 1000.0 states emitted; x 1.0000/s; keeps 20320000 bytes",
           "ingest_cpu_core_seconds_per_second": 0.000178756,
           "multiplier": 1,
           "operator": "SummaryTumblingWindowChain",
@@ -156,29 +156,29 @@
           "timing": "query_time"
         },
         "13": {
-          "cost_per_second": 2.68104820753e-7,
+          "cost_per_second": 2.86002171012e-7,
           "cost_source": "analytical",
-          "cpu_core_seconds_per_second": 0.02383528404,
-          "detail": "merge 71667 states into 10000; x 0.1000/s; holds 3680000 bytes for 238.353 ms",
+          "cpu_core_seconds_per_second": 0.025413104712,
+          "detail": "merge 71667 states into 10000; x 0.1000/s; holds 8800000 bytes for 254.131 ms",
           "ingest_cpu_core_seconds_per_second": 0.0,
           "multiplier": 1,
           "operator": "SummaryMerge",
           "priced_outside_measured_scale": false,
-          "query_ms_per_step": 238.3528404,
+          "query_ms_per_step": 254.13104712,
           "refresh_cpu_ms_per_window": 0.0,
           "refresh_wall_ms_per_window": 0.0,
           "timing": "query_time"
         },
         "14": {
-          "cost_per_second": 3.1753056e-8,
+          "cost_per_second": 3.69342912e-8,
           "cost_source": "analytical",
-          "cpu_core_seconds_per_second": 0.002824,
+          "cpu_core_seconds_per_second": 0.0032848,
           "detail": "estimate 10000 groups x 1; x 0.1000/s",
           "ingest_cpu_core_seconds_per_second": 0.0,
           "multiplier": 1,
           "operator": "SummaryEstimate",
           "priced_outside_measured_scale": false,
-          "query_ms_per_step": 28.24,
+          "query_ms_per_step": 32.848,
           "refresh_cpu_ms_per_window": 0.0,
           "refresh_wall_ms_per_window": 0.0,
           "timing": "query_time"
@@ -212,10 +212,10 @@
           "timing": "query_time"
         },
         "3": {
-          "cost_per_second": 4.12462189047e-10,
+          "cost_per_second": 4.12705107777e-10,
           "cost_source": "analytical",
           "cpu_core_seconds_per_second": 0.0000366666666667,
-          "detail": "merge 10000 states into 10000; x 0.0033/s; holds 4320000 bytes for 11.000 ms",
+          "detail": "merge 10000 states into 10000; x 0.0033/s; holds 10080000 bytes for 11.000 ms",
           "ingest_cpu_core_seconds_per_second": 0.0,
           "multiplier": 1,
           "operator": "SummaryMerge",
@@ -226,15 +226,15 @@
           "timing": "query_time"
         },
         "4": {
-          "cost_per_second": 1.08002368e-9,
+          "cost_per_second": 1.27432e-9,
           "cost_source": "analytical",
-          "cpu_core_seconds_per_second": 0.0000960533333333,
+          "cpu_core_seconds_per_second": 0.000113333333333,
           "detail": "estimate 10000 groups x 1; x 0.0033/s",
           "ingest_cpu_core_seconds_per_second": 0.0,
           "multiplier": 1,
           "operator": "SummaryEstimate",
           "priced_outside_measured_scale": false,
-          "query_ms_per_step": 28.816,
+          "query_ms_per_step": 34.0,
           "refresh_cpu_ms_per_window": 0.0,
           "refresh_wall_ms_per_window": 0.0,
           "timing": "query_time"
@@ -268,29 +268,29 @@
           "timing": "query_time"
         },
         "7": {
-          "cost_per_second": 8.01201617252e-9,
+          "cost_per_second": 8.23440485742e-9,
           "cost_source": "analytical",
-          "cpu_core_seconds_per_second": 0.000712128,
-          "detail": "merge 20000 states into 10000; x 0.0033/s; holds 5920000 bytes for 213.638 ms",
+          "cpu_core_seconds_per_second": 0.000731392,
+          "detail": "merge 20000 states into 10000; x 0.0033/s; holds 12640000 bytes for 219.418 ms",
           "ingest_cpu_core_seconds_per_second": 0.0,
           "multiplier": 1,
           "operator": "SummaryMerge",
           "priced_outside_measured_scale": false,
-          "query_ms_per_step": 213.6384,
+          "query_ms_per_step": 219.4176,
           "refresh_cpu_ms_per_window": 0.0,
           "refresh_wall_ms_per_window": 0.0,
           "timing": "query_time"
         },
         "8": {
-          "cost_per_second": 1.13399488e-9,
+          "cost_per_second": 1.36067392e-9,
           "cost_source": "analytical",
-          "cpu_core_seconds_per_second": 0.000100853333333,
+          "cpu_core_seconds_per_second": 0.000121013333333,
           "detail": "estimate 10000 groups x 1; x 0.0033/s",
           "ingest_cpu_core_seconds_per_second": 0.0,
           "multiplier": 1,
           "operator": "SummaryEstimate",
           "priced_outside_measured_scale": false,
-          "query_ms_per_step": 30.256,
+          "query_ms_per_step": 36.304,
           "refresh_cpu_ms_per_window": 0.0,
           "refresh_wall_ms_per_window": 0.0,
           "timing": "query_time"
@@ -312,37 +312,37 @@
       },
       "source": "analytical-cost-v2 (illustrative statistics)",
       "usage": {
-        "average_memory_bytes": 26572088.049,
-        "cpu_ops_per_second": 31444164.74,
+        "average_memory_bytes": 38473249.7223,
+        "cpu_ops_per_second": 33539489.412,
         "disk_bytes": 0,
         "latency_per_query": [
           {
             "allowed_lateness_ms": 0.0,
             "evaluations_per_second": 0.00333333333333,
-            "latency_ms": 343.1244,
+            "latency_ms": 354.9516,
             "precompute_execution_ms": 25.0,
             "precompute_queueing_ms": 74.0,
-            "query_execution_ms": 244.1244
+            "query_execution_ms": 255.9516
           },
           {
             "allowed_lateness_ms": 0.0,
             "evaluations_per_second": 0.00333333333333,
-            "latency_ms": 138.936,
+            "latency_ms": 144.12,
             "precompute_execution_ms": 25.0,
             "precompute_queueing_ms": 74.0,
-            "query_execution_ms": 39.936
+            "query_execution_ms": 45.12
           },
           {
             "allowed_lateness_ms": 0.0,
             "evaluations_per_second": 0.1,
-            "latency_ms": 366.3911774,
+            "latency_ms": 386.77738412,
             "precompute_execution_ms": 25.0,
             "precompute_queueing_ms": 74.0,
-            "query_execution_ms": 267.3911774
+            "query_execution_ms": 287.77738412
           }
         ],
         "peak_cpu_cores": 4,
-        "peak_memory_bytes": 40400632,
+        "peak_memory_bytes": 69760632,
         "precompute_load": 0.0034,
         "recommended_configuration": {
           "ingest": {
@@ -354,7 +354,7 @@
             "recommended_threads": 1
           },
           "query": {
-            "predicted_busy_thread_seconds_per_second": 0.02768598574,
+            "predicted_busy_thread_seconds_per_second": 0.029781310412,
             "recommended_threads": 1
           }
         },
