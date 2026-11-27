@@ -12,11 +12,15 @@ use super::non_asap::NonASAPOp;
 use super::tumbling_window_chain::is_time_indexed_state;
 use crate::ir::operator::arguments::Reduction;
 use crate::ir::operator::maintained_population::{MaintainedPopulation, PopulationStatistic};
+use crate::ir::scalar::column_resolution::resolve_column_ref;
+use crate::ir::scalar::ColumnRef;
 use crate::ir::schema::aggregate_schema::{aggregate_output, OutputColumnSource};
 use crate::ir::schema::{ColumnId, DataType, Field, FieldDataType, Schema};
 use crate::ir::SchemaDerivationError;
 use crate::summary_type::SummaryTypeCapability;
-use crate::summary_type::{CounterReadout, SketchStatistic, SummaryUpdate};
+use crate::summary_type::{
+    CounterReadout, ExactKind, SketchStatistic, SummaryInputExpr, SummaryUpdate,
+};
 
 /// Why an ASAP operator cannot be used yet.
 pub const UNIMPLEMENTED_ASAP_OP: &str =
@@ -879,65 +883,101 @@ fn chain_schema(
     Ok(schema)
 }
 
+/// The exact `Aggregate` that finalizing the state `build` builds (a
+/// `SummaryAgg` or `SummaryTumblingWindowChain` of an exact summary type)
+/// with `counter_readout` computes, over the build's input: the build's
+/// reduction, one unnamed measure (the kind's [`ExactKind::measure`] of the
+/// column the build reads, `None` for the sample value, as the front ends
+/// write it), filtered by the build's filter. For a chain it is the
+/// aggregate of one window, whose value column a finalize outputs; it
+/// ignores the windows. `Ok(None)` for any other build, and for a build
+/// whose input is no column unless it counts rows (a count reads no
+/// column). Errors when the build's column does not resolve, or when
+/// `counter_readout` does not fit the kind (a counter needs one, any other
+/// kind takes none). Example: finalizing `SummaryAgg[Counter](m[5m])` with
+/// `CounterReadout::Rate` computes `Aggregate(Rate)` over `m[5m]`.
+///
+/// [`ExactKind::measure`]: crate::summary_type::ExactKind::measure
+pub(crate) fn finalized_aggregate<J: OperatorInput>(
+    build: &ASAPOp<J>,
+    counter_readout: Option<CounterReadout>,
+) -> Result<Option<NonASAPOp<J>>, SchemaDerivationError> {
+    let (ASAPOp::SummaryAgg {
+        child: source,
+        summary_type: FieldDataType::ExactAggregate(kind, _),
+        input,
+        reduction,
+        filter,
+    }
+    | ASAPOp::SummaryTumblingWindowChain {
+        child: source,
+        summary_type: FieldDataType::ExactAggregate(kind, _),
+        input,
+        reduction,
+        filter,
+        ..
+    }) = build
+    else {
+        return Ok(None);
+    };
+    let column = match &input.weight {
+        SummaryInputExpr::Column(ColumnRef::SampleValue) => None,
+        SummaryInputExpr::Column(col) => Some(
+            resolve_column_ref(col, source.schema())
+                .map_err(|e| SchemaDerivationError::InvalidScalarSignature(e.to_string()))?,
+        ),
+        _ if *kind == ExactKind::Count => None,
+        _ => return Ok(None),
+    };
+    let measure = kind.measure(column, counter_readout).ok_or_else(|| {
+        SchemaDerivationError::InvalidScalarSignature(
+            "an exact state's finalize reads a counter readout only from a counter".into(),
+        )
+    })?;
+    Ok(Some(NonASAPOp::Aggregate {
+        child: source.clone(),
+        reduction: reduction.clone(),
+        measures: vec![measure],
+        output_names: vec![String::new()],
+        // A filtered SUM/MIN/MAX is NULL for a group without a matching
+        // row. Empty when unfiltered, as the front ends write it.
+        filters: filter.iter().cloned().map(Some).collect(),
+        having: None,
+    }))
+}
+
 /// The schema `FinalizeExactAccumulator` derives over state of
 /// `state_schema` that `build` (the state's `SummaryAgg`, if any) builds:
-/// each exact aggregate replaced by the value it finalizes to, a counter
-/// state read as `counter_readout`.
+/// each exact aggregate replaced by the value it finalizes to
+/// ([`finalized_aggregate`]), a counter state read as `counter_readout`.
 fn finalized_schema<J: OperatorInput>(
     build: Option<&ASAPOp<J>>,
     state_schema: &Schema,
     counter_readout: Option<CounterReadout>,
 ) -> Result<Schema, SchemaDerivationError> {
-    let value_result = if let Some(
-        ASAPOp::SummaryAgg {
-            child: source,
-            summary_type: FieldDataType::ExactAggregate(kind, _),
-            input,
-            reduction,
-            filter,
-            ..
+    let aggregate = build
+        .map(|build| finalized_aggregate(build, counter_readout))
+        .transpose()?
+        .flatten();
+    let value_result = match aggregate {
+        Some(aggregate @ NonASAPOp::Aggregate { .. }) => {
+            let per_entity = matches!(
+                aggregate,
+                NonASAPOp::Aggregate {
+                    reduction: Reduction::PerEntity,
+                    ..
+                }
+            );
+            let aggregate_schema = aggregate.output_schema()?;
+            if per_entity {
+                aggregate_schema
+                    .column_id("value")
+                    .and_then(|i| aggregate_schema.fields.get(i).cloned())
+            } else {
+                aggregate_schema.fields.last().cloned()
+            }
         }
-        | ASAPOp::SummaryTumblingWindowChain {
-            child: source,
-            summary_type: FieldDataType::ExactAggregate(kind, _),
-            input,
-            reduction,
-            filter,
-            ..
-        },
-    ) = build
-    {
-        use crate::summary_type::SummaryInputExpr;
-        let column = match &input.weight {
-            SummaryInputExpr::Column(col) => Some(
-                crate::ir::scalar::column_resolution::resolve_column_ref(col, source.schema())
-                    .map_err(|e| SchemaDerivationError::InvalidScalarSignature(e.to_string()))?,
-            ),
-            _ => None,
-        };
-        let aggregate_schema = crate::ir::NonASAPOp::Aggregate {
-            child: source.clone(),
-            reduction: reduction.clone(),
-            measures: vec![kind.measure(column, counter_readout).ok_or_else(|| {
-                SchemaDerivationError::InvalidScalarSignature(
-                    "an exact state's finalize reads a counter readout only from a counter".into(),
-                )
-            })?],
-            output_names: vec![String::new()],
-            // A filtered SUM/MIN/MAX is NULL for a
-            // group without a matching row.
-            filters: vec![filter.clone()],
-            having: None,
-        }
-        .output_schema()?;
-        match reduction {
-            Reduction::PerEntity => aggregate_schema
-                .column_id("value")
-                .and_then(|i| aggregate_schema.fields.get(i).cloned()),
-            Reduction::Reduce(_) => aggregate_schema.fields.last().cloned(),
-        }
-    } else {
-        None
+        _ => None,
     };
     let mut out = state_schema.clone();
     for f in &mut out.fields {

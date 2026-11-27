@@ -237,7 +237,7 @@ Formally, a state means `family(input(σ(C)))` for each group of `G`, where `C` 
 
 #### 4.2.2 Deriving the definition and the selection
 
-Coverage is a memo-group property, derived like an output schema and never declared; its types and derivation are in `crates/types/src/stages/logical/group/aggregate_coverage.rs`. The memo derives it once, when `Memo::find_or_add_group` creates an aggregate group (a summary state or an exact `Aggregate`): `aggregate_coverage` walks down from the group's `SummaryAgg` or `Aggregate` through its input groups' `expression`s, and the result, its inputs named by `MemoGroupId`, is stored in the group's `GroupProperties::aggregate_coverage`. Node trees have none. One walk produces both parts: every filter condition either moves into the `selection` or stays in the `definition`. A `SummaryMerge` group reads its input groups' stored coverage; it is a valid group only when their definitions are equal and their selections are disjoint (disjoint in time, for counter states).
+Coverage is a memo-group property, derived like an output schema and never declared; its types and derivation are in `crates/types/src/stages/logical/group/aggregate_coverage.rs`. The memo derives it once, when `Memo::find_or_add_group` creates an aggregate group (a summary state, an exact `Aggregate`, or an exact state a `FinalizeExactAccumulator` finalizes): `aggregate_coverage` walks down from the group's `SummaryAgg` or `Aggregate` (for a finalize, the `Aggregate` it finalizes to) through its input groups' `expression`s, and the result, its inputs named by `MemoGroupId`, is stored in the group's `GroupProperties::aggregate_coverage`. Node trees have none. One walk produces both parts: every filter condition either moves into the `selection` or stays in the `definition`. A `SummaryMerge` group reads its input groups' stored coverage; it is a valid group only when their definitions are equal and their selections are disjoint (disjoint in time, for counter states).
 
 ```rust
 /// What a summary state computes, with every lifted selection removed,
@@ -319,7 +319,7 @@ Its definition differs from G4's, so G10 cannot merge with G4, even though both 
 **The fields.**
 
 - `input`: the group the definition reads, below everything the walk passed (`None` when the walk lifted a predicate out of a `Scan`).
-- `unlifted_operators`: what the state computes over `input`, top down from the `SummaryAgg`, each operator with only the conditions that stayed. Each operator's main input is `None`; any other group it reads, such as the group of a scalar subquery in a `Filter`'s condition, is `Some(group)`.
+- `unlifted_operators`: what the state computes over `input`, top down from the `SummaryAgg` or `Aggregate`, each operator with only the conditions that stayed. Each operator's main input is `None`; any other group it reads, such as the group of a scalar subquery in a `Filter`'s condition, is `Some(group)`.
 - `selection`: which output rows of that computation the state took, as a union of boxes.
 - Identity, in two scopes. In the memo, coverages compare by `AggregateDefinition` `==` (it holds `MemoGroupId`s); nothing in the memo needs an id. The plan carries the view's content id, [`ViewCoverage::definition_id`](../../../crates/types/src/plan/physical_asap_dag.rs) (defined there), on the view's plan node (`PhysicalASAPDAGNode::view_coverage`), made by `view_coverage(memo, group)`, which expands the memo's coverage (each input group to its expression, down to the `Scan`s) rather than re-deriving it; a summary store files states under it together with a concrete selection.
 
@@ -338,7 +338,7 @@ The `definition` is what remains of the operators the walk passed, with every co
 | a `Scan` with a predicate that moves into `selection` (a PromQL label matcher) | the last operator, with only the predicates that stay; `input` is `None` |
 | any other operator (the first group the walk cannot pass) | not in the list: it is the `input` |
 
-An exact `Aggregate` is the first unlifted operator, kept whole (its per-measure filters and `HAVING` read its input or output, not the rows it reads). A `SummaryTumblingWindowChain[w](X)` has the definition of a build over X, and its selection leaves the timestamp column unconstrained: a chain has no range. A `TimeRange` or `TimeShift` over a chain (a group whose output is the chain's state with a time index) has the chain's coverage with the interval they select on the timestamp column of X, computed as over raw rows. A `SummaryMerge` over that group reads it, so `SummaryMerge(TimeRange(W, TimeShift(o, Chain[w](X))))` covers exactly what `SummaryAgg(TimeRange(W, TimeShift(o, X)))` does, and `Memo::add_candidate` accepts the merge as a candidate of the direct build's group:
+An exact `Aggregate` is the first unlifted operator, kept whole (its per-measure filters and `HAVING` read its input or output, not the rows it reads). A `FinalizeExactAccumulator` of an exact `SummaryAgg` covers what the `Aggregate` it finalizes to covers: the walk starts at that `Aggregate` over the `SummaryAgg`'s input (one unnamed measure: the aggregate the exact kind finalizes to, read with the finalize's `counter_readout` for a counter, of the column the build reads; the build's filter as that measure's filter). So `FinalizeExactAccumulator[Rate]` of `SummaryAgg[Counter](m[5m])` and `Aggregate(Rate)(m[5m])` have one coverage, whichever creates their group. A finalize over any other state, such as a merge of exact states, has none for now. A `SummaryTumblingWindowChain[w](X)` has the definition of a build over X, and its selection leaves the timestamp column unconstrained: a chain has no range. A `TimeRange` or `TimeShift` over a chain (a group whose output is the chain's state with a time index) has the chain's coverage with the interval they select on the timestamp column of X, computed as over raw rows. A `SummaryMerge` over that group reads it, so `SummaryMerge(TimeRange(W, TimeShift(o, Chain[w](X))))` covers exactly what `SummaryAgg(TimeRange(W, TimeShift(o, X)))` does, and `Memo::add_candidate` accepts the merge as a candidate of the direct build's group:
 
 ```text
 G1 Scan latency
@@ -468,7 +468,7 @@ Any other shape stays in `definition`:
 
 #### 4.2.3 Cost of deriving coverage
 
-**When it runs.** `find_or_add_group` derives an aggregate group's coverage once, when it creates the group, and stores it in `GroupProperties::aggregate_coverage`; `add_candidate` derives a candidate's the same way. A `SummaryMerge` reads its inputs' stored coverage, so each state is derived once. Operator-node trees carry no coverage.
+**When it runs.** `find_or_add_group` derives an aggregate group's coverage once, when it creates the group, and stores it in `GroupProperties::aggregate_coverage`; `add_candidate` derives a candidate's only for a `SummaryMerge`, to check the merge; any other candidate shares its group's stored coverage. A `SummaryMerge` reads its inputs' stored coverage, so each state is derived once. Operator-node trees carry no coverage.
 
 **Sizes used below.**
 
@@ -609,7 +609,7 @@ Both need the same KLL state, so the planner builds it once (sub-DAG sharing, [P
 |---|---|
 | What comes out? | the same columns, with `state` replaced by the answer: `quantile` Float64 here. Counts and cardinalities are Int64 (Float64 when the state was built per series, `PerEntity`). A top-k evaluation is a `topk` Utf8 field today; #579 changes it to return the selected rows: the partition keys, the item identity columns and a Float64 `value` score |
 | When is it rejected? | the input is not a sketch, or the sketch cannot answer the question. For example, asking a KLL for a cardinality |
-| What is its coverage? | none: the output is a value |
+| What is its coverage? | none for now: unlike an exact readout (§5.3), an estimate is not an exact `Aggregate`'s value, so it takes no `Aggregate`'s coverage |
 | State or value? | value. The node carries the evaluation's error bound |
 
 ### 5.3 `FinalizeExactAccumulator`: exact state → value
@@ -650,7 +650,7 @@ aggregate coverage of the SummaryAgg
 |---|---|
 | What comes out? | the same columns, with `state` turned into the value type an ordinary `Aggregate` would give: a sum of Float64 is Float64, a count is Int64, a rate is Float64 |
 | When is it rejected? | the input has no exact accumulator, for example a sketch (sketches are read with `SummaryEstimate`) |
-| What is its coverage? | none on the output. The `SummaryAgg` below has coverage as in 5.1, whose selection has no conditions (all rows), because there is no filter |
+| What is its coverage? | the coverage of the `Aggregate` it finalizes to (§4.2.2): here `SUM(bytes) by host` over `Scan t`, all rows. The `SummaryAgg` below has its own coverage as in 5.1, whose selection has no conditions (all rows), because there is no filter |
 | State or value? | value. Exact state is only ever read through this operator |
 
 ### 5.4 `MaintainPopulation`: values → maintained membership (state)
@@ -1416,10 +1416,11 @@ A PromQL range `m[r]` evaluated at t reads the samples in (t − r, t]: left-ope
 ```rust
 /// The coverage of what a memo group computes with `operator` over its
 /// input groups (§4.2.2). Errors: `NoCoverage` for an operator that is
-/// not a `SummaryAgg`, `SummaryTumblingWindowChain`, `SummaryMerge` or a
-/// `Filter` keeping whole states; `TumblingWindowChainExpansion` for a `SummaryTumblingWindowChain`
-/// that does not expand to one build over its whole window; for a
-/// merge, an input's own error, `EmptyMerge` (no inputs),
+/// not a `SummaryAgg`, an exact `Aggregate`, a `SummaryTumblingWindowChain`,
+/// a `SummaryMerge`, a `FinalizeExactAccumulator` of an exact `SummaryAgg`,
+/// a `Filter` keeping whole states, or one time interval
+/// (`TimeRange`/`TimeShift`) over a chain; for a merge, an input's own
+/// error, `EmptyMerge` (no inputs),
 /// `DefinitionMismatch` (inputs compute different things) or
 /// `InputsOverlap { required }` (inputs not proven disjoint, or disjoint
 /// in time for counter states, as the family's `MergeInputRule`

@@ -1,5 +1,5 @@
 //! Aggregate coverage, a memo-group property: what an aggregate (a summary
-//! state or an exact `Aggregate`) covers ([`AggregateCoverage`]):
+//! state, an exact `Aggregate`, or an exact state finalized to one) covers ([`AggregateCoverage`]):
 //! `definition` (what it computes, its inputs named by memo group) and
 //! `selection` (which output rows of that computation it took, in the
 //! selection algebra of [`crate::ir::properties::selection`]). Design:
@@ -28,7 +28,7 @@ use thiserror::Error;
 use super::column_properties::{project_lineage, ColumnLineage};
 use super::MemoGroupAsInput;
 use crate::ir::operator::arguments::{AtModifier, Reduction, SourceColumn, TimeShift};
-use crate::ir::operator::asap::{selected_from, summary_agg_layout, ASAPOp};
+use crate::ir::operator::asap::{finalized_aggregate, selected_from, summary_agg_layout, ASAPOp};
 use crate::ir::operator::input::{InputOrTemporaryBuild, OperatorInput};
 use crate::ir::operator::node::{Operator, OperatorResultKind};
 use crate::ir::operator::non_asap::{NonASAPOp, TimeRangeKind};
@@ -85,7 +85,8 @@ impl AggregateCoverage {
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum CoverageError {
     /// The node has no coverage: it is no aggregate (`SummaryAgg`,
-    /// `Aggregate`, `SummaryTumblingWindowChain`, `SummaryMerge`), or a
+    /// `Aggregate`, `SummaryTumblingWindowChain`, `SummaryMerge`, a
+    /// `FinalizeExactAccumulator` of an exact `SummaryAgg`), or a
     /// `TimeRange`/`TimeShift` over a chain whose windows are not one
     /// interval on the timestamp column. A caller bug, or bad input when it
     /// is a merge's input.
@@ -145,13 +146,14 @@ fn stored_coverage<'m>(input: &MemoGroupAsInput<'m>) -> Option<&'m AggregateCove
 }
 
 /// Coverage of what a memo group computes with `operator` over its input
-/// groups: a
-/// `SummaryAgg`, an exact `Aggregate`, a
-/// `SummaryTumblingWindowChain` (a build over its input, the timestamp
-/// column unconstrained), a `TimeRange` or `TimeShift` over a chain (the
-/// chain's coverage with the windows' interval on the timestamp column),
-/// a `SummaryMerge`, or a `Filter` that keeps whole states of a grouped
-/// `SummaryAgg`. So `SummaryMerge(TimeRange(W, TimeShift(o, Chain[w](X))))`
+/// groups: a `SummaryAgg`, an exact `Aggregate`, a
+/// `FinalizeExactAccumulator` of an exact `SummaryAgg` (the coverage of the
+/// `Aggregate` it finalizes to), a `SummaryTumblingWindowChain` (a build
+/// over its input, the timestamp column unconstrained), a `TimeRange` or
+/// `TimeShift` over a chain (the chain's coverage with the windows'
+/// interval on the timestamp column), a `SummaryMerge`, or a `Filter` that
+/// keeps whole states of a grouped `SummaryAgg`. So
+/// `SummaryMerge(TimeRange(W, TimeShift(o, Chain[w](X))))`
 /// covers what `SummaryAgg(TimeRange(W, TimeShift(o, X)))` does. A merge
 /// reads its inputs' stored coverage and fails
 /// unless every input has the same definition and their selections are
@@ -223,6 +225,23 @@ pub(super) fn aggregate_coverage<'m>(
                 None => Ok(merged),
                 Some(keys) => regrouped(merged, &children[0], keys),
             }
+        }
+        // A finalized exact state covers what the aggregate it finalizes
+        // to covers: `FinalizeExactAccumulator[Rate]` of
+        // `SummaryAgg[Counter](m[5m])` covers what `Aggregate(Rate)(m[5m])`
+        // does.
+        Operator::ASAP(ASAPOp::FinalizeExactAccumulator {
+            child,
+            counter_readout,
+        }) => {
+            let Operator::ASAP(build @ ASAPOp::SummaryAgg { .. }) = child.operator() else {
+                return Err(CoverageError::NoCoverage);
+            };
+            let aggregate = finalized_aggregate(&build, *counter_readout)
+                .ok()
+                .flatten()
+                .ok_or(CoverageError::NoCoverage)?;
+            aggregate_coverage(&Operator::NonASAP(aggregate))
         }
         Operator::ASAP(_) => Err(CoverageError::NoCoverage),
     }
