@@ -185,9 +185,11 @@ pub enum SketchParams {
 }
 
 // θ compares and hashes as a value so it can key a stored view
-// (`ViewStateKey`). Its only float, DDSketch `alpha`, is never NaN (it lies in
-// (0, 1)), so `==` is an equivalence; the hash is that of its JSON text,
-// which equal values share.
+// (`ViewStateKey`). Its only float, DDSketch `alpha`, lies in (0, 1) in every
+// θ the planner builds (`parameters_fit` checks it against the algorithm's
+// list), so `==` is an equivalence there; the hash is that of its JSON text,
+// which equal values share. The hash allocates a string: fine for a store's
+// keys, not for a hot map keyed by θ.
 impl Eq for SketchParams {}
 
 impl std::hash::Hash for SketchParams {

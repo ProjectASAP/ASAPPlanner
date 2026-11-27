@@ -128,6 +128,46 @@ fn chain_views_differing_only_in_window_width_have_different_view_state_keys() {
     assert_ne!(one_minute.view_state_key(), five_minutes.view_state_key());
 }
 
+/// The `TimeRange(5m)` over `chain_dag(width_ms)`'s chain as a view refreshed
+/// on first read, over its chain kept as a view refreshed at ingestion.
+fn range_view(width_ms: u64) -> MaterializedView {
+    let (mut dag, chain, _) = chain_dag(width_ms);
+    let range = dag
+        .nodes
+        .iter()
+        .find(|node| matches!(node.payload, Operator::NonASAP(NonASAPOp::TimeRange { .. })))
+        .unwrap()
+        .id;
+    let node = node_mut(&mut dag, range);
+    node.lifetime = Lifetime::AcrossEvaluations(StorageMedium::Memory);
+    node.retention_ms = Some(5 * MINUTE_MS);
+    node.parameters = Some(SketchParams::Kll { k: 200 });
+    node.view_coverage = Some(ViewCoverage::new("kll of t.value".into(), vec![]));
+    node_mut(&mut dag, chain).view_coverage = Some(ViewCoverage::new(
+        format!("kll of t.value in {width_ms} ms windows"),
+        vec![],
+    ));
+    views_at(&mut dag, &[chain as u64, range as u64])
+        .unwrap()
+        .into_iter()
+        .find(|view| view.node_id == range)
+        .unwrap()
+}
+
+/// The last 5 minutes of a 1-minute chain are five window rows, of a
+/// 5-minute chain one: a `TimeRange` view over a chain keeps the chain's
+/// windows, so the two have different keys.
+#[test]
+fn time_range_views_over_chains_of_different_widths_have_different_view_state_keys() {
+    let over_one_minute = range_view(MINUTE_MS);
+    let over_five_minutes = range_view(5 * MINUTE_MS);
+    assert_eq!(over_one_minute.coverage(), over_five_minutes.coverage());
+    assert_ne!(
+        over_one_minute.view_state_key(),
+        over_five_minutes.view_state_key()
+    );
+}
+
 /// A merge of the last 5 minutes from a 1-minute chain and one from a
 /// 5-minute chain hold one state, computed two ways: one key. The chain
 /// below the view says how the state is computed, not what it is.
@@ -315,13 +355,39 @@ async fn a_view_planned_in_two_workloads_keeps_its_view_state_key() {
     let beside_views = beside.materialized_views().unwrap();
     assert!(!alone_views.is_empty());
     assert_ne!(alone.dag.plan_id(), beside.dag.plan_id());
+    // A view's operator, as the plan file writes it (its inputs' node ids
+    // removed): the quantile's views are found in the second plan by it.
+    let operator_of = |plan: &InstallablePlan, view: &MaterializedView| {
+        let node = plan
+            .dag
+            .nodes
+            .iter()
+            .find(|node| node.id == view.node_id)
+            .unwrap();
+        let mut payload = serde_json::to_value(&node.payload).unwrap();
+        strip_node_ids(&mut payload);
+        payload
+    };
     for view in &alone_views {
-        assert!(
-            beside_views
-                .iter()
-                .any(|other| other.view_state_key() == view.view_state_key()),
-            "{:?} is not a view of the second plan",
-            view.view_state_key()
-        );
+        let same_operator: Vec<&MaterializedView> = beside_views
+            .iter()
+            .filter(|other| operator_of(&beside, other) == operator_of(&alone, view))
+            .collect();
+        assert_eq!(same_operator.len(), 1, "{:?}", view.view_state_key());
+        assert_eq!(same_operator[0].view_state_key(), view.view_state_key());
+    }
+}
+
+/// `value` without the node ids its operator's inputs are written as.
+fn strip_node_ids(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(fields) => {
+            for key in ["child", "children", "summary_input", "levels"] {
+                fields.remove(key);
+            }
+            fields.values_mut().for_each(strip_node_ids);
+        }
+        serde_json::Value::Array(items) => items.iter_mut().for_each(strip_node_ids),
+        _ => {}
     }
 }

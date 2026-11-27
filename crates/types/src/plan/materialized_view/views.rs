@@ -8,16 +8,13 @@ use std::collections::{HashMap, HashSet};
 
 use super::{
     IngestionRefreshGroup, InstallableDagError, MaterializedView, MaterializedViewInputs,
-    MaterializedViewRefresh, RefreshWindow, ViewStateKey, ViewWindow,
+    MaterializedViewRefresh, RefreshWindow, ViewStateKey,
 };
 use crate::ir::operator::asap::ASAPOp;
 use crate::ir::operator::node::Operator;
 use crate::ir::operator::non_asap::NonASAPOp;
 use crate::ir::properties::execution_data_state::ExecutionTiming;
-use crate::plan::physical_asap_dag::{
-    PhysicalASAPDAG, PhysicalASAPDAGNode, PhysicalASAPNodeId, ViewCoverage,
-};
-use crate::stages::LogicalProperties;
+use crate::plan::physical_asap_dag::{PhysicalASAPDAG, PhysicalASAPDAGNode, PhysicalASAPNodeId};
 use crate::plan::time_window::{self, InputRows, TimeIndexedPlan, TimeWindow};
 
 impl PhysicalASAPDAG {
@@ -291,7 +288,8 @@ impl<'a> ViewIndex<'a> {
                     reason: "the plan node carries no view_coverage".into(),
                 }
             })?;
-            let view_state_key = view_state_key(node, &coverage);
+            let view_state_key =
+                ViewStateKey::of_view(node, coverage.definition_id(), |id| self.nodes[&id]);
             derived.push(MaterializedView {
                 node_id: id,
                 plan_id: plan_id.clone(),
@@ -420,32 +418,5 @@ impl<'a> ViewIndex<'a> {
         Ok(MaterializedViewInputs {
             materialized_views: view_inputs,
         })
-    }
-}
-
-/// The state key of view `node` with `coverage`, from the node alone: its
-/// definition, the windows its operator keeps (a chain's or
-/// `SummaryMergeWindows`' width; `None` for any other view, a single state
-/// whose window is in its selection) and its θ.
-fn view_state_key(node: &PhysicalASAPDAGNode, coverage: &ViewCoverage) -> ViewStateKey {
-    let window = match &node.payload {
-        Operator::ASAP(
-            ASAPOp::SummaryTumblingWindowChain {
-                tumbling_window_width_ms,
-                ..
-            }
-            | ASAPOp::SummaryMergeWindows {
-                tumbling_window_width_ms,
-                ..
-            },
-        ) => Some(ViewWindow::Tumbling {
-            width_ms: *tumbling_window_width_ms,
-        }),
-        _ => None,
-    };
-    ViewStateKey {
-        definition_id: coverage.definition_id().to_owned(),
-        window,
-        logical_properties: LogicalProperties::of_parameters(node.parameters.clone()),
     }
 }

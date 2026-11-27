@@ -78,9 +78,7 @@
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use super::physical_asap_dag::{
-    PhysicalASAPDAG, PhysicalASAPDAGValidationError, PhysicalASAPNodeId, ViewCoverage,
-};
+use super::physical_asap_dag::{PhysicalASAPDAGValidationError, PhysicalASAPNodeId, ViewCoverage};
 use super::time_window::{self, TimeIndexedPlan, TimeWindow};
 use crate::ir::operator::arguments::Source;
 use crate::stages::EvaluationGrid;
@@ -92,7 +90,7 @@ use crate::stages::EvaluationGrid;
 pub struct MaterializedView {
     /// The node whose output is materialized.
     pub node_id: PhysicalASAPNodeId,
-    /// The plan it belongs to ([`PhysicalASAPDAG::plan_id`]): with
+    /// The plan it belongs to (`PhysicalASAPDAG::plan_id`): with
     /// `node_id`, its address in one installed plan.
     pub(crate) plan_id: String,
     /// What its stored state is, in any plan: from the view node alone.
@@ -122,7 +120,7 @@ impl MaterializedView {
         self.retention_ms
     }
 
-    /// The plan the view belongs to ([`PhysicalASAPDAG::plan_id`]): with
+    /// The plan the view belongs to (`PhysicalASAPDAG::plan_id`): with
     /// `node_id`, its address in one installed plan.
     pub fn plan_id(&self) -> &str {
         &self.plan_id

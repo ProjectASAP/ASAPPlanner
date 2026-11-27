@@ -483,7 +483,10 @@ pub struct ViewStateKey {
     pub window: Option<ViewWindow>,           // the view node's own windows
     pub logical_properties: LogicalProperties, // the view node's candidate's θ
 }
-pub enum ViewWindow { Tumbling { width_ms: u64 } } // non_exhaustive
+pub enum ViewWindow {                         // non_exhaustive
+    Tumbling { width_ms: u64 },               // a chain's rows, also through TimeRange / TimeShift
+    TumblingLevels { widths_ms: Vec<u64> },   // a TimeRangeCover's levels
+}
 ```
 
 These derivations are methods on `PhysicalASAPDAG` in `asap-types`, so a
@@ -537,8 +540,9 @@ A view has two identities, in two scopes:
   id of the plan's DAG: the 128-bit FNV-1a hash, in hex, of its JSON (every
   serialized field of its nodes, edges and roots; not
   `selected_physical_candidate`, which the plan file does not hold, nor the
-  query texts or wire version). Equal plans have equal ids across
-  processes and plan-file round trips; any change to the DAG changes it.
+  query texts or wire version). Equal serializations have equal ids
+  across processes and plan-file round trips; a change to any serialized
+  field of the DAG changes it.
 - **In any plan:** the store key `(ViewStateKey, concrete selection)`: two
   views with equal keys and one concrete selection (the request's time
   range and the selection's other constraints) hold interchangeable
@@ -553,7 +557,7 @@ like `view_coverage`, and it is taken from the view node alone:
 | Logical, memo group | what is computed | `view_coverage.definition_id` | `definition_id` |
 | Logical, memo group | which rows went in | `view_coverage.selection` | no: the store key's second half |
 | Logical, candidate | θ | `parameters` (the candidate's `LogicalProperties::parameters`) | `logical_properties` |
-| The view node's operator | the windows its state is kept in | a `SummaryTumblingWindowChain`'s or `SummaryMergeWindows`' `tumbling_window_width_ms` | `window` (`None` for a single state, whose window is in its selection) |
+| The view node's operator | the windows its rows are | a `SummaryTumblingWindowChain`'s or `SummaryMergeWindows`' `tumbling_window_width_ms`, also through a `TimeRange` or `TimeShift` over one; a `TimeRangeCover`'s levels' widths | `window` (`None` for one state per group, whose window is in its selection) |
 | Physical | refresh (timing), lifetime (medium), retention | node fields | no |
 | Below the view node | how the state is computed | the sub-DAG | no |
 
@@ -567,8 +571,9 @@ memo group with equal θ share a key:
 `SummaryMerge(TimeRange(5m, Chain[1m]))` and
 `SummaryMerge(TimeRange(5m, Chain[5m]))` hold one state. Views that differ
 only in refresh mode, retention or storage medium share a key too. Five
-tumbling windows of one chain under `TimeShift(i·1m)` share one key, and
-each window's state is filed once under it and its absolute interval.
+views `SummaryAgg(TimeRange(1m, TimeShift(i·1m, Scan)))`, `i = 0..4`,
+share one key, and each minute's state is filed once under it and its
+absolute interval.
 
 Known limitations: the key is only as good as the coverage it carries. A
 finalized exact aggregate has no coverage (#1493), and a coverage depends
@@ -637,7 +642,7 @@ pub struct MaterializedViewRequest<'a> {
 - A **materialized view** read returns exactly the states whose intervals tile the requested range. The store never counts an observation twice, never returns the state of another `view_state_key` or selection, and never treats missing state as empty; it returns an error instead.
 
 Only the definition side of the deployment's summary store crosses the
-interface (the view's coverage and schema). Instances (their interval, group
+interface (the view's `view_state_key`, coverage and schema). Instances (their interval, group
 values, placement, status) stay inside the store, which resolves a read to
 them.
 
