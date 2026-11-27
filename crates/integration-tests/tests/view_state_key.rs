@@ -1,0 +1,327 @@
+//! What a materialized view's stored state is, in any plan
+//! (`MaterializedView::view_state_key`): the view's definition, its own
+//! window and its θ. Refresh mode, retention and storage medium do not
+//! enter, and neither do the nodes below the view. The plan id
+//! (`PhysicalASAPDAG::plan_id`) names one installed plan.
+use std::rc::Rc;
+
+use asap_executor::physical_planner::test_support::{set_build_parameters, views_at};
+use asap_planner::{
+    plan_installable, CostInputs, DeploymentCapabilities, FrontendInput, InstallablePlan,
+    PlanningModels, PlanningWorkload, UserInput,
+};
+use asap_types::ir::operator::{GroupKeys, Reduction, Source};
+use asap_types::ir::scalar::ColumnRef;
+use asap_types::ir::schema::{DataType, Field, FieldDataType, Schema};
+use asap_types::ir::{ASAPOp, NonASAPOp, Operator, OperatorNode, TimeRangeKind};
+use asap_types::plan::materialized_view::{
+    MaterializedView, MaterializedViewRefresh, ViewStateKey,
+};
+use asap_types::plan::physical_asap_dag::{PhysicalASAPDAG, PhysicalASAPDAGNode, ViewCoverage};
+use asap_types::stages::{Lifetime, StorageMedium};
+use asap_types::summary_type::{SketchAlgorithm, SketchParams, SketchStatistic, SummaryUpdate};
+
+const MINUTE_MS: u64 = 60_000;
+
+/// `p50(SummaryMerge(TimeRange(5m, Chain[width_ms](Scan(t)))))` over
+/// `t(ts, value)`, every node at query time, the chain KLL `k = 200` (and
+/// the merge, which reads its states); with the chain's node id and the
+/// merge's.
+fn chain_dag(width_ms: u64) -> (PhysicalASAPDAG, usize, usize) {
+    let new = |operator| OperatorNode::new_shared(operator).unwrap();
+    let scan = new(Operator::NonASAP(NonASAPOp::Scan {
+        source: Source::Table {
+            table_ref: "t".into(),
+        },
+        predicates: vec![],
+        schema: Schema::with_time_index(
+            vec![
+                Field::plain("ts", DataType::Timestamp, false),
+                Field::plain("value", DataType::Float64, false),
+            ],
+            0,
+            vec![],
+        ),
+    }));
+    let chain: Rc<OperatorNode> = new(Operator::ASAP(ASAPOp::SummaryTumblingWindowChain {
+        child: scan,
+        summary_type: FieldDataType::Sketch(SketchAlgorithm::Kll),
+        input: SummaryUpdate::column(ColumnRef::Named("value".into())),
+        reduction: Reduction::Reduce(GroupKeys::default()),
+        filter: None,
+        tumbling_window_width_ms: width_ms,
+    }));
+    let range = new(Operator::NonASAP(NonASAPOp::TimeRange {
+        range: std::time::Duration::from_millis(5 * MINUTE_MS),
+        kind: TimeRangeKind::Range,
+        child: chain,
+    }));
+    let merge = new(Operator::ASAP(ASAPOp::SummaryMerge {
+        children: vec![range],
+        group_by: None,
+    }));
+    let p50 = new(Operator::ASAP(ASAPOp::SummaryEstimate {
+        summary_input: merge,
+        query: SketchStatistic::Quantile { q: 0.5 },
+    }));
+    let mut dag =
+        asap_types::test_support::forwarders::physical_asap_dag_at_query_time(&p50).unwrap();
+    set_build_parameters(&mut dag.nodes, Some(&SketchParams::Kll { k: 200 }));
+    let id_of = |dag: &PhysicalASAPDAG, f: &dyn Fn(&Operator<usize>) -> bool| {
+        dag.nodes.iter().find(|node| f(&node.payload)).unwrap().id
+    };
+    let chain = id_of(&dag, &|operator| {
+        matches!(
+            operator,
+            Operator::ASAP(ASAPOp::SummaryTumblingWindowChain { .. })
+        )
+    });
+    let merge = id_of(&dag, &|operator| {
+        matches!(operator, Operator::ASAP(ASAPOp::SummaryMerge { .. }))
+    });
+    node_mut(&mut dag, merge).parameters = Some(SketchParams::Kll { k: 200 });
+    (dag, chain, merge)
+}
+
+fn node_mut(dag: &mut PhysicalASAPDAG, id: usize) -> &mut PhysicalASAPDAGNode {
+    dag.nodes.iter_mut().find(|node| node.id == id).unwrap()
+}
+
+/// The view at node `id` of `dag`, with the coverage every view of these
+/// tests shares (one definition, an empty selection): materialized at
+/// ingestion time, unless its lifetime already keeps it across evaluations
+/// (then refreshed on first read).
+fn view_at(dag: &mut PhysicalASAPDAG, id: usize) -> MaterializedView {
+    node_mut(dag, id).view_coverage = Some(ViewCoverage::new("kll of t.value".into(), vec![]));
+    views_at(dag, &[id as u64]).unwrap().remove(0)
+}
+
+/// The merge of `chain_dag(width_ms)` as a view refreshed on first read,
+/// over its chain kept as a view refreshed at ingestion.
+fn merge_view(width_ms: u64) -> MaterializedView {
+    let (mut dag, chain, merge) = chain_dag(width_ms);
+    let node = node_mut(&mut dag, merge);
+    node.lifetime = Lifetime::AcrossEvaluations(StorageMedium::Memory);
+    node.retention_ms = Some(5 * MINUTE_MS);
+    node.view_coverage = Some(ViewCoverage::new("kll of t.value".into(), vec![]));
+    node_mut(&mut dag, chain).view_coverage = Some(ViewCoverage::new(
+        format!("kll of t.value in {width_ms} ms windows"),
+        vec![],
+    ));
+    views_at(&mut dag, &[chain as u64, merge as u64])
+        .unwrap()
+        .into_iter()
+        .find(|view| view.node_id == merge)
+        .unwrap()
+}
+
+/// Chains of 1-minute and of 5-minute windows that differ in nothing else
+/// have one coverage and different keys: the view node's own window
+/// differs.
+#[test]
+fn chain_views_differing_only_in_window_width_have_different_view_state_keys() {
+    let (mut one_minute, chain, _) = chain_dag(MINUTE_MS);
+    let one_minute = view_at(&mut one_minute, chain);
+    let (mut five_minutes, chain, _) = chain_dag(5 * MINUTE_MS);
+    let five_minutes = view_at(&mut five_minutes, chain);
+    assert_eq!(one_minute.coverage(), five_minutes.coverage());
+    assert_ne!(one_minute.view_state_key(), five_minutes.view_state_key());
+}
+
+/// A merge of the last 5 minutes from a 1-minute chain and one from a
+/// 5-minute chain hold one state, computed two ways: one key. The chain
+/// below the view says how the state is computed, not what it is.
+#[test]
+fn merges_of_one_range_over_chains_of_different_widths_share_a_view_state_key() {
+    let over_one_minute = merge_view(MINUTE_MS);
+    let over_five_minutes = merge_view(5 * MINUTE_MS);
+    assert_eq!(over_one_minute.coverage(), over_five_minutes.coverage());
+    assert_eq!(
+        over_one_minute.view_state_key(),
+        over_five_minutes.view_state_key()
+    );
+}
+
+/// One chain view refreshed at ingestion and kept in memory for ever, and
+/// the same view refreshed on first read and kept on disk for an hour:
+/// one stored state, so one key; two plans, so two plan ids.
+#[test]
+fn views_differing_only_in_refresh_retention_or_medium_have_equal_view_state_keys() {
+    let (mut at_ingestion, chain, _) = chain_dag(MINUTE_MS);
+    let at_ingestion_view = view_at(&mut at_ingestion, chain);
+    let (mut on_first_read, chain, _) = chain_dag(MINUTE_MS);
+    let node = node_mut(&mut on_first_read, chain);
+    node.lifetime = Lifetime::AcrossEvaluations(StorageMedium::Disk);
+    node.retention_ms = Some(60 * MINUTE_MS);
+    let on_first_read_view = view_at(&mut on_first_read, chain);
+    assert_eq!(
+        at_ingestion_view.refresh(),
+        MaterializedViewRefresh::AtIngestion
+    );
+    assert_eq!(
+        on_first_read_view.refresh(),
+        MaterializedViewRefresh::OnFirstRead
+    );
+    assert_ne!(
+        at_ingestion_view.retention_ms(),
+        on_first_read_view.retention_ms()
+    );
+    assert_eq!(
+        at_ingestion_view.view_state_key(),
+        on_first_read_view.view_state_key()
+    );
+    assert_ne!(at_ingestion.plan_id(), on_first_read.plan_id());
+    assert_eq!(at_ingestion_view.plan_id(), at_ingestion.plan_id());
+}
+
+/// The committed sketch workload `chains-10m-5m-3m-10s` (quantiles over
+/// `data` with `[10m]`, `[5m]` and `[3m]` ranges, the last every 10 s),
+/// planned as its `mvp` snapshot is: raw data not retained, the snapshot's
+/// cost inputs.
+async fn chains_plan() -> InstallablePlan {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let read = |path: &str| std::fs::read_to_string(root.join(path)).unwrap();
+    let workload: PlanningWorkload = serde_json::from_str(&read(
+        "crates/planner-cli/tests/sketch_plan_snapshots/workloads/chains-10m-5m-3m-10s.json",
+    ))
+    .unwrap();
+    let capabilities: DeploymentCapabilities = serde_json::from_str(&read(
+        "crates/planner-cli/tests/sketch_plan_snapshots/deployments/mvp.capabilities.json",
+    ))
+    .unwrap();
+    let cost_inputs: CostInputs = serde_json::from_str(&read(
+        "tools/dag-viewer/cost-inputs/aws-fargate-us-east-1.json",
+    ))
+    .unwrap();
+    let models = PlanningModels::builtin()
+        .with_deployment_capabilities(&capabilities)
+        .with_cost_inputs(&cost_inputs);
+    plan_installable(UserInput::new(&workload, FrontendInput::Promql, models))
+        .await
+        .unwrap()
+        .0
+}
+
+/// Main's snapshot of this workload has three views of one coverage: a
+/// 5-minute chain, a 10-second chain and 60-second windows merged from it.
+/// Their keys differ pairwise.
+#[tokio::test]
+async fn planned_views_of_one_coverage_get_distinct_view_state_keys() {
+    let views = chains_plan().await.materialized_views().unwrap();
+    let coverage = views[0].coverage();
+    let same_coverage: Vec<&MaterializedView> = views
+        .iter()
+        .filter(|view| view.coverage() == coverage)
+        .collect();
+    assert_eq!(same_coverage.len(), 3, "{views:#?}");
+    for (i, first) in same_coverage.iter().enumerate() {
+        for second in &same_coverage[i + 1..] {
+            assert_ne!(
+                first.view_state_key(),
+                second.view_state_key(),
+                "views {} and {}",
+                first.node_id,
+                second.node_id
+            );
+        }
+    }
+}
+
+/// The key of the planned 5-minute chain, written out as its JSON: what a
+/// durable store recovers states by, so a change to it is a change to what
+/// a deployment has stored. The JSON reads back as the same key.
+#[tokio::test]
+async fn the_view_state_key_of_a_planned_chain_is_pinned_and_round_trips_through_json() {
+    let plan = chains_plan().await;
+    let views = plan.materialized_views().unwrap();
+    let five_minute_chain = views
+        .iter()
+        .find(|view| {
+            plan.dag.nodes.iter().any(|node| {
+                node.id == view.node_id
+                    && matches!(
+                        node.payload,
+                        Operator::ASAP(ASAPOp::SummaryTumblingWindowChain {
+                            tumbling_window_width_ms: 300_000,
+                            ..
+                        })
+                    )
+            })
+        })
+        .expect("a 5-minute chain view");
+    let key = five_minute_chain.view_state_key();
+    assert_eq!(
+        serde_json::to_value(key).unwrap(),
+        serde_json::json!({
+            "definition_id": "bfbffb8f01ab202d585c3e18c9f78080",
+            "window": {"tumbling": {"width_ms": 300000}},
+            "logical_properties": {"parameters": {"Kll": {"k": 1404}}}
+        })
+    );
+    let json = serde_json::to_string(key).unwrap();
+    assert_eq!(&serde_json::from_str::<ViewStateKey>(&json).unwrap(), key);
+}
+
+/// `quantile_over_time(0.99, data[5m])` every minute, alone and next to a
+/// query over another metric: two plans, one key for the quantile's view.
+#[tokio::test]
+async fn a_view_planned_in_two_workloads_keeps_its_view_state_key() {
+    let workload = |queries: &[&str]| -> PlanningWorkload {
+        let repeating: Vec<serde_json::Value> = queries
+            .iter()
+            .map(|query| {
+                serde_json::json!({
+                    "demand": {"fixed_interval_at": {"evaluation_phase": 0, "interval": 60000}},
+                    "predictability": {"predictable": {"known_at": null}},
+                    "query": query,
+                    "requirements": {"accuracy": {"failure_probability": 0.01, "max_error": 0.01}}
+                })
+            })
+            .collect();
+        serde_json::from_value(serde_json::json!({
+            "data_workload": {
+                "arrival": {"ingesting": {"rows_per_second": 2000.0}},
+                "sources": {
+                    "data": {"metric_type": "gauge", "sample_interval": 15000, "series_count": 10000},
+                    "other": {"metric_type": "gauge", "sample_interval": 15000, "series_count": 10000}
+                }
+            },
+            "query_workload": {"language": "promql", "query_batch": null, "repeating_queries": repeating}
+        }))
+        .unwrap()
+    };
+    let capabilities = DeploymentCapabilities {
+        raw_data_retained: false,
+        query_time_results_retained: false,
+        ..Default::default()
+    };
+    let plan = |workload: PlanningWorkload| {
+        let capabilities = capabilities.clone();
+        async move {
+            let models = PlanningModels::builtin().with_deployment_capabilities(&capabilities);
+            plan_installable(UserInput::new(&workload, FrontendInput::Promql, models))
+                .await
+                .unwrap()
+                .0
+        }
+    };
+    let alone = plan(workload(&["quantile_over_time(0.99, data[5m])"])).await;
+    let beside = plan(workload(&[
+        "quantile_over_time(0.99, data[5m])",
+        "sum_over_time(other[1m])",
+    ]))
+    .await;
+    let alone_views = alone.materialized_views().unwrap();
+    let beside_views = beside.materialized_views().unwrap();
+    assert!(!alone_views.is_empty());
+    assert_ne!(alone.dag.plan_id(), beside.dag.plan_id());
+    for view in &alone_views {
+        assert!(
+            beside_views
+                .iter()
+                .any(|other| other.view_state_key() == view.view_state_key()),
+            "{:?} is not a view of the second plan",
+            view.view_state_key()
+        );
+    }
+}

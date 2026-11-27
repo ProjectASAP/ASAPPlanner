@@ -109,6 +109,18 @@ impl MaterializedView {
     pub fn retention_ms(&self) -> u64 {
         self.retention_ms
     }
+
+    /// The plan the view belongs to (`PhysicalASAPDAG::plan_id`): with
+    /// `node_id`, its address in one installed plan.
+    pub fn plan_id(&self) -> &str {
+        todo!("#1429: the view's plan id")
+    }
+
+    /// What its stored state is, in any plan: a store keys states by it
+    /// and the concrete selection.
+    pub fn view_state_key(&self) -> &ViewStateKey {
+        todo!("#1429: the view's state key")
+    }
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -324,4 +336,7 @@ pub enum InstallableDagError {
 }
 
 mod raw_data;
+mod view_state_key;
 mod views;
+
+pub use view_state_key::{ViewStateKey, ViewWindow};

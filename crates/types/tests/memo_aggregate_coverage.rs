@@ -683,3 +683,97 @@ fn a_cover_under_an_offset_covers_its_range_that_much_earlier() {
     let direct = kll_over_last_5m_of(&mut memo, shift(HOUR_MS, None, g1));
     assert_eq!(coverage(&memo, an_hour_back), coverage(&memo, direct));
 }
+
+/// Known limitation (#1493): `rate(latency[5m])` computed as
+/// `FinalizeExactAccumulator { Rate }` over an exact counter state has no
+/// coverage, while `Aggregate(Rate)` over the same rows has one, so a view
+/// of either form cannot be keyed alike. Un-ignore once the fix for #1493
+/// is in this branch.
+#[test]
+#[ignore = "known limitation: #1493"]
+fn known_limitation_1493_a_finalized_exact_aggregate_has_a_coverage() {
+    use asap_types::summary_type::{CounterReadout, ExactParams};
+    let mut memo = Memo::new(&DataWorkload::default());
+    let series = memo.find_or_add_group(latency(vec![])).unwrap();
+    let window = memo
+        .find_or_add_group(range(5 * MINUTE_MS, series))
+        .unwrap();
+    let by_aggregate = memo
+        .find_or_add_group(asap_types::test_support::memo_fixtures::aggregate(
+            Reduction::PerEntity,
+            AggIntent::Rate,
+            window,
+        ))
+        .unwrap();
+    let counter = memo
+        .find_or_add_group(state(
+            FieldDataType::ExactAggregate(ExactKind::Counter, ExactParams::Counter),
+            window,
+        ))
+        .unwrap();
+    let by_finalize = memo
+        .find_or_add_group(Operator::ASAP(ASAPOp::FinalizeExactAccumulator {
+            child: counter,
+            counter_readout: Some(CounterReadout::Rate),
+        }))
+        .unwrap();
+    let expected = view_coverage(&memo, by_aggregate).expect("Aggregate(Rate) has a coverage");
+    let finalized = view_coverage(&memo, by_finalize).expect("the finalized rate has a coverage");
+    assert_eq!(finalized.selection(), expected.selection());
+}
+
+/// Known limitation (#1494): `sum(rate(latency{job="api"}[5m]))` from the
+/// scan (the matcher below `rate`, never lifted) and from
+/// `sum by (job) (rate(latency[5m]))` filtered to `job = "api"` (the
+/// filter lifted) aggregate the same rows but get different coverages, so
+/// one stored state gets two keys.
+#[test]
+#[ignore = "known limitation: #1494"]
+fn known_limitation_1494_coverage_does_not_depend_on_where_the_filter_sits() {
+    use asap_types::test_support::memo_fixtures::aggregate;
+    let mut memo = Memo::new(&DataWorkload::default());
+    let sum_of = |memo: &mut Memo, input: MemoGroupId| {
+        memo.find_or_add_group(aggregate(
+            Reduction::by(vec![]),
+            AggIntent::Sum { col: Some(1) },
+            input,
+        ))
+        .unwrap()
+    };
+    let rate_of = |memo: &mut Memo, predicates: Vec<ScalarExpr<MemoGroupId>>| {
+        let series = memo.find_or_add_group(latency(predicates)).unwrap();
+        let window = memo
+            .find_or_add_group(range(5 * MINUTE_MS, series))
+            .unwrap();
+        memo.find_or_add_group(aggregate(Reduction::PerEntity, AggIntent::Rate, window))
+            .unwrap()
+    };
+    // From the scan: the matcher sits below `rate`.
+    let api_rate = rate_of(&mut memo, vec![job_is("api")]);
+    let from_scan = sum_of(&mut memo, api_rate);
+    // From `sum by (job)`: keep job "api" (column 0 of `[job, sum]`), then sum.
+    let rate = rate_of(&mut memo, vec![]);
+    let by_job = memo
+        .find_or_add_group(aggregate(
+            Reduction::by(vec![JOB]),
+            AggIntent::Sum { col: Some(1) },
+            rate,
+        ))
+        .unwrap();
+    let api_row = memo
+        .find_or_add_group(filter(
+            ScalarExpr::Compare {
+                left: Box::new(ScalarExpr::Column(0)),
+                op: CompareOpKind::Eq,
+                right: Box::new(ScalarExpr::Literal(ScalarValue::Utf8("api".into()))),
+                semantics: ExprSemantics::Promql,
+            },
+            by_job,
+        ))
+        .unwrap();
+    let from_rollup = sum_of(&mut memo, api_row);
+    let from_scan = view_coverage(&memo, from_scan).unwrap();
+    let from_rollup = view_coverage(&memo, from_rollup).unwrap();
+    assert_eq!(from_scan.definition_id(), from_rollup.definition_id());
+    assert_eq!(from_scan.selection(), from_rollup.selection());
+}

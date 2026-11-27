@@ -15,7 +15,7 @@ use asap_types::ir::operator::{GroupKeys, Reduction, Source};
 use asap_types::ir::scalar::ColumnRef;
 use asap_types::ir::schema::{DataType, Field, FieldDataType, Schema};
 use asap_types::ir::{ASAPOp, NonASAPOp, OperatorNode, QueryRoot, TimeRangeKind};
-use asap_types::plan::materialized_view::MaterializedView;
+use asap_types::plan::materialized_view::{MaterializedView, ViewStateKey};
 use asap_types::plan::physical_asap_dag::PhysicalASAPDAG;
 use asap_types::plan::physical_asap_dag::ViewCoverage;
 use asap_types::stages::{Lifetime, StorageMedium};
@@ -63,6 +63,10 @@ struct Fixture {
     p99: u64,
 }
 fn fixture() -> Fixture {
+    fixture_with(200)
+}
+/// [`fixture`] with KLL `k` in place of 200.
+fn fixture_with(k: u32) -> Fixture {
     let new = |operator| OperatorNode::new_shared(operator).unwrap();
     let scan = new(asap_types::ir::Operator::NonASAP(NonASAPOp::Scan {
         source: Source::Table {
@@ -113,7 +117,7 @@ fn fixture() -> Fixture {
             .unwrap();
     asap_executor::physical_planner::test_support::set_build_parameters(
         &mut dag.nodes,
-        Some(&asap_types::summary_type::SketchParams::Kll { k: 200 }),
+        Some(&asap_types::summary_type::SketchParams::Kll { k }),
     );
     let mut tumbling_window_ids = vec![0; 5];
     let (mut merge, mut p50, mut p99) = (0, 0, 0);
@@ -428,13 +432,13 @@ fn tumbling_windows_reject_parameters_schema_and_missing_binding() {
     );
 }
 
-/// Finds a view's states only by its definition id and the requested time
-/// range, as a deployment's summary store does; never by node id.
-struct DefinitionStore {
-    states: std::collections::BTreeMap<(String, (i64, i64)), Batch>,
-    requested: std::sync::Mutex<Vec<(String, (i64, i64))>>,
+/// Finds a view's states only by its view state key and the requested
+/// time range, as a deployment's summary store does; never by node id.
+struct ViewStateStore {
+    states: std::collections::HashMap<(ViewStateKey, (i64, i64)), Batch>,
+    requested: std::sync::Mutex<Vec<(ViewStateKey, (i64, i64))>>,
 }
-impl asap_executor::sources::DataStore for DefinitionStore {
+impl asap_executor::sources::DataStore for ViewStateStore {
     fn read_raw_data(
         &self,
         source: &Source,
@@ -449,10 +453,7 @@ impl asap_executor::sources::DataStore for DefinitionStore {
         request: &asap_executor::sources::MaterializedViewRequest,
         _: RunContext,
     ) -> Result<OutputStream<'_, Batch>, Error> {
-        let key = (
-            view.coverage().definition_id().to_owned(),
-            request.time_range_ms,
-        );
+        let key = (view.view_state_key().clone(), request.time_range_ms);
         self.requested.lock().unwrap().push(key.clone());
         let state = self
             .states
@@ -463,28 +464,20 @@ impl asap_executor::sources::DataStore for DefinitionStore {
     }
 }
 
-/// A store keyed only by `(definition_id, time range)` answers the five-tumbling-window
-/// query: the five tumbling windows share one definition and request the five
-/// one-minute ranges that tile the window, and the answers equal those of
-/// binding each tumbling window's state to its node.
-#[test]
-fn a_store_keyed_by_definition_and_time_range_answers_the_tumbling_windows() {
-    let fixture = fixture();
+/// The states of the tumbling windows of minutes 0..5 (`(m, m + 1]`
+/// minutes), built by `fixture`'s newest tumbling window, in a store keyed
+/// by that fixture's view state key and each minute's range.
+fn view_state_store(fixture: &Fixture) -> (Arc<ViewStateStore>, Vec<Batch>) {
     let maintenance = compile(&fixture.dag, &[], &[fixture.tumbling_windows[0]]).unwrap();
-    // The state of the tumbling window of minute `m`, `(m, m + 1]` minutes.
     let tumbling_windows: Vec<Batch> = (0..5)
         .map(|m| tumbling_window_state(&maintenance, m))
         .collect();
-    let definition = fixture.views[0].coverage().definition_id().to_owned();
-    assert!(fixture
-        .views
-        .iter()
-        .all(|view| view.coverage().definition_id() == definition));
+    let key = fixture.views[0].view_state_key().clone();
     let states = (0..5)
         .map(|m| {
             (
                 (
-                    definition.clone(),
+                    key.clone(),
                     (
                         m * TUMBLING_WINDOW_WIDTH_MS,
                         (m + 1) * TUMBLING_WINDOW_WIDTH_MS,
@@ -494,30 +487,56 @@ fn a_store_keyed_by_definition_and_time_range_answers_the_tumbling_windows() {
             )
         })
         .collect();
-    let store = Arc::new(DefinitionStore {
+    let store = Arc::new(ViewStateStore {
         states,
         requested: Default::default(),
     });
+    (store, tumbling_windows)
+}
+
+/// Runs `fixture`'s p50 and p99 against `store` at the query scope: the
+/// rows of each root, or the first error.
+fn run_quantiles(
+    fixture: &Fixture,
+    store: Arc<ViewStateStore>,
+) -> Result<Vec<Vec<Vec<Value>>>, Error> {
     let compiled = compile(&fixture.dag, &fixture.views, &[fixture.p50, fixture.p99]).unwrap();
-    let scope = query_scope();
-    let by_definition = block_on(async {
-        let dag = compiled.instantiate(store.clone()).unwrap();
-        let streams = dag
-            .execute(
-                compiled.roots(),
-                RunContext::new(scope.clone(), Limits::default()).unwrap(),
-            )
-            .unwrap();
+    block_on(async {
+        let dag = compiled.instantiate(store)?;
+        let streams = dag.execute(
+            compiled.roots(),
+            RunContext::new(query_scope(), Limits::default())?,
+        )?;
         let mut outputs = Vec::new();
         for mut stream in streams {
             let mut rows = Vec::new();
             while let Some(batch) = stream.next().await {
-                rows.extend(batch.unwrap().to_rows());
+                rows.extend(batch?.to_rows());
             }
             outputs.push(rows);
         }
-        outputs
-    });
+        Ok(outputs)
+    })
+}
+
+/// A store keyed only by `(view_state_key, time range)` answers the
+/// five-tumbling-window query: the five tumbling windows differ only in
+/// the `TimeShift` below them, which is selection, so they share one key and
+/// request the five one-minute ranges that tile the window, and the
+/// answers equal those of binding each tumbling window's state to its node.
+#[test]
+fn a_store_keyed_by_view_state_key_and_time_range_answers_the_tumbling_windows() {
+    let fixture = fixture();
+    let nodes: std::collections::BTreeSet<_> =
+        fixture.views.iter().map(|view| view.node_id).collect();
+    assert_eq!(nodes.len(), 5, "five views, five nodes");
+    let key = fixture.views[0].view_state_key();
+    assert!(fixture
+        .views
+        .iter()
+        .all(|view| view.view_state_key() == key));
+    let (store, tumbling_windows) = view_state_store(&fixture);
+    let by_key = run_quantiles(&fixture, store.clone()).unwrap();
     let mut requested: Vec<(i64, i64)> = store
         .requested
         .lock()
@@ -536,10 +555,38 @@ fn a_store_keyed_by_definition_and_time_range_answers_the_tumbling_windows() {
             .collect::<Vec<_>>()
     );
     // View `i` holds the tumbling window ending `i` minutes before the evaluation time.
+    let compiled = compile(&fixture.dag, &fixture.views, &[fixture.p50, fixture.p99]).unwrap();
     let by_node = store_at(&fixture.views, 300_000, |i| tumbling_windows[4 - i].clone());
-    let by_node: Vec<Vec<Vec<Value>>> = physical_common::execute(&compiled, by_node, scope)
+    let by_node: Vec<Vec<Vec<Value>>> = physical_common::execute(&compiled, by_node, query_scope())
         .iter()
         .map(|batches| batches.iter().flat_map(Batch::to_rows).collect())
         .collect();
-    assert_eq!(format!("{by_definition:?}"), format!("{by_node:?}"));
+    assert_eq!(format!("{by_key:?}"), format!("{by_node:?}"));
+}
+
+/// The bug a key of the coverage alone has: KLL views with `k = 200` and
+/// `k = 400` share their coverage, so a store keyed by `definition_id`
+/// would hand the `k = 200` states to the `k = 400` query. Keyed by the
+/// view state key, the `k = 400` query finds no state and fails instead.
+#[test]
+fn a_store_keyed_by_view_state_key_misses_states_of_another_sketch_parameter() {
+    let k200 = fixture_with(200);
+    let k400 = fixture_with(400);
+    assert_eq!(k200.views[0].coverage(), k400.views[0].coverage());
+    let (store, _) = view_state_store(&k200);
+    let error = run_quantiles(&k400, store).unwrap_err();
+    assert!(error.to_string().contains("no state for"), "{error}");
+}
+
+/// KLL views that differ only in θ (`k = 200` vs `k = 400`) have one
+/// coverage, so a logical key cannot tell their states apart, and
+/// different view state keys.
+#[test]
+fn views_differing_only_in_sketch_parameters_have_different_view_state_keys() {
+    let k200 = fixture_with(200);
+    let k400 = fixture_with(400);
+    for (view200, view400) in k200.views.iter().zip(&k400.views) {
+        assert_eq!(view200.coverage(), view400.coverage());
+        assert_ne!(view200.view_state_key(), view400.view_state_key());
+    }
 }

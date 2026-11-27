@@ -302,6 +302,18 @@ pub enum PhysicalASAPDAGValidationError {
 }
 
 impl PhysicalASAPDAG {
+    /// The content id of this plan: the 128-bit FNV-1a hash, in hex, of its
+    /// JSON as the plan file holds it (every serialized field of its nodes,
+    /// edges and roots; not `selected_physical_candidate`). Equal for equal
+    /// plans across processes and plan-file round trips; different when any
+    /// of those fields differ. With a node id, it names one view of one
+    /// installed plan. O(plan size).
+    pub fn plan_id(&self) -> String {
+        todo!("#1429: the plan's content id")
+    }
+}
+
+impl PhysicalASAPDAG {
     /// Each query's root in node ids, in workload order: query `i` is the
     /// scalar root keyed `i` when there is one, and otherwise the next entry
     /// of `roots`. Example: `roots = [n4]`, `scalar_roots = [(0, n2 / n3)]`

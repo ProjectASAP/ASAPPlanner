@@ -184,6 +184,20 @@ pub enum SketchParams {
     Hydra(HydraParams),
 }
 
+// θ compares and hashes as a value so it can key a stored view
+// (`ViewStateKey`). Its only float, DDSketch `alpha`, is never NaN (it lies in
+// (0, 1)), so `==` is an equivalence; the hash is that of its JSON text,
+// which equal values share.
+impl Eq for SketchParams {}
+
+impl std::hash::Hash for SketchParams {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        serde_json::to_string(self)
+            .expect("sketch parameters serialize")
+            .hash(state);
+    }
+}
+
 /// A sampling summary family — retains an actual (weighted) subset of input
 /// rows rather than a compressed sketch. The retained rows are its summary
 /// sample ([`FieldDataType::SummarySample`](crate::ir::schema::FieldDataType::SummarySample)),
