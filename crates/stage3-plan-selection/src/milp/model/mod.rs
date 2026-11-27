@@ -7,7 +7,7 @@
 //! | baseline (section 3) over execution contexts (section 5) | $x_{\kappa,v}$ (with $x^{\mathrm{mat}}_v = x_{\mathrm{Materialized}(v),v}$), $y_{\kappa,u,c,i}$, $z_{q,v}$, $t$, $r_s$ ([`SelectionVariables`]) | (A) [`input_satisfaction_constraints`], (B) [`producer_selection_constraints`], (C)/(D) [`query_coverage_constraints`], (E) [`acyclicity_constraints`], (F) and one consumer per context of a query-time result that is not materialized [`use_constraints`], each source's raw data on disk once [`selection_cost_terms`]; (G), (H): $y$ exists only on admissible edges where the producer delivers on the consumer's context |
 //! | retention (section 5) | $h_v$ | (R) [`super::retention::retention_constraints`] |
 //! | result and answer caches (`cost-terms-from-calibration.md`, section 2) | $t$, $b$, $H$, $w_{q,e}$ | [`super::kept_results::kept_result_terms`] |
-//! | resident windows under a window cache (`cost-terms-from-calibration.md`, section 1) | $r_v$ | (W) [`super::retention::resident_window_terms`] |
+//! | resident windows under a window cache (`cost-terms-from-calibration.md`, section 1) | $s_v$, the share of its most windows | (W) [`super::retention::resident_window_terms`] |
 //! | exact-only reads per query | $a_{q,e}$ | (X) [`super::exact_only::exact_only_constraints`] |
 //! | accuracy (`accuracy-models.md`, constraint (K)), per execution | $E_{\kappa,c,m}$, $D_{\kappa,c}$ ([`AccuracyVariables`]); $F_{\kappa,c,i,m}$, $H_{\kappa,c,i}$ | (K) [`accuracy_constraints`], over [`ErrorModel`] |
 //!
@@ -39,7 +39,7 @@ use super::graph::Components;
 use super::kept_results::{kept_result_terms, kept_results_quantity, KeptResultVariables};
 use super::retention::{
     least_retention_ms, resident_window_terms, resident_windows_quantity, retention_constraints,
-    retention_variables,
+    retention_variables, RetentionShare,
 };
 use super::upper_bound::dearer_than_a_feasible_plan;
 use crate::cost::ExecutionCosts;
@@ -85,9 +85,9 @@ pub(crate) struct SelectionVariables {
     /// $t$, by execution: only for executions on a cycle of selectable
     /// edges (a strongly connected component); `None` elsewhere.
     t: Vec<Option<Variable>>,
-    /// $h_v$ in seconds retained, for a candidate with a retention cost and
-    /// an execution kept ([`retention_variables`]).
-    pub(super) h: BTreeMap<PhysicalCandidateId, Variable>,
+    /// $h_v$ as a share of its longest need, for a candidate with a
+    /// retention cost and an execution kept ([`retention_variables`]).
+    pub(super) h: BTreeMap<PhysicalCandidateId, RetentionShare>,
     /// Per raw-data source a query-time scan keeps on disk at a cost: the
     /// cost per second of keeping it, at least each selected scan's,
     /// scaled by the objective's scale ([`selection_cost_terms`]).
@@ -354,9 +354,9 @@ pub(super) fn selection_cost_terms<'c>(
             .copied()
             .unwrap_or(0.0)
     };
-    for (v, &h) in &variables.h {
+    for (v, h) in &variables.h {
         if !costs.raw_data_source.contains_key(v) {
-            terms.push((retention_share(v), h));
+            terms.push((retention_share(v) * h.longest_need_s, h.share));
         }
     }
     let mut executions_of: HashMap<PhysicalCandidateId, Vec<usize>> = HashMap::new();
@@ -373,10 +373,10 @@ pub(super) fn selection_cost_terms<'c>(
     scans.sort_unstable_by_key(|(v, _)| **v);
     for (v, source) in scans {
         let r = raw_data_on_disk_of(source);
-        if let Some(&h) = variables.h.get(v) {
+        if let Some(h) = variables.h.get(v) {
             let per_retained_second = retention_share(v);
             if per_retained_second > 0.0 {
-                raw_data_rows.push((r, per_retained_second, h));
+                raw_data_rows.push((r, per_retained_second * h.longest_need_s, h.share));
             }
         } else if let Some(&d) = costs.unbounded_raw_data_on_disk_cost_per_second.get(v) {
             for &index in executions_of.get(v).into_iter().flatten() {
@@ -669,7 +669,8 @@ pub(super) fn objective_scale(largest: f64) -> f64 {
 /// $\sum_v W^{\mathrm{mat}}_v x^{\mathrm{mat}}_v + \sum_{\kappa,v}
 /// \rho_\kappa c_{\kappa,v} x_{\kappa,v} + \sum \rho_\kappa c_{\kappa,u,c,i}
 /// y_{\kappa,u,c,i} + \sum_v \pi_v h_v + \sum_s r_s$ ($\pi_v h_v$ of a
-/// query-time scan is in $r_s$) under (A)–(F), [`use_constraints`],
+/// query-time scan is in $r_s$; $h_v$ in seconds, held as a share of its
+/// longest need, [`RetentionShare`]) under (A)–(F), [`use_constraints`],
 /// the raw-data rows of [`selection_cost_terms`], (R), (X) and (K), with HiGHS at gap 0 on one
 /// thread. The executions dearer than a feasible plan
 /// ([`dearer_than_a_feasible_plan`]) or dominated by their lifetime twin

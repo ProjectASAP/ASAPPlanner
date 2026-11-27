@@ -6,7 +6,7 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use good_lp::{constraint, variable, Constraint, ProblemVariables, Variable};
+use good_lp::{constraint, variable, Constraint, Expression, ProblemVariables, Variable};
 
 use asap_types::stages::PhysicalCandidateId;
 
@@ -15,9 +15,36 @@ use crate::cost::ExecutionCosts;
 use crate::retention::ms_to_seconds;
 use crate::selectable::QueryId;
 
-/// $h_v$ in seconds retained (the unit keeps (R)'s coefficients near the
-/// others'), added to `problem`, for each candidate with a retention cost
-/// ([`crate::cost::ExecutionCosts::retention_cost_per_retained_second`])
+/// $h_v$, the seconds candidate $v$ retains, as the share $h_v / H_v \in
+/// [0, 1]$ of $H_v$, the longest any read of $v$ needs ((R)'s largest
+/// coefficient): $h_v$ is `longest_need_s` times `share`, and (R) reads
+/// that product, so its rows keep their tolerance in seconds (a row over
+/// the share alone would let HiGHS's absolute tolerance of 1e-6 stand for
+/// 1e-6 of $H_v$).
+///
+/// In seconds, $h_v$ would be unbounded with whole-number row coefficients
+/// (60 to 86,400). HiGHS's presolve takes such a column for an integer, and
+/// its root reduced-cost fixing then steps through up to 1,024 of its
+/// values at every root LP solve, in time quadratic in the steps: 149 such
+/// columns took about 80 % of a 12 s solve of a dag-viewer workload.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct RetentionShare {
+    /// $h_v / H_v$, in $[0, 1]$.
+    pub(crate) share: Variable,
+    /// $H_v$ in seconds; 1 when no read needs any retention.
+    pub(crate) longest_need_s: f64,
+}
+
+impl RetentionShare {
+    /// $h_v$ in seconds, `longest_need_s` times `share`: what (R) and the
+    /// answer horizon read.
+    pub(crate) fn seconds(&self) -> Expression {
+        self.longest_need_s * self.share
+    }
+}
+
+/// $h_v$ ([`RetentionShare`]), added to `problem`, for each candidate
+/// with a retention cost ([`ExecutionCosts::retention_cost_per_retained_second`])
 /// one of whose executions is `kept` (by position in
 /// `SelectableExecutions::executions`): one whose executions are all left
 /// out retains nothing.
@@ -25,11 +52,10 @@ pub(crate) fn retention_variables(
     inputs: &SelectionInputs<'_>,
     kept: &[bool],
     problem: &mut ProblemVariables,
-) -> BTreeMap<PhysicalCandidateId, Variable> {
+) -> BTreeMap<PhysicalCandidateId, RetentionShare> {
     let retaining = &inputs.costs.retention_cost_per_retained_second;
-    let mut retained: Vec<PhysicalCandidateId> = inputs
-        .selectable
-        .executions()
+    let executions = inputs.selectable.executions();
+    let mut retained: Vec<PhysicalCandidateId> = executions
         .iter()
         .zip(kept)
         .filter(|(execution, &kept)| kept && retaining.contains_key(&execution.candidate))
@@ -37,9 +63,41 @@ pub(crate) fn retention_variables(
         .collect();
     retained.sort_unstable();
     retained.dedup();
+    // Per candidate, the longest need of (R)'s rows, in ms.
+    let mut longest_need_ms: HashMap<PhysicalCandidateId, u64> = HashMap::new();
+    let reads_back = inputs
+        .selectable
+        .reads_back(&inputs.costs.retention_need_ms_per_edge)
+        .filter_map(|(index, _, need_ms)| Some((index, need_ms?)));
+    let least = (inputs
+        .costs
+        .least_retention_ms_per_execution
+        .iter()
+        .enumerate())
+    .filter_map(|(index, need_ms)| Some((index, (*need_ms)?)));
+    for (index, need_ms) in reads_back.chain(least) {
+        let v = executions[index].candidate;
+        if retaining.contains_key(&v) {
+            let longest = longest_need_ms.entry(v).or_default();
+            *longest = (*longest).max(need_ms);
+        }
+    }
     retained
         .into_iter()
-        .map(|v| (v, problem.add(variable().min(0))))
+        .map(|v| {
+            let longest_need_s = match longest_need_ms.get(&v) {
+                Some(&ms) if ms > 0 => ms_to_seconds(ms),
+                _ => 1.0,
+            };
+            let share = problem.add(variable().min(0).max(1));
+            (
+                v,
+                RetentionShare {
+                    share,
+                    longest_need_s,
+                },
+            )
+        })
         .collect()
 }
 
@@ -60,7 +118,7 @@ pub(crate) fn retention_variables(
 /// $z$, but tightens the relaxation where fractional $y$ leave $h_v$ low.
 pub(crate) fn retention_constraints(
     inputs: &SelectionInputs<'_>,
-    h: &BTreeMap<PhysicalCandidateId, Variable>,
+    h: &BTreeMap<PhysicalCandidateId, RetentionShare>,
     x: &[Variable],
     y: &BTreeMap<usize, Variable>,
     z: &BTreeMap<(QueryId, usize), Variable>,
@@ -76,7 +134,7 @@ pub(crate) fn retention_constraints(
         };
         if let Some(read) = reader.variable(index, y, z) {
             let need_ms = need_ms.expect("a candidate with h_v is read within a bound");
-            constraints.push(constraint!(h >= ms_to_seconds(need_ms) * read));
+            constraints.push(constraint!(h.seconds() >= ms_to_seconds(need_ms) * read));
         }
     }
     for (index, need_ms) in inputs
@@ -87,7 +145,9 @@ pub(crate) fn retention_constraints(
     {
         if let (Some(&h), Some(need_ms)) = (h.get(&executions[index].candidate), *need_ms) {
             if need_ms > 0 {
-                constraints.push(constraint!(h >= ms_to_seconds(need_ms) * x[index]));
+                constraints.push(constraint!(
+                    h.seconds() >= ms_to_seconds(need_ms) * x[index]
+                ));
             }
         }
     }
@@ -127,14 +187,18 @@ pub(crate) fn least_retention_ms(
 
 /// $r_v$, the windows a view under the data plane's window cache keeps
 /// resident in memory (`docs/design_docs/proposals/cost-terms-from-calibration.md`,
-/// section 1), one per view with a read kept: (W) $r_v \ge
-/// \operatorname{res}_{e}\, \mathrm{read}_e$ for each read $e$ of its
-/// executions (`ExecutionCosts::resident_reads`: an edge $y$ or a query
-/// output $z$; the read's mean windows, its most when `costs` is peak
-/// memory). Its quantity per window is positive, so at the optimum $r_v$ is
-/// the most over the selected reads, what `plan_cost` charges. The
-/// variables are added to `problem` and (W) to `rows`; returns each
-/// $r_v$'s term (quantity per window, $r_v$), unscaled.
+/// section 1), one per view with a read kept, as the share $s_v = r_v /
+/// R_v \in [0, 1]$ of $R_v$, the most windows any of its kept reads keeps:
+/// (W) $R_v s_v \ge \operatorname{res}_{e}\, \mathrm{read}_e$ for each
+/// read $e$ of its executions (`ExecutionCosts::resident_reads`: an edge
+/// $y$ or a query output $z$; the read's mean windows, its most when
+/// `costs` is peak memory). Its quantity per window is positive, so at the
+/// optimum $R_v s_v$ is the most over the selected reads, what `plan_cost`
+/// charges. The variables are added to `problem` and (W) to `rows`; returns
+/// each view's term ($R_v$ times its quantity per window, $s_v$), unscaled.
+///
+/// $r_v$ itself, in windows, would be unbounded with whole-number row
+/// coefficients, the shape [`RetentionShare`] avoids for $h_v$.
 pub(crate) fn resident_window_terms(
     costs: &ExecutionCosts,
     selectable: &crate::selectable::SelectableExecutions,
@@ -143,27 +207,44 @@ pub(crate) fn resident_window_terms(
     problem: &mut ProblemVariables,
     rows: &mut Vec<Constraint>,
 ) -> Vec<(f64, Variable)> {
+    // Each read kept: (view, its windows, its read variable).
+    let kept_reads: Vec<(PhysicalCandidateId, f64, Variable)> = costs
+        .resident_reads
+        .iter()
+        .filter_map(|read| {
+            let v = selectable.executions()[read.execution].candidate;
+            let per_window = *costs.per_resident_window.get(&v)?;
+            let read_variable = read.reader.variable(read.execution, y, z)?;
+            let windows = read.resident_windows;
+            (per_window > 0.0 && windows > 0.0 && windows.is_finite()).then_some((
+                v,
+                windows,
+                read_variable,
+            ))
+        })
+        .collect();
+    let mut most_resident_windows: BTreeMap<PhysicalCandidateId, f64> = BTreeMap::new();
+    for &(v, read_windows, _) in &kept_reads {
+        let most = most_resident_windows.entry(v).or_default();
+        *most = most.max(read_windows);
+    }
     let mut resident: BTreeMap<PhysicalCandidateId, Variable> = BTreeMap::new();
-    for read in &costs.resident_reads {
-        let v = selectable.executions()[read.execution].candidate;
-        let Some(&per_window) = costs.per_resident_window.get(&v) else {
-            continue;
-        };
-        let Some(read_variable) = read.reader.variable(read.execution, y, z) else {
-            continue;
-        };
-        let windows = read.resident_windows;
-        if per_window <= 0.0 || windows <= 0.0 {
-            continue;
-        }
-        let r = *resident
+    for (v, read_windows, read_variable) in kept_reads {
+        let share = *resident
             .entry(v)
-            .or_insert_with(|| problem.add(variable().min(0)));
-        rows.push(constraint!(r >= windows * read_variable));
+            .or_insert_with(|| problem.add(variable().min(0).max(1)));
+        rows.push(constraint!(
+            most_resident_windows[&v] * share >= read_windows * read_variable
+        ));
     }
     resident
         .into_iter()
-        .map(|(v, r)| (costs.per_resident_window[&v], r))
+        .map(|(v, share)| {
+            (
+                costs.per_resident_window[&v] * most_resident_windows[&v],
+                share,
+            )
+        })
         .collect()
 }
 
