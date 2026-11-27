@@ -346,12 +346,12 @@ fn an_exclusion_matching_nothing_changes_nothing() {
 fn a_kll_k_range_moves_the_quantile_to_a_larger_k() {
     let workload = kll_workload();
     let cases = [
-        (None, STORED_KLL_PLAN.as_slice(), 1404, 0.057445),
+        (None, STORED_KLL_PLAN.as_slice(), 1404, 0.059986),
         (
             Some(kll_at_most(1403)),
             STORED_KLL_PLAN.as_slice(),
             1404,
-            0.057445,
+            0.059986,
         ),
         (Some(kll_at_most(2862)), KLL_PLAN.as_slice(), 2863, 0.062491),
     ];

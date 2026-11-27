@@ -44,9 +44,10 @@
 //! `OPERATIONS_PER_GROUP_PER_RAW_BATCH` once per series and 10 s batch, 17
 //! per row) and sorts each series' 3,600 values (11.8 levels ×
 //! `SORT_OPERATIONS_PER_ROW_PER_LEVEL`, 65): 113 ns per row. A DDSketch built
-//! from the same rows takes 11 + `DDSKETCH_UPDATE_OPERATIONS_PER_ROW` (210) +
-//! 17 = 238 ns per row, about twice the exact plan, as measured (111 and
-//! 229).
+//! from the same rows takes 11 + `DDSKETCH_UPDATE_OPERATIONS_PER_ROW` (80) +
+//! 17 = 108 ns per row, about the exact plan's. Measured: 111 for the exact
+//! plan, and 229 for the DDSketch while each row recomputed its indexable
+//! bounds, which took 131 ns of it (so about 98 without).
 
 // Each rule lists every variant, as in `usage`: a wildcard arm would give a
 // new operator, summary type or sketch a default cost instead of failing
@@ -154,10 +155,20 @@ pub(crate) const AGGREGATE_MEASURE_OPERATIONS_PER_ROW: f64 = 4.0;
 pub(crate) const SORT_OPERATIONS_PER_ROW_PER_LEVEL: f64 = 5.5;
 
 /// One row folded into a DDSketch state, beyond
-/// `OPERATIONS_PER_GROUP_PER_RAW_BATCH` (fitted 210.8 on the grid of
-/// `OPERATIONS_PER_GROUP_PER_RAW_BATCH`): a query-time build measures
-/// 0.83–1.45x its charge at 1 Hz and 0.81–0.96x at 10 Hz.
-pub(crate) const DDSKETCH_UPDATE_OPERATIONS_PER_ROW: f64 = 210.0;
+/// `OPERATIONS_PER_GROUP_PER_RAW_BATCH`. It was fitted at 210.8 on the grid
+/// of `OPERATIONS_PER_GROUP_PER_RAW_BATCH`, when each row recomputed the
+/// sketch's indexable bounds twice (one `ln` and two `exp` each): once to
+/// validate the row and once in `asap_sketchlib`'s `DdSketch::try_add`. Both
+/// now compute them once per sketch. That takes 126–131 ns off each row of
+/// `StateColumnUpdater::update` (1,000 groups of 12,000 rows each, rows of
+/// a group together, median of 5 runs on one core of an idle server): 194–199
+/// → 68 ns at α = 0.01 and 0.05, over uniform, lognormal and gauge-walk
+/// values. A KLL's row (k = 132 and 200) measures 67–75 ns, unchanged. So
+/// the constant is the fit less 131, rounded. Rows interleaved across
+/// 10,000 groups, as a chain receives them, measure 237–251 → 114–128 ns
+/// at α = 0.05, against 115–119 for a KLL at k = 132: the cache misses of
+/// interleaving add about 45 ns to both, which no per-row constant charges.
+pub(crate) const DDSKETCH_UPDATE_OPERATIONS_PER_ROW: f64 = 80.0;
 
 /// One row folded into a KLL state, beyond
 /// `OPERATIONS_PER_GROUP_PER_RAW_BATCH` (fitted 83.5 on the grid of
@@ -521,9 +532,17 @@ pub(crate) const EXTREMUM_MERGE_OPERATIONS_PER_STATE: f64 = 125.0;
 /// 346 ns per state over 360,000 states.
 pub(crate) const COUNTER_MERGE_OPERATIONS_PER_STATE: f64 = 350.0;
 
-/// One DDSketch state merged: 1.8 µs per state of 10 rows, 2.5 µs per
-/// state of 600 rows.
-pub(crate) const DDSKETCH_MERGE_OPERATIONS_PER_STATE: f64 = 2_500.0;
+/// One DDSketch state merged: a sealed window is read in its view layout,
+/// which the executor merges in place. Fitted (716, minimizing the squared
+/// log error of each group's time, `MERGE_OPERATIONS_PER_OUTPUT_GROUP` in
+/// place) over 36 merges of 1,000 groups, median of 5 runs: α = 0.01 and
+/// 0.05; uniform, lognormal and gauge-walk values; 360 states of 10 rows,
+/// 60 of 100, 5 of 100, 60 of 600, 12 of 3,000 and 60 of 12,000. They
+/// measure 512–1,393 ns per state, 0.73–1.74x the charge with the group's
+/// term (RMS log error
+/// 0.25, against 1.22 at the earlier 2,500). The higher ratios are at
+/// α = 0.01 over the wider-spread values, whose states hold more buckets.
+pub(crate) const DDSKETCH_MERGE_OPERATIONS_PER_STATE: f64 = 700.0;
 
 /// One KLL state merged, beyond its bytes: the executor merges each input
 /// state into a copy of its group's state, so a merge costs per byte of
@@ -531,25 +550,28 @@ pub(crate) const DDSKETCH_MERGE_OPERATIONS_PER_STATE: f64 = 2_500.0;
 /// the merged state (`KLL_MERGE_OPERATIONS_PER_MERGED_BYTE`), which grows
 /// towards its `k`. The bytes are those the planner charges for each state
 /// (`sketch_state_bytes` of the rows it folds), so the fit is over the
-/// quantity it is applied to. Fitted over `asap_sketchlib`'s KLL at k = 200,
-/// 547 and 1,404, states of 10 to 3,000 rows, 1 to 360 states per group
-/// (1,000 groups, median of 3 runs), minimizing the squared log error:
-/// within 2x of 20 of the 24 points, 0.41–2.4x. Example: merging 360
-/// states of 10 rows (872 B each) per group, charged 17.0 KB merged at
-/// k = 547 and 33.5 KB at k = 1,404 (the library holds 8.9 and 33.5 KB),
-/// is charged 7.7 and 14.9 µs per state, measured 4.3 and 13.0 (4.7 and
-/// 13.3 in the executor): the charge past `k` is the item array's
-/// capacity, so the smaller `k` is over-charged and the two differ by
-/// 1.9x where they measure 3x.
+/// quantity it is applied to. Refitted over the executor's `SummaryMerge`
+/// at k = 132, 200, 547 and 1,404: 360 states of 10 rows, 60 of 100, 5 of
+/// 100, 60 of 600, 12 of 3,000 and 60 of 12,000 per group (1,000 groups of
+/// gauge-walk values, median of 5 runs), minimizing the squared log error
+/// of each group's time with `MERGE_OPERATIONS_PER_OUTPUT_GROUP` and
+/// `KLL_MERGE_OPERATIONS_PER_OUTPUT_GROUP` in place. The per-state term
+/// stays at 360: a free fit takes it to 0, with RMS log error 0.292
+/// against 0.297. The byte terms go from 0.1 and 0.43 to 0.31 and 0.47.
+/// RMS log error is 0.375 → 0.297; measured ÷ charged is 0.67–2.18 →
+/// 0.60–1.88. Example: 60 states of 12,000 rows at k = 132 (6,784 B
+/// charged each, 6,832 B merged) measure 6.5 µs per state, now charged 6.0
+/// with the group's terms (4.3 before). The worst point: at k = 1,404, 60 states of 600 rows
+/// measure 37 µs per state, charged 19.6 µs with the group's terms.
 pub(crate) const KLL_MERGE_OPERATIONS_PER_STATE: f64 = 360.0;
 
 /// Per byte of a KLL input state merged (see
 /// `KLL_MERGE_OPERATIONS_PER_STATE`).
-pub(crate) const KLL_MERGE_OPERATIONS_PER_INPUT_BYTE: f64 = 0.1;
+pub(crate) const KLL_MERGE_OPERATIONS_PER_INPUT_BYTE: f64 = 0.31;
 
 /// Per byte of the merged KLL state each input state is merged into (see
 /// `KLL_MERGE_OPERATIONS_PER_STATE`).
-pub(crate) const KLL_MERGE_OPERATIONS_PER_MERGED_BYTE: f64 = 0.43;
+pub(crate) const KLL_MERGE_OPERATIONS_PER_MERGED_BYTE: f64 = 0.47;
 
 /// Per output group of a `SummaryMerge`, beyond its input states' merges:
 /// creating the group's state and its output row. Merging exact
@@ -950,7 +972,7 @@ fn univmon_expected_layers(layers: u8) -> f64 {
 /// `V h / D` smallest. A counter-matrix sketch (Count-Min, Count Sketch,
 /// UnivMon) merges per counter, and a heap variant also re-estimates its
 /// heap's residents ([`heap_residents`]). Example: a KLL state of 872 bytes merged into one of
-/// 33,512 costs 360 + 0.1 × 872 + 0.43 × 33,512 = 14,857. Five 1-minute
+/// 33,512 costs 360 + 0.31 × 872 + 0.47 × 33,512 = 16,381. Five 1-minute
 /// KMV states at k = 4,323 of 12,000 rows each of 1,000,000 users retain
 /// 4,323 hashes each, drawn from the 362,000 smallest: 3.40 ms per state,
 /// measured 3.12 on the executor.

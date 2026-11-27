@@ -205,16 +205,16 @@ fn defined_constants() -> Vec<(String, f64)> {
 /// The charge is the formula's own floating-point value, its terms added
 /// in the order the formula adds them, so it does not move when the
 /// terms are kept per constant: 0.1 compared hashes (0.62 each) and 0.3
-/// merged bytes (0.43 each) per row, times 7 rows, charge
-/// (0.1 × 0.62 + 0.3 × 0.43) × 7 = 1.337, where adding the per-constant
-/// products (0.1 × 7) × 0.62 + (0.3 × 7) × 0.43 gives 1.3370000000000002
+/// merged bytes (0.47 each) per row, times 7 rows, charge
+/// (0.1 × 0.62 + 0.3 × 0.47) × 7 = 1.4209999999999998, where adding the
+/// per-constant products (0.1 × 7) × 0.62 + (0.3 × 7) × 0.47 gives 1.421
 /// (0.1 × 7 is 0.7000000000000001).
 #[test]
 fn the_charge_adds_terms_in_the_formula_s_order() {
     let terms = NodeCostTerms::of(CostConstant::KmvUpdateOperationsPerComparedHash, 0.1)
         .plus(CostConstant::KllMergeOperationsPerMergedByte, 0.3)
         .times(7.0);
-    assert_eq!(terms.operations(), (0.1 * 0.62 + 0.3 * 0.43) * 7.0);
+    assert_eq!(terms.operations(), (0.1 * 0.62 + 0.3 * 0.47) * 7.0);
     let by_constant = terms.operations_with(CostConstant::operations_per_unit);
     assert_ne!(by_constant, terms.operations());
     assert!((by_constant - terms.operations()).abs() <= 1e-12 * terms.operations());
