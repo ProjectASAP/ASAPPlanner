@@ -316,7 +316,7 @@ fn rule8_no_group_holds_two_identical_candidates() {
 /// `topk(5, sum by (host) (m))` over a gauge whose sign is not declared:
 /// a Count-Min build over weights not proven non-negative is unusable in
 /// every physical form, and whether the weights are proven is a logical
-/// fact, so Pass 1 lists no such θ (8b; Stage 2 pruned 240 `CmsWithHeap`
+/// fact, so Pass 1 lists no such θ (8b; Stage 2 pruned 240 `CountMinSketchWithHeap`
 /// θs and the readout above them before). Every live logical candidate
 /// then has a physical candidate.
 #[test]

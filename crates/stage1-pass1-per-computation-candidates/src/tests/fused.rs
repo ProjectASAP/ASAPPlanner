@@ -11,7 +11,7 @@ use asap_types::test_support::memo_builders::{candidates_of, query, with_non_neg
 use asap_types::workload::DataWorkload;
 
 /// `topk(5, sum by (job) (sum_over_time(m[5m])))` over a gauge with no
-/// declared sign: its `CmsWithHeap`
+/// declared sign: its `CountMinSketchWithHeap`
 /// state lists no build (its weights are not proven non-negative), while
 /// the Count Sketch heap, which needs no sign, lists every θ.
 #[test]
@@ -35,7 +35,7 @@ fn a_count_min_heap_over_weights_of_unknown_sign_lists_no_build() {
     );
     query(&mut memo, ranked, None);
     let memo = pass1_memo(memo, &[]).unwrap();
-    let (count_min, _) = state_group(&memo, SketchAlgorithm::CmsWithHeap);
+    let (count_min, _) = state_group(&memo, SketchAlgorithm::CountMinSketchWithHeap);
     assert!(candidates_of(&memo, count_min).is_empty());
     let (count_sketch, _) = state_group(&memo, SketchAlgorithm::CountSketchWithHeap);
     assert_eq!(

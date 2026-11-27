@@ -35,7 +35,7 @@ fn summary_type_of_operator_reads_the_builds_summary_type() {
 
 /// A sketch build has one entry per listed θ, an exact build one
 /// without θ, and a Count-Min build over weights not proven non-negative
-/// none (a `Cms` over the sample value of a gauge with no declared sign).
+/// none (a `CountMinSketch` over the sample value of a gauge with no declared sign).
 #[test]
 fn listed_build_parameters_lists_a_sketch_builds_parameters() {
     let mut memo = Memo::new(&DataWorkload::default());
@@ -55,5 +55,8 @@ fn listed_build_parameters_lists_a_sketch_builds_parameters() {
             .collect::<Vec<_>>()
     );
     assert_eq!(listed(FieldDataType::exact(ExactKind::Sum)), vec![None]);
-    assert_eq!(listed(FieldDataType::Sketch(SketchAlgorithm::CountMinSketch)), vec![]);
+    assert_eq!(
+        listed(FieldDataType::Sketch(SketchAlgorithm::CountMinSketch)),
+        vec![]
+    );
 }
