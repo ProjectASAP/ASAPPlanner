@@ -964,3 +964,141 @@ fn a_finalized_exact_accumulator_has_its_aggregates_sign() {
         );
     }
 }
+
+/// The value column a `FinalizeExactAccumulator` outputs over an exact
+/// state of `latency[1m]` (`[ts, value Float64, host]`) or `counts[1m]`
+/// (`value` Int64): the aggregate it finalizes to names and types it,
+/// whatever the state's input. A constant input (`SummaryAgg[Max](1.0)`)
+/// and the sample value both finalize so: a grouped `max` over Int64
+/// values is Int64; a per-series one outputs a Float64 `value`.
+#[test]
+fn a_finalized_exact_state_outputs_its_aggregates_value_column() {
+    use asap_types::ir::operator::arguments::Source;
+    use asap_types::summary_type::{ExactKind, SummaryInputExpr, SummaryUpdate};
+    let mut memo = memo();
+    let latency = add(&mut memo, series("latency"));
+    let counts = add(
+        &mut memo,
+        Operator::NonASAP(NonASAPOp::Scan {
+            source: Source::TimeSeries {
+                metric: "counts".into(),
+            },
+            predicates: vec![],
+            schema: Schema::with_time_index(
+                vec![
+                    Field::plain("ts", DataType::Timestamp, false),
+                    Field::plain("value", DataType::Int64, false),
+                    Field::plain("host", DataType::Utf8, false),
+                ],
+                0,
+                vec![],
+            ),
+        }),
+    );
+    let latency = add(&mut memo, range(MINUTE_MS, latency));
+    let counts = add(&mut memo, range(MINUTE_MS, counts));
+    let mut finalized = |rows, kind: ExactKind, weight: SummaryInputExpr, reduction: Reduction| {
+        let state = add(
+            &mut memo,
+            Operator::ASAP(ASAPOp::SummaryAgg {
+                child: rows,
+                summary_type: FieldDataType::exact(kind),
+                input: SummaryUpdate { item: None, weight },
+                reduction,
+                filter: None,
+            }),
+        );
+        let finalize = add(
+            &mut memo,
+            Operator::ASAP(ASAPOp::FinalizeExactAccumulator {
+                child: state,
+                counter_readout: None,
+            }),
+        );
+        memo.groups()[finalize.0 as usize]
+            .group_properties
+            .schema
+            .fields
+            .clone()
+    };
+    let constant = || SummaryInputExpr::Constant(1.0);
+    let sample_value = || SummaryInputExpr::Column(ColumnRef::SampleValue);
+    let everything = || Reduction::by(vec![]);
+    let (float, int) = (DataType::Float64, DataType::Int64);
+    // (rows, kind, input, grouping, the value column: name, type, nullable)
+    for (rows, kind, weight, reduction, (name, dtype, nullable)) in [
+        (
+            latency,
+            ExactKind::Sum,
+            constant(),
+            Reduction::PerEntity,
+            ("value", &float, false),
+        ),
+        (
+            latency,
+            ExactKind::Max,
+            sample_value(),
+            Reduction::PerEntity,
+            ("value", &float, false),
+        ),
+        (
+            latency,
+            ExactKind::Sum,
+            constant(),
+            by_host(),
+            ("sum", &float, false),
+        ),
+        (
+            latency,
+            ExactKind::Max,
+            sample_value(),
+            by_host(),
+            ("max", &float, false),
+        ),
+        // A global extremum is NULL over no rows.
+        (
+            latency,
+            ExactKind::Max,
+            constant(),
+            everything(),
+            ("max", &float, true),
+        ),
+        (
+            latency,
+            ExactKind::Max,
+            sample_value(),
+            everything(),
+            ("max", &float, true),
+        ),
+        (
+            counts,
+            ExactKind::Max,
+            constant(),
+            Reduction::PerEntity,
+            ("value", &float, false),
+        ),
+        (
+            counts,
+            ExactKind::Max,
+            sample_value(),
+            Reduction::PerEntity,
+            ("value", &float, false),
+        ),
+        (
+            counts,
+            ExactKind::Max,
+            constant(),
+            everything(),
+            ("max", &int, true),
+        ),
+    ] {
+        let fields = finalized(rows, kind, weight.clone(), reduction.clone());
+        let value = fields.last().filter(|_| reduction != Reduction::PerEntity);
+        let value = value.or(fields.get(VALUE)).unwrap();
+        assert_eq!(
+            (value.name.as_str(), &value.dtype, value.nullable),
+            (name, &FieldDataType::Plain(dtype.clone()), nullable),
+            "{kind:?} of {weight:?} by {reduction:?} over group {rows:?}"
+        );
+    }
+}

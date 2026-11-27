@@ -1,5 +1,5 @@
 //! Aggregate coverage, a memo-group property: what an aggregate (a summary
-//! state or an exact `Aggregate`) covers ([`AggregateCoverage`]):
+//! state, an exact `Aggregate`, or an exact state finalized to one) covers ([`AggregateCoverage`]):
 //! `definition` (what it computes, its inputs named by memo group) and
 //! `selection` (which output rows of that computation it took, in the
 //! selection algebra of [`crate::ir::properties::selection`]). Design:
@@ -28,7 +28,7 @@ use thiserror::Error;
 use super::column_properties::{project_lineage, ColumnLineage};
 use super::MemoGroupAsInput;
 use crate::ir::operator::arguments::{AtModifier, Reduction, SourceColumn, TimeShift};
-use crate::ir::operator::asap::{selected_from, summary_agg_layout, ASAPOp};
+use crate::ir::operator::asap::{finalized_aggregate, selected_from, summary_agg_layout, ASAPOp};
 use crate::ir::operator::input::{InputOrTemporaryBuild, OperatorInput};
 use crate::ir::operator::node::{Operator, OperatorResultKind};
 use crate::ir::operator::non_asap::{NonASAPOp, TimeRangeKind};
@@ -36,11 +36,11 @@ use crate::ir::properties::selection::{
     constraint_of, union, Constraint, IntervalConstraintLimit, SelectionBox,
 };
 use crate::ir::scalar::expr_ir::ScalarValue;
-use crate::ir::scalar::{Predicate, ScalarExpr};
-use crate::ir::schema::ColumnId;
+use crate::ir::scalar::{ColumnRef, Predicate, ScalarExpr};
+use crate::ir::schema::{ColumnId, FieldDataType};
 use crate::ir::SchemaDerivationError;
 use crate::stages::MemoGroupId;
-use crate::summary_type::{MergeInputRule, SummaryTypeCapability};
+use crate::summary_type::{ExactKind, MergeInputRule, SummaryInputExpr, SummaryTypeCapability};
 
 /// What an aggregate computes, with every lifted selection removed, its
 /// inputs named by memo group.
@@ -85,7 +85,9 @@ impl AggregateCoverage {
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum CoverageError {
     /// The node has no coverage: it is no aggregate (`SummaryAgg`,
-    /// `Aggregate`, `SummaryTumblingWindowChain`, `SummaryMerge`), or a
+    /// `Aggregate`, `SummaryTumblingWindowChain`, `SummaryMerge`, a
+    /// `FinalizeExactAccumulator` of an exact `SummaryAgg` whose input is a
+    /// column or that counts rows), or a
     /// `TimeRange`/`TimeShift` over a chain whose windows are not one
     /// interval on the timestamp column. A caller bug, or bad input when it
     /// is a merge's input.
@@ -145,13 +147,15 @@ fn stored_coverage<'m>(input: &MemoGroupAsInput<'m>) -> Option<&'m AggregateCove
 }
 
 /// Coverage of what a memo group computes with `operator` over its input
-/// groups: a
-/// `SummaryAgg`, an exact `Aggregate`, a
-/// `SummaryTumblingWindowChain` (a build over its input, the timestamp
-/// column unconstrained), a `TimeRange` or `TimeShift` over a chain (the
-/// chain's coverage with the windows' interval on the timestamp column),
-/// a `SummaryMerge`, or a `Filter` that keeps whole states of a grouped
-/// `SummaryAgg`. So `SummaryMerge(TimeRange(W, TimeShift(o, Chain[w](X))))`
+/// groups: a `SummaryAgg`, an exact `Aggregate`, a
+/// `FinalizeExactAccumulator` of an exact `SummaryAgg` whose input is a
+/// column or that counts rows (the coverage of the `Aggregate` it finalizes
+/// to), a `SummaryTumblingWindowChain` (a build
+/// over its input, the timestamp column unconstrained), a `TimeRange` or
+/// `TimeShift` over a chain (the chain's coverage with the windows'
+/// interval on the timestamp column), a `SummaryMerge`, or a `Filter` that
+/// keeps whole states of a grouped `SummaryAgg`. So
+/// `SummaryMerge(TimeRange(W, TimeShift(o, Chain[w](X))))`
 /// covers what `SummaryAgg(TimeRange(W, TimeShift(o, X)))` does. A merge
 /// reads its inputs' stored coverage and fails
 /// unless every input has the same definition and their selections are
@@ -223,6 +227,55 @@ pub(super) fn aggregate_coverage<'m>(
                 None => Ok(merged),
                 Some(keys) => regrouped(merged, &children[0], keys),
             }
+        }
+        // A finalized exact state covers what the aggregate it finalizes
+        // to covers: `FinalizeExactAccumulator[Rate]` of
+        // `SummaryAgg[Counter](m[5m])` covers what `Aggregate(Rate)(m[5m])`
+        // does.
+        Operator::ASAP(ASAPOp::FinalizeExactAccumulator {
+            child,
+            counter_readout,
+        }) => {
+            let operator = child.operator();
+            let Operator::ASAP(
+                build @ ASAPOp::SummaryAgg {
+                    summary_type: FieldDataType::ExactAggregate(kind, _),
+                    input,
+                    ..
+                },
+            ) = &operator
+            else {
+                return Err(CoverageError::NoCoverage);
+            };
+            // The aggregate as the front ends write it: its measure reads
+            // the sample value as no column. A state of an input that is no
+            // column computes no aggregate, unless it counts rows.
+            let reads_sample_value = match &input.weight {
+                SummaryInputExpr::Column(column) => *column == ColumnRef::SampleValue,
+                _ if *kind == ExactKind::Count => false,
+                _ => return Err(CoverageError::NoCoverage),
+            };
+            // The group's schema derived from the same aggregate, so this
+            // does too: an error here is a caller bug.
+            let Ok(Some(mut aggregate)) = finalized_aggregate(build, *counter_readout) else {
+                debug_assert!(false, "a finalize whose schema derives has an aggregate");
+                return Err(CoverageError::NoCoverage);
+            };
+            if let NonASAPOp::Aggregate {
+                measures, filters, ..
+            } = &mut aggregate
+            {
+                if reads_sample_value {
+                    // `finalized_aggregate` made this kind's measure with
+                    // this readout, so one exists without a column too.
+                    measures[0] = kind
+                        .measure(None, *counter_readout)
+                        .expect("a measure for this kind and readout");
+                }
+                // No filter list when unfiltered.
+                filters.retain(Option::is_some);
+            }
+            aggregate_coverage(&Operator::NonASAP(aggregate))
         }
         Operator::ASAP(_) => Err(CoverageError::NoCoverage),
     }
