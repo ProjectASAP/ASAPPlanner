@@ -86,7 +86,8 @@ impl AggregateCoverage {
 pub enum CoverageError {
     /// The node has no coverage: it is no aggregate (`SummaryAgg`,
     /// `Aggregate`, `SummaryTumblingWindowChain`, `SummaryMerge`, a
-    /// `FinalizeExactAccumulator` of an exact `SummaryAgg`), or a
+    /// `FinalizeExactAccumulator` of an exact `SummaryAgg` whose input is a
+    /// column or that counts rows), or a
     /// `TimeRange`/`TimeShift` over a chain whose windows are not one
     /// interval on the timestamp column. A caller bug, or bad input when it
     /// is a merge's input.
@@ -147,8 +148,9 @@ fn stored_coverage<'m>(input: &MemoGroupAsInput<'m>) -> Option<&'m AggregateCove
 
 /// Coverage of what a memo group computes with `operator` over its input
 /// groups: a `SummaryAgg`, an exact `Aggregate`, a
-/// `FinalizeExactAccumulator` of an exact `SummaryAgg` (the coverage of the
-/// `Aggregate` it finalizes to), a `SummaryTumblingWindowChain` (a build
+/// `FinalizeExactAccumulator` of an exact `SummaryAgg` whose input is a
+/// column or that counts rows (the coverage of the `Aggregate` it finalizes
+/// to), a `SummaryTumblingWindowChain` (a build
 /// over its input, the timestamp column unconstrained), a `TimeRange` or
 /// `TimeShift` over a chain (the chain's coverage with the windows'
 /// interval on the timestamp column), a `SummaryMerge`, or a `Filter` that

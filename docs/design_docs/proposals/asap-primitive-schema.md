@@ -237,7 +237,7 @@ Formally, a state means `family(input(σ(C)))` for each group of `G`, where `C` 
 
 #### 4.2.2 Deriving the definition and the selection
 
-Coverage is a memo-group property, derived like an output schema and never declared; its types and derivation are in `crates/types/src/stages/logical/group/aggregate_coverage.rs`. The memo derives it once, when `Memo::find_or_add_group` creates an aggregate group (a summary state, an exact `Aggregate`, or an exact state a `FinalizeExactAccumulator` finalizes): `aggregate_coverage` walks down from the group's `SummaryAgg` or `Aggregate` (for a finalize, the `Aggregate` it finalizes to) through its input groups' `expression`s, and the result, its inputs named by `MemoGroupId`, is stored in the group's `GroupProperties::aggregate_coverage`. Node trees have none. One walk produces both parts: every filter condition either moves into the `selection` or stays in the `definition`. A `SummaryMerge` group reads its input groups' stored coverage; it is a valid group only when their definitions are equal and their selections are disjoint (disjoint in time, for counter states).
+Coverage is a memo-group property, derived like an output schema and never declared; its types and derivation are in `crates/types/src/stages/logical/group/aggregate_coverage.rs`. The memo derives it once, when `Memo::find_or_add_group` creates an aggregate group (a summary state, an exact `Aggregate`, or a `FinalizeExactAccumulator` of an exact `SummaryAgg`): `aggregate_coverage` walks down from the group's `SummaryAgg` or `Aggregate` (for a finalize, the `Aggregate` it finalizes to) through its input groups' `expression`s, and the result, its inputs named by `MemoGroupId`, is stored in the group's `GroupProperties::aggregate_coverage`. Node trees have none. One walk produces both parts: every filter condition either moves into the `selection` or stays in the `definition`. A `SummaryMerge` group reads its input groups' stored coverage; it is a valid group only when their definitions are equal and their selections are disjoint (disjoint in time, for counter states).
 
 ```rust
 /// What a summary state computes, with every lifted selection removed,
@@ -1417,8 +1417,9 @@ A PromQL range `m[r]` evaluated at t reads the samples in (t − r, t]: left-ope
 /// The coverage of what a memo group computes with `operator` over its
 /// input groups (§4.2.2). Errors: `NoCoverage` for an operator that is
 /// not a `SummaryAgg`, an exact `Aggregate`, a `SummaryTumblingWindowChain`,
-/// a `SummaryMerge`, a `FinalizeExactAccumulator` of an exact `SummaryAgg`,
-/// a `Filter` keeping whole states, or one time interval
+/// a `SummaryMerge`, a `FinalizeExactAccumulator` of an exact `SummaryAgg`
+/// whose input is a column or that counts rows, a `Filter` keeping whole
+/// states, or one time interval
 /// (`TimeRange`/`TimeShift`) over a chain; for a merge, an input's own
 /// error, `EmptyMerge` (no inputs),
 /// `DefinitionMismatch` (inputs compute different things) or

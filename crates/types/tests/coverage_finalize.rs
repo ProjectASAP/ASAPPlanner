@@ -9,9 +9,7 @@ use asap_types::ir::scalar::ColumnRef;
 use asap_types::ir::schema::FieldDataType;
 use asap_types::ir::{ASAPOp, ExprSemantics, Operator, Predicate};
 use asap_types::stages::{AggregateCoverage, Memo, MemoGroupId};
-use asap_types::summary_type::{
-    CounterReadout, ExactKind, ExactParams, SummaryInputExpr, SummaryUpdate,
-};
+use asap_types::summary_type::{CounterReadout, ExactKind, SummaryInputExpr, SummaryUpdate};
 use asap_types::test_support::memo_builders::{candidate, group, scan_group};
 use asap_types::test_support::memo_fixtures::{
     aggregate, aggregate_with, compare, range, state, state_grouped_by,
@@ -55,10 +53,7 @@ fn a_finalized_rate_covers_what_the_rate_covers() {
     );
     let counter = add(
         &mut memo,
-        state(
-            FieldDataType::ExactAggregate(ExactKind::Counter, ExactParams::Counter),
-            last_5m,
-        ),
+        state(FieldDataType::exact(ExactKind::Counter), last_5m),
     );
     let finalized = add(&mut memo, finalize(counter, Some(CounterReadout::Rate)));
     assert!(coverage(&memo, rate).is_some());
@@ -157,7 +152,7 @@ fn a_finalized_filtered_sum_of_a_named_column_covers_what_the_sum_covers() {
 /// Pass 1 adds it), or created by the finalize with the `Aggregate` added.
 #[test]
 fn a_rate_group_has_one_coverage_whichever_form_creates_it() {
-    let counter_type = FieldDataType::ExactAggregate(ExactKind::Counter, ExactParams::Counter);
+    let counter_type = FieldDataType::exact(ExactKind::Counter);
     let rate_of = |last_5m| aggregate(Reduction::PerEntity, AggIntent::Rate, last_5m);
 
     let (mut aggregate_first, last_5m) = memo_over_last_5m();

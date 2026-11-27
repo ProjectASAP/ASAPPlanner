@@ -969,8 +969,8 @@ fn a_finalized_exact_accumulator_has_its_aggregates_sign() {
 /// state of `latency[1m]` (`[ts, value Float64, host]`) or `counts[1m]`
 /// (`value` Int64): the aggregate it finalizes to names and types it,
 /// whatever the state's input. A constant input (`SummaryAgg[Max](1.0)`)
-/// and the sample value both finalize so: a `max` over Int64 values is
-/// Int64.
+/// and the sample value both finalize so: a grouped `max` over Int64
+/// values is Int64; a per-series one outputs a Float64 `value`.
 #[test]
 fn a_finalized_exact_state_outputs_its_aggregates_value_column() {
     use asap_types::ir::operator::arguments::Source;
