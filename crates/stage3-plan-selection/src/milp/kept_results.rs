@@ -24,16 +24,17 @@ use asap_cost::plan::kept_results::{answers_kept, held_by_bounded_cache, kept_pe
 use asap_types::stages::PhysicalCandidateId;
 
 use super::model::SelectionInputs;
+use super::retention::RetentionShare;
 use crate::cost::ExecutionCosts;
 use crate::retention::ms_to_seconds;
 use crate::selectable::QueryId;
 
 /// The variables the terms read: $x$ by execution, $z$ by (query,
-/// execution), $h_v$ in seconds by candidate.
+/// execution), $h_v$ by candidate ([`RetentionShare`]).
 pub(crate) struct KeptResultVariables<'a> {
     pub(crate) x: &'a [Variable],
     pub(crate) z: &'a BTreeMap<(QueryId, usize), Variable>,
-    pub(crate) h: &'a BTreeMap<PhysicalCandidateId, Variable>,
+    pub(crate) h: &'a BTreeMap<PhysicalCandidateId, RetentionShare>,
 }
 
 /// The result cache's and the answer cache's terms of `costs`' quantity
@@ -82,8 +83,8 @@ pub(crate) fn kept_result_terms(
             .max()
             .unwrap_or(0);
         let horizon = problem.add(variable().min(0).max(ms_to_seconds(longest)));
-        for &h in variables.h.values() {
-            rows.push(constraint!(horizon >= h));
+        for h in variables.h.values() {
+            rows.push(constraint!(horizon >= h.seconds()));
         }
         let mut pool = Expression::default();
         let mut largest = 0.0;
