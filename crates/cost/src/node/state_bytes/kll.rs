@@ -19,13 +19,13 @@ const KLL_CAPACITY_HEIGHTS: usize = 20;
 /// version (8), and `k`, `m`, its levels and its items (8 each).
 const KLL_VIEW_HEADER_BYTES: u64 = 40;
 
-/// Rows up to which [`kll_schedule`] runs the compaction schedule; past
+/// Rows up to which [`kll_held_after`] runs the compaction schedule; past
 /// them a state is priced at the capacity of its levels, a bound.
 /// 2^20 rows run about 10^5 compactions per seed.
 const KLL_SIMULATED_ROWS_MAX: u64 = 1 << 20;
 
-/// Coin seeds [`kll_schedule`] runs the schedule with (1 to 16), the most
-/// any leaves taken: enough that it bounds the mean state of a column
+/// Coin seeds [`kll_held_after`] runs the schedule with (1 to 16), taking
+/// the most any seed leaves: enough that it bounds the mean state of a column
 /// (at 1,100 rows and `k` = 200 a state retains 183 to 186 items; four
 /// seeds leave at most 185, sixteen 186).
 const KLL_SIMULATED_SEEDS: std::ops::RangeInclusive<u64> = 1..=16;
@@ -37,7 +37,7 @@ const KLL_SIMULATED_SEEDS: std::ops::RangeInclusive<u64> = 1..=16;
 /// byte of its row beside the state (`state_offset_bytes_per_row`).
 ///
 /// Up to `k` rows nothing compacts: one level and every row. Past `k`, the
-/// levels and items [`kll_schedule`] gives. Unknown rows fill every level
+/// levels and items [`kll_held_after`] gives. Unknown rows fill every level
 /// at its capacity. A state is assumed to fold at least one row.
 ///
 /// Example: `k` = 132 over a 15 s window of one sample a second (15 rows):
@@ -48,7 +48,7 @@ pub(super) fn kll_view_bytes(k: u32, input_rows: StateInputRows) -> u64 {
         None => (KLL_MAX_LEVELS as u64, kll_capacity_items(k, KLL_MAX_LEVELS)),
         Some(rows) if rows <= k => (1, rows.max(1)),
         Some(rows) => {
-            let held = kll_schedule(k, rows);
+            let held = kll_held_after(k, rows);
             (held.levels, held.retained_items)
         }
     };
@@ -62,44 +62,55 @@ pub(super) fn kll_view_bytes(k: u32, input_rows: StateInputRows) -> u64 {
 /// `KLL_MAX_LEVELS + 1` level boundaries, its item buffer and its
 /// compaction scratch. Up to `k` rows nothing compacts: the buffer is the
 /// smallest `16 · 2^j` items holding every row, and no scratch. Past `k`,
-/// the buffer and scratch [`kll_schedule`] gives; unknown rows are as many
-/// as it bounds. A memoized CDF, held only between a query and the next
-/// update, is left out.
+/// the buffer and scratch [`kll_held_after`] gives. Unknown rows: the
+/// largest buffer ([`kll_max_capacity`]) and the scratch bound
+/// ([`kll_scratch_bound_items`]). A memoized CDF, held only between a query
+/// and the next update, is left out.
 ///
 /// Example: `k` = 132 over 15 rows: 248 + 8 · 62 + 8 · 16 = 872 bytes.
 pub(super) fn kll_open_bytes(k: u32, input_rows: StateInputRows) -> u64 {
     let k = u64::from(k.clamp(8, KLL_MAX_K));
-    let (buffer_items, scratch_items) = match input_rows.rows_per_state().unwrap_or(u64::MAX) {
-        rows if rows <= k => (kll_buffer_items(k, rows.max(1)), 0),
-        rows => {
-            let held = kll_schedule(k, rows);
+    let (buffer_items, scratch_items) = match input_rows.rows_per_state() {
+        None => (kll_max_capacity(k), kll_scratch_bound_items(k)),
+        Some(rows) if rows <= k => (kll_buffer_items(k, rows.max(1)), 0),
+        Some(rows) => {
+            let held = kll_held_after(k, rows);
             (held.buffer_items, held.scratch_items)
         }
     };
+    kll_open_bytes_holding(buffer_items, scratch_items)
+}
+
+/// Bytes `Kll::memory_bytes` counts for an unshrunk KLL whose buffer has
+/// room for `buffer_items` and whose compaction scratch for
+/// `scratch_items`: its struct (248), its `KLL_MAX_LEVELS + 1` level slots
+/// (8 each) and those 8-byte items.
+fn kll_open_bytes_holding(buffer_items: u64, scratch_items: u64) -> u64 {
     std::mem::size_of::<asap_sketchlib::Kll<f64>>() as u64
         + 8 * (KLL_MAX_LEVELS as u64 + 1)
         + 8 * (buffer_items + scratch_items)
 }
 
 /// What a KLL holds after a stream of rows, in counts of 8-byte items
-/// (levels excepted), by [`kll_schedule`].
+/// (levels excepted), by [`kll_held_after`].
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-struct KllSchedule {
+struct KllHeld {
     /// Levels in use.
     levels: u64,
     /// Items retained over those levels: what its view holds.
     retained_items: u64,
     /// Items its buffer has room for: the smallest `16 · 2^j` holding the
-    /// most items it ever retained at once (`kll_buffer_items`).
+    /// most items it ever retained at once, at most `max_capacity`
+    /// (`kll_buffer_items`).
     buffer_items: u64,
     /// Items its compaction scratch (`merge_buf`) has room for.
     scratch_items: u64,
 }
 
-impl KllSchedule {
+impl KllHeld {
     /// The levels and items of whichever retains more items (`other`'s on
     /// a tie), and the larger buffer and the larger scratch.
-    fn most(self, other: Self) -> Self {
+    fn upper_bound_with(self, other: Self) -> Self {
         let retains_more = match other.retained_items >= self.retained_items {
             true => other,
             false => self,
@@ -124,26 +135,26 @@ impl KllSchedule {
 /// `k` = 200, 240 to 298 items): the schedule runs with each of
 /// [`KLL_SIMULATED_SEEDS`] (the library's own coin, `Kll::with_seed`):
 /// the levels and items of the seed retaining the most items, and the
-/// largest buffer and scratch of any seed ([`KllSchedule::most`]). Past
+/// largest buffer and scratch of any seed ([`KllHeld::upper_bound_with`]). Past
 /// [`KLL_SIMULATED_ROWS_MAX`] rows, the capacity of the levels the rows
-/// fill bounds the levels and items, the largest buffer the buffer, and
-/// the scratch is the bound `asap_sketchlib`'s `Kll::estimated_memory_bytes`
-/// takes, `2 (k - 1)` items.
+/// fill bounds the levels and items, the buffer is the largest
+/// ([`kll_max_capacity`]) and the scratch its bound
+/// ([`kll_scratch_bound_items`]).
 ///
 /// Results are cached by `(k, rows)`: planning prices the same states many
 /// times, and near [`KLL_SIMULATED_ROWS_MAX`] one run of all seeds takes
-/// about 20 ms.
-fn kll_schedule(k: u64, rows: u64) -> KllSchedule {
+/// about 30 ms.
+fn kll_held_after(k: u64, rows: u64) -> KllHeld {
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
-    static SCHEDULES: OnceLock<Mutex<HashMap<(u64, u64), KllSchedule>>> = OnceLock::new();
+    static SCHEDULES: OnceLock<Mutex<HashMap<(u64, u64), KllHeld>>> = OnceLock::new();
     if rows > KLL_SIMULATED_ROWS_MAX {
         let levels = kll_levels_after(k, rows);
-        return KllSchedule {
+        return KllHeld {
             levels,
             retained_items: kll_capacity_items(k, levels as usize),
-            buffer_items: kll_buffer_items(k, rows),
-            scratch_items: 2 * (k - 1),
+            buffer_items: kll_max_capacity(k),
+            scratch_items: kll_scratch_bound_items(k),
         };
     }
     let cache = SCHEDULES.get_or_init(Default::default);
@@ -151,18 +162,18 @@ fn kll_schedule(k: u64, rows: u64) -> KllSchedule {
         return held;
     }
     let held = KLL_SIMULATED_SEEDS
-        .map(|seed| kll_schedule_with_seed(k, rows, seed))
-        .fold(KllSchedule::default(), KllSchedule::most);
+        .map(|seed| kll_held_after_with_seed(k, rows, seed))
+        .fold(KllHeld::default(), KllHeld::upper_bound_with);
     cache.lock().expect("not poisoned").insert((k, rows), held);
     held
 }
 
-/// [`kll_schedule`] for one coin `seed`: exactly the levels, items and
+/// [`kll_held_after`] for one coin `seed`: exactly the levels, items and
 /// buffer `asap_sketchlib::Kll::with_seed(k, 8, seed)` holds after `rows`
 /// updates, and its scratch when every compaction merges its survivors
 /// into the level above (it skips that merge when the two runs are
 /// already in order, so it may hold less).
-fn kll_schedule_with_seed(k: u64, rows: u64, seed: u64) -> KllSchedule {
+fn kll_held_after_with_seed(k: u64, rows: u64, seed: u64) -> KllHeld {
     let capacities = kll_capacities(k);
     let capacity = |levels: usize, level: usize| {
         capacities[(levels - 1 - level).min(KLL_CAPACITY_HEIGHTS - 1)]
@@ -171,19 +182,22 @@ fn kll_schedule_with_seed(k: u64, rows: u64, seed: u64) -> KllSchedule {
     let mut sizes = [0u64; KLL_MAX_LEVELS + 1];
     let mut levels = 1;
     let mut remaining = rows;
-    // The most items held at once, just before a compaction or at the end.
+    // The items held now, and the most held at once (just before a
+    // compaction, or at the end).
+    let mut retained_items = 0;
     let mut most_retained = 0;
     let mut scratch_items = 0;
     loop {
         // The values until level 0 holds one more than its capacity.
         let fill = (capacity(levels, 0) + 1).saturating_sub(sizes[0]).max(1);
         if remaining < fill {
-            sizes[0] += remaining;
+            retained_items += remaining;
             break;
         }
         remaining -= fill;
         sizes[0] += fill;
-        most_retained = most_retained.max(sizes[..levels].iter().sum());
+        retained_items += fill;
+        most_retained = most_retained.max(retained_items);
         let mut level = 0;
         while level < KLL_MAX_LEVELS && sizes[level] > capacity(levels, level) {
             if level + 1 == levels {
@@ -197,13 +211,13 @@ fn kll_schedule_with_seed(k: u64, rows: u64, seed: u64) -> KllSchedule {
             if copied > scratch_items {
                 scratch_items = copied.max(2 * scratch_items).max(4);
             }
+            retained_items -= sizes[level] - survivors;
             sizes[level] = 0;
             sizes[level + 1] += survivors;
             level += 1;
         }
     }
-    let retained_items = sizes[..levels].iter().sum();
-    KllSchedule {
+    KllHeld {
         levels: levels as u64,
         retained_items,
         buffer_items: kll_buffer_items(k, most_retained.max(retained_items)),
@@ -253,14 +267,20 @@ impl KllCoin {
     }
 }
 
-/// Level capacities of a KLL of `k` by height from the top:
-/// `max(ceil(k · (2/3)^i), m)` (`asap_sketchlib`'s `capacity_table`).
+/// The capacity of each level of a KLL of `k` by height `i` from the top,
+/// without end: `max(ceil(k · (2/3)^i), m)`, the scale multiplied by 2/3
+/// per height as `asap_sketchlib` does.
+fn kll_capacity_by_height(k: u64) -> impl Iterator<Item = u64> {
+    std::iter::successors(Some(1.0_f64), |scale| Some(scale * (2.0 / 3.0)))
+        .map(move |scale| ((k as f64 * scale).ceil() as u64).max(KLL_MIN_LEVEL_CAPACITY))
+}
+
+/// Level capacities of a KLL of `k` as `asap_sketchlib` caches them by
+/// height from the top (`capacity_table`).
 fn kll_capacities(k: u64) -> [u64; KLL_CAPACITY_HEIGHTS] {
     let mut capacities = [0; KLL_CAPACITY_HEIGHTS];
-    let mut scale = 1.0_f64;
-    for capacity in capacities.iter_mut() {
-        *capacity = ((k as f64 * scale).ceil() as u64).max(KLL_MIN_LEVEL_CAPACITY);
-        scale *= 2.0 / 3.0;
+    for (capacity, at_height) in capacities.iter_mut().zip(kll_capacity_by_height(k)) {
+        *capacity = at_height;
     }
     capacities
 }
@@ -287,14 +307,15 @@ fn kll_buffer_items(k: u64, items: u64) -> u64 {
 /// level up to `k` of about 17,700, where the cached capacities have not
 /// yet all decayed to `m`.
 fn kll_max_capacity(k: u64) -> u64 {
-    let mut scale = 1.0_f64;
-    (0..KLL_MAX_LEVELS)
-        .map(|_| {
-            let capacity = ((k as f64 * scale).ceil() as u64).max(KLL_MIN_LEVEL_CAPACITY);
-            scale *= 2.0 / 3.0;
-            capacity
-        })
-        .sum()
+    kll_capacity_by_height(k).take(KLL_MAX_LEVELS).sum()
+}
+
+/// Items of compaction scratch an open KLL of `k` holds at most, the bound
+/// `asap_sketchlib`'s `Kll::estimated_memory_bytes` takes: `2 (k - 1)` (a
+/// compaction copies at most `k` items, and the scratch grows to at most
+/// about twice that).
+fn kll_scratch_bound_items(k: u64) -> u64 {
+    2 * (k - 1)
 }
 
 /// `L(n)`: the levels a KLL of `k` holds after `n` rows, a level added once
@@ -314,9 +335,10 @@ fn kll_levels_after(k: u64, rows: u64) -> u64 {
 }
 
 /// The items the top `levels` levels of a KLL of `k` hold at capacity:
-/// `max(ceil(k · (2/3)^i), 8)` for heights `i` from the top. Over all
-/// [`KLL_MAX_LEVELS`] levels, the most items the library holds: 1,206 at
-/// `k` = 269.
+/// `max(ceil(k · (2/3)^i), 8)` for heights `i` from the top, every height
+/// past the cached ones at the last cached capacity. Over all
+/// [`KLL_MAX_LEVELS`] levels, 1,206 at `k` = 269: the most items the
+/// library holds ([`kll_max_capacity`]) for `k` up to about 17,700.
 fn kll_capacity_items(k: u64, levels: usize) -> u64 {
     let capacities = kll_capacities(k);
     (0..levels)
@@ -335,11 +357,8 @@ mod tests {
     /// and, open (`memory_bytes`, unshrunk), its buffer and scratch.
     #[test]
     fn the_schedule_holds_what_the_library_holds() {
-        let open_bytes = |held: KllSchedule| {
-            std::mem::size_of::<Kll<f64>>() as u64
-                + 8 * (KLL_MAX_LEVELS as u64 + 1)
-                + 8 * (held.buffer_items + held.scratch_items)
-        };
+        let open_bytes =
+            |held: KllHeld| kll_open_bytes_holding(held.buffer_items, held.scratch_items);
         for k in [8u64, 200, 1_000] {
             for rows in [1u64, 15, 200, 201, 1_100, 2_000, 13_200, 100_000] {
                 for seed in [1u64, 7, 12_345] {
@@ -349,7 +368,7 @@ mod tests {
                     }
                     let bytes = sketch.to_view_bytes();
                     KllView::from_bytes(&bytes).unwrap();
-                    let held = kll_schedule_with_seed(k, rows, seed);
+                    let held = kll_held_after_with_seed(k, rows, seed);
                     assert_eq!(
                         (held.levels, held.retained_items),
                         (

@@ -258,8 +258,7 @@ impl StateInputRows {
 /// target), held as an owned sketch: a DDSketch's stores as they grow
 /// ([`ddsketch_open_state_bytes`]), an unshrunk KLL's level slots, growing
 /// buffer and compaction scratch (`kll_open_bytes`), a Count-Min's struct
-/// and counters; every family
-/// with no view layout as sealed.
+/// and counters; every family with no view layout as sealed.
 pub fn open_sketch_state_bytes(params: &SketchParams, input_rows: StateInputRows) -> u64 {
     match params {
         SketchParams::DDSketch { alpha } if *alpha > 0.0 && *alpha < 1.0 => {

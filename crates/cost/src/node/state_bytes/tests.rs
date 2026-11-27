@@ -254,9 +254,9 @@ fn the_assumed_ddsketch_range_is_named_only_when_the_bytes_use_it() {
 /// (`Kll::to_view_bytes`): the header, the boundaries of the levels in use
 /// and the retained items. E.g. a 10 s tumbling window of a series sampled
 /// every 15 s sees one sample: 40 + 8 + 8 = 56 bytes, where an owned shrunk
-/// sketch holds 272 and an open one 872. A state still receiving values is
-/// charged as the open (unshrunk) owned sketch: 248 + 8 · 62 + 8 · 16 = 872
-/// bytes for that one sample.
+/// sketch holds 272. A state still receiving values is charged as the open
+/// (unshrunk) owned sketch: 248 + 8 · 62 + 8 · 16 = 872 bytes for that one
+/// sample.
 #[test]
 fn kll_state_bytes_grow_with_the_samples_it_sees() {
     let k = 269;
@@ -332,14 +332,14 @@ fn kll_state_bytes_grow_with_the_samples_it_sees() {
 /// the sketch's bytes plus the accumulator's own fields, named per
 /// family. It equals the priced bytes where `asap_sketchlib`'s estimate
 /// is exact (Count-Min, Count Sketch, HLL, KMV at `n` distinct items) and
-/// for KLL up to `k` rows (priced open, unshrunk). DDSketch is priced at what it is expected to
-/// hold, within 1.5 times either way. For the heap sketches and UnivMon
+/// for KLL up to `k` rows (priced open, unshrunk). DDSketch is priced at
+/// what it is expected to hold, within 1.5 times either way. For the heap sketches and UnivMon
 /// the price bounds it, by at most [`BYTES_AGREEMENT_FACTOR`] times once
 /// the state is full;
 /// UnivMon's price also bounds the bytes its sketch holds.
 /// KLL past `k` rows is priced at the most an open sketch's buffer and
 /// scratch grow to over 16 coin seeds; the executor's coin is unseeded, so
-/// it holds at most 1.25 times less than priced, and at most 5% more.
+/// priced ÷ held is within 0.95 to 1.25.
 ///
 /// HydraCms is left out: plan selection prices an independent Count-Min
 /// per group, the executor one shared grid, so the two agree only at
@@ -800,10 +800,10 @@ fn priced_bytes_agree_with_the_executor() {
                 Rows::Keyed => updater.update_keyed(&labels(key), 1.0, 0).unwrap(),
             }
         }
-        // As the executor seals a window, except a KLL past `k` rows. A
-        // KLL or Count-Min accumulator is the owned sketch before it is
-        // sealed into its view: priced open (past `k` rows, a KLL's open
-        // buffer and compaction scratch).
+        // As the executor seals a window, except a KLL. A KLL or
+        // Count-Min accumulator is the owned sketch before it is sealed
+        // into its view: priced open, so a KLL stays unshrunk (its buffer
+        // and, past `k` rows, its compaction scratch).
         if !matches!(family, FieldDataType::Sketch(A::KLL)) {
             updater.shrink_to_fit();
         }
