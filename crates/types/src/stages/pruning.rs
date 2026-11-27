@@ -97,10 +97,11 @@ pub enum RootPruneReason {
         tumbling_window_width_ms: u64,
         evaluation_period_ms: Option<u64>,
     },
-    /// The consumer's input group has no candidate at all, e.g. a
-    /// Count-Min state over weights not proven non-negative, for which no
-    /// build is listed (`GroupProperties::count_min_weights_not_proven_non_negative`).
-    InputGroupHasNoCandidate {
+    /// The consumer's input has no producer edge: its group has no
+    /// candidate (e.g. a Count-Min state over weights not proven
+    /// non-negative, for which `listed_build_parameters` lists no build),
+    /// or none with the θ the consumer reads.
+    InputHasNoProducer {
         consumer: CandidateForMemoGroupId,
         input: usize,
     },

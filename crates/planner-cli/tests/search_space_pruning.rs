@@ -351,4 +351,11 @@ fn rule8b_a_count_min_build_over_unproven_weights_is_not_a_logical_candidate() {
         })
         .collect();
     assert_eq!(without_physical, Vec::<String>::new());
+    // The selected plan is the one Stage 2 left when it pruned those θs.
+    let expected = 0.0464580586986;
+    assert!(
+        (cost(&document) - expected).abs() <= 1e-9 * expected,
+        "plan cost {} (expected {expected})",
+        cost(&document)
+    );
 }

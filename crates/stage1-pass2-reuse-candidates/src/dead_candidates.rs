@@ -152,12 +152,12 @@ impl<'a> EdgeGraph<'a> {
             let edges = match dead[&at] {
                 Some(input) => match self.by_consumer_input.get(&(at, input)) {
                     Some(edges) => edges.as_slice(),
-                    // The input group has no candidate at all (e.g. a
-                    // Count-Min state no build is listed for).
+                    // The input has no producer edge (e.g. a Count-Min
+                    // state no build is listed for).
                     None => {
                         causes.push(PruneCause {
                             through_pruned_candidates: path,
-                            root: RootPruneReason::InputGroupHasNoCandidate {
+                            root: RootPruneReason::InputHasNoProducer {
                                 consumer: at,
                                 input,
                             },
