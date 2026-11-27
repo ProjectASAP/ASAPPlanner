@@ -10,16 +10,16 @@
       {
         "accepted_metric": "rank",
         "sketches": [
-          "Kll"
+          "KLL"
         ],
-        "summary": "accepted rank (Kll)"
+        "summary": "accepted rank (KLL)"
       },
       {
         "accepted_metric": "rank",
         "sketches": [
-          "Kll"
+          "KLL"
         ],
-        "summary": "accepted rank (Kll)"
+        "summary": "accepted rank (KLL)"
       }
     ],
     "cost": {
@@ -58,7 +58,7 @@
           "cost_per_second": 9.52973612504e-9,
           "cost_source": "analytical",
           "cpu_core_seconds_per_second": 0.000846666666667,
-          "detail": "build Kll into 10000 states: 200000 rows x 84 ops, 200000 group visits; x 0.0167/s; holds 10080000 bytes for 50.800 ms",
+          "detail": "build KLL into 10000 states: 200000 rows x 84 ops, 200000 group visits; x 0.0167/s; holds 10080000 bytes for 50.800 ms",
           "ingest_cpu_core_seconds_per_second": 0.0,
           "multiplier": 1,
           "operator": "SummaryAgg",
@@ -277,7 +277,7 @@
               },
               {
                 "dtype": {
-                  "Sketch": "Kll"
+                  "Sketch": "KLL"
                 },
                 "name": "state",
                 "nullable": false
@@ -365,7 +365,7 @@
               },
               {
                 "dtype": {
-                  "Sketch": "Kll"
+                  "Sketch": "KLL"
                 },
                 "name": "state",
                 "nullable": false
@@ -593,7 +593,7 @@
               },
               {
                 "dtype": {
-                  "Sketch": "Kll"
+                  "Sketch": "KLL"
                 },
                 "name": "state",
                 "nullable": false
@@ -620,7 +620,7 @@
           },
           "parameters": {
             "Kll": {
-              "k": 2863
+              "k": 1404
             }
           },
           "payload": {
@@ -636,7 +636,7 @@
                 },
                 "reduction": "PerEntity",
                 "summary_type": {
-                  "Sketch": "Kll"
+                  "Sketch": "KLL"
                 }
               }
             }

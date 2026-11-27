@@ -3,7 +3,7 @@
   "materialized_views": [
     {
       "coverage": {
-        "definition_id": "bfbffb8f01ab202d585c3e18c9f78080",
+        "definition_id": "5597d603bdf9f1a148d7c7e5344c1a97",
         "selection": [
           {
             "columns": []
@@ -14,8 +14,24 @@
         "materialized_views": []
       },
       "node_id": 1,
+      "plan_id": "d819419d7c65dcf094799c55ab8d600a",
       "refresh": "at_ingestion",
-      "retention_ms": 3600000
+      "retention_ms": 3600000,
+      "view_state_key": {
+        "definition_id": "5597d603bdf9f1a148d7c7e5344c1a97",
+        "logical_properties": {
+          "parameters": {
+            "DDSketch": {
+              "alpha": 0.05
+            }
+          }
+        },
+        "window": {
+          "tumbling": {
+            "width_ms": 60000
+          }
+        }
+      }
     }
   ],
   "queries": [
@@ -25,23 +41,23 @@
   "selected": {
     "accepted": [
       {
-        "accepted_metric": "rank",
+        "accepted_metric": "relative",
         "sketches": [
-          "Kll"
+          "DDSketch"
         ],
-        "summary": "accepted rank (Kll)"
+        "summary": "accepted relative (DDSketch)"
       },
       {
-        "accepted_metric": "rank",
+        "accepted_metric": "relative",
         "sketches": [
-          "Kll"
+          "DDSketch"
         ],
-        "summary": "accepted rank (Kll)"
+        "summary": "accepted relative (DDSketch)"
       }
     ],
     "cost": {
-      "cost_per_second": 3.79645240569e-6,
-      "cpu_core_seconds_per_second": 0.239944333333,
+      "cost_per_second": 2.68358158695e-6,
+      "cpu_core_seconds_per_second": 0.205447,
       "per_node": {
         "0": {
           "cost_per_second": 9.44496e-8,
@@ -58,11 +74,11 @@
           "timing": "ingestion_time"
         },
         "1": {
-          "cost_per_second": 3.30686729215e-6,
+          "cost_per_second": 2.4937719977e-6,
           "cost_source": "analytical",
-          "cpu_core_seconds_per_second": 0.196586666667,
-          "detail": "build Kll in tumbling windows of 60000 ms for 10000 groups: 2000000 rows x 84 ops, 1000 group visits, 166.7 states emitted; x 1.0000/s; keeps 953280000 bytes",
-          "ingest_cpu_core_seconds_per_second": 0.19617,
+          "cpu_core_seconds_per_second": 0.188586666667,
+          "detail": "build DDSketch in tumbling windows of 60000 ms for 10000 groups: 2000000 rows x 80 ops, 1000 group visits, 166.7 states emitted; x 1.0000/s; keeps 324560000 bytes",
+          "ingest_cpu_core_seconds_per_second": 0.18817,
           "multiplier": 1,
           "operator": "SummaryTumblingWindowChain",
           "priced_outside_measured_scale": false,
@@ -72,10 +88,10 @@
           "timing": "ingestion_time"
         },
         "2": {
-          "cost_per_second": 1.23684018927e-9,
+          "cost_per_second": 1.23684006275e-9,
           "cost_source": "analytical",
           "cpu_core_seconds_per_second": 0.00011,
-          "detail": "time range 3600s: 60 tumbling windows of states; x 0.0167/s; holds 1496 bytes for 6.600 ms",
+          "detail": "time range 3600s: 60 tumbling windows of states; x 0.0167/s; holds 496 bytes for 6.600 ms",
           "ingest_cpu_core_seconds_per_second": 0.0,
           "multiplier": 1,
           "operator": "TimeRange",
@@ -86,29 +102,29 @@
           "timing": "query_time"
         },
         "3": {
-          "cost_per_second": 3.65769933343e-7,
+          "cost_per_second": 8.10014011891e-8,
           "cost_source": "analytical",
-          "cpu_core_seconds_per_second": 0.032346,
-          "detail": "merge 600000 states into 10000; x 0.0167/s; holds 55680000 bytes for 1940.760 ms",
+          "cpu_core_seconds_per_second": 0.00718333333333,
+          "detail": "merge 600000 states into 10000; x 0.0167/s; holds 28080000 bytes for 431.000 ms",
           "ingest_cpu_core_seconds_per_second": 0.0,
           "multiplier": 1,
           "operator": "SummaryMerge",
           "priced_outside_measured_scale": false,
-          "query_ms_per_step": 1940.76,
+          "query_ms_per_step": 431.0,
           "refresh_cpu_ms_per_window": 0.0,
           "refresh_wall_ms_per_window": 0.0,
           "timing": "query_time"
         },
         "4": {
-          "cost_per_second": 1.4062496e-8,
+          "cost_per_second": 6.559e-9,
           "cost_source": "analytical",
-          "cpu_core_seconds_per_second": 0.00125066666667,
+          "cpu_core_seconds_per_second": 0.000583333333333,
           "detail": "estimate 10000 groups x 1; x 0.0167/s",
           "ingest_cpu_core_seconds_per_second": 0.0,
           "multiplier": 1,
           "operator": "SummaryEstimate",
           "priced_outside_measured_scale": false,
-          "query_ms_per_step": 75.04,
+          "query_ms_per_step": 35.0,
           "refresh_cpu_ms_per_window": 0.0,
           "refresh_wall_ms_per_window": 0.0,
           "timing": "query_time"
@@ -128,15 +144,15 @@
           "timing": "query_time"
         },
         "6": {
-          "cost_per_second": 1.4062496e-8,
+          "cost_per_second": 6.559e-9,
           "cost_source": "analytical",
-          "cpu_core_seconds_per_second": 0.00125066666667,
+          "cpu_core_seconds_per_second": 0.000583333333333,
           "detail": "estimate 10000 groups x 1; x 0.0167/s",
           "ingest_cpu_core_seconds_per_second": 0.0,
           "multiplier": 1,
           "operator": "SummaryEstimate",
           "priced_outside_measured_scale": false,
-          "query_ms_per_step": 75.04,
+          "query_ms_per_step": 35.0,
           "refresh_cpu_ms_per_window": 0.0,
           "refresh_wall_ms_per_window": 0.0,
           "timing": "query_time"
@@ -158,33 +174,33 @@
       },
       "source": "analytical-cost-v2 (illustrative statistics)",
       "usage": {
-        "average_memory_bytes": 955081025.445,
-        "cpu_ops_per_second": 233544333.333,
+        "average_memory_bytes": 324761708.055,
+        "cpu_ops_per_second": 199047000.0,
         "disk_bytes": 0,
         "latency_per_query": [
           {
             "allowed_lateness_ms": 0.0,
             "evaluations_per_second": 0.0166666666667,
-            "latency_ms": 2047.41,
+            "latency_ms": 497.61,
             "precompute_execution_ms": 25.0,
             "precompute_queueing_ms": 0.0,
-            "query_execution_ms": 2022.41
+            "query_execution_ms": 472.61
           },
           {
             "allowed_lateness_ms": 0.0,
             "evaluations_per_second": 0.0166666666667,
-            "latency_ms": 2047.41,
+            "latency_ms": 497.61,
             "precompute_execution_ms": 25.0,
             "precompute_queueing_ms": 0.0,
-            "query_execution_ms": 2022.41
+            "query_execution_ms": 472.61
           }
         ],
         "peak_cpu_cores": 3,
-        "peak_memory_bytes": 1008961592,
+        "peak_memory_bytes": 352640592,
         "precompute_load": 0.000416666666667,
         "recommended_configuration": {
           "ingest": {
-            "predicted_busy_thread_seconds_per_second": 0.20457,
+            "predicted_busy_thread_seconds_per_second": 0.19657,
             "recommended_threads": 1
           },
           "precompute": {
@@ -192,7 +208,7 @@
             "recommended_threads": 1
           },
           "query": {
-            "predicted_busy_thread_seconds_per_second": 0.0349576666667,
+            "predicted_busy_thread_seconds_per_second": 0.00846033333333,
             "recommended_threads": 1
           }
         },
@@ -264,7 +280,7 @@
               },
               {
                 "dtype": {
-                  "Sketch": "Kll"
+                  "Sketch": "DDSketch"
                 },
                 "name": "state",
                 "nullable": false
@@ -308,7 +324,7 @@
               },
               {
                 "dtype": {
-                  "Sketch": "Kll"
+                  "Sketch": "DDSketch"
                 },
                 "name": "state",
                 "nullable": false
@@ -352,7 +368,7 @@
               },
               {
                 "dtype": {
-                  "Sketch": "Kll"
+                  "Sketch": "DDSketch"
                 },
                 "name": "state",
                 "nullable": false
@@ -440,7 +456,7 @@
               },
               {
                 "dtype": {
-                  "Sketch": "Kll"
+                  "Sketch": "DDSketch"
                 },
                 "name": "state",
                 "nullable": false
@@ -614,7 +630,7 @@
               },
               {
                 "dtype": {
-                  "Sketch": "Kll"
+                  "Sketch": "DDSketch"
                 },
                 "name": "state",
                 "nullable": false
@@ -640,8 +656,8 @@
             "timing": "ingestion_time"
           },
           "parameters": {
-            "Kll": {
-              "k": 132
+            "DDSketch": {
+              "alpha": 0.05
             }
           },
           "payload": {
@@ -657,7 +673,7 @@
                 },
                 "reduction": "PerEntity",
                 "summary_type": {
-                  "Sketch": "Kll"
+                  "Sketch": "DDSketch"
                 },
                 "tumbling_window_width_ms": 60000
               }
@@ -665,7 +681,7 @@
           },
           "retention_ms": 3600000,
           "view_coverage": {
-            "definition_id": "bfbffb8f01ab202d585c3e18c9f78080",
+            "definition_id": "5597d603bdf9f1a148d7c7e5344c1a97",
             "selection": [
               {
                 "columns": []
@@ -688,7 +704,7 @@
               },
               {
                 "dtype": {
-                  "Sketch": "Kll"
+                  "Sketch": "DDSketch"
                 },
                 "name": "state",
                 "nullable": false
@@ -714,8 +730,8 @@
             "timing": "query_time"
           },
           "parameters": {
-            "Kll": {
-              "k": 132
+            "DDSketch": {
+              "alpha": 0.05
             }
           },
           "payload": {
@@ -748,7 +764,7 @@
               },
               {
                 "dtype": {
-                  "Sketch": "Kll"
+                  "Sketch": "DDSketch"
                 },
                 "name": "state",
                 "nullable": false
@@ -774,8 +790,8 @@
             "timing": "query_time"
           },
           "parameters": {
-            "Kll": {
-              "k": 132
+            "DDSketch": {
+              "alpha": 0.05
             }
           },
           "payload": {
@@ -1037,5 +1053,8 @@
       ],
       "scalar_roots": []
     }
-  }
+  },
+  "warnings": [
+    "assumed data fact: source data declares no column_magnitudes for value, so a DDSketch state over it is costed for magnitudes in [1, 1000000000]; this affects cost only, the accuracy guarantee does not depend on it"
+  ]
 }

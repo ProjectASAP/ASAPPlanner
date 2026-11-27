@@ -3,7 +3,7 @@
   "materialized_views": [
     {
       "coverage": {
-        "definition_id": "bfbffb8f01ab202d585c3e18c9f78080",
+        "definition_id": "2d963bc6757b98ad80934456821cc040",
         "selection": [
           {
             "columns": []
@@ -14,12 +14,28 @@
         "materialized_views": []
       },
       "node_id": 1,
+      "plan_id": "1dbad9b63b6c632668a1db7298a6197f",
       "refresh": "at_ingestion",
-      "retention_ms": 600000
+      "retention_ms": 600000,
+      "view_state_key": {
+        "definition_id": "2d963bc6757b98ad80934456821cc040",
+        "logical_properties": {
+          "parameters": {
+            "Kll": {
+              "k": 1404
+            }
+          }
+        },
+        "window": {
+          "tumbling": {
+            "width_ms": 300000
+          }
+        }
+      }
     },
     {
       "coverage": {
-        "definition_id": "bfbffb8f01ab202d585c3e18c9f78080",
+        "definition_id": "2d963bc6757b98ad80934456821cc040",
         "selection": [
           {
             "columns": []
@@ -30,12 +46,28 @@
         "materialized_views": []
       },
       "node_id": 10,
+      "plan_id": "1dbad9b63b6c632668a1db7298a6197f",
       "refresh": "at_ingestion",
-      "retention_ms": 180000
+      "retention_ms": 180000,
+      "view_state_key": {
+        "definition_id": "2d963bc6757b98ad80934456821cc040",
+        "logical_properties": {
+          "parameters": {
+            "Kll": {
+              "k": 1404
+            }
+          }
+        },
+        "window": {
+          "tumbling": {
+            "width_ms": 10000
+          }
+        }
+      }
     },
     {
       "coverage": {
-        "definition_id": "bfbffb8f01ab202d585c3e18c9f78080",
+        "definition_id": "2d963bc6757b98ad80934456821cc040",
         "selection": [
           {
             "columns": []
@@ -48,8 +80,24 @@
         ]
       },
       "node_id": 11,
+      "plan_id": "1dbad9b63b6c632668a1db7298a6197f",
       "refresh": "at_ingestion",
-      "retention_ms": 180000
+      "retention_ms": 180000,
+      "view_state_key": {
+        "definition_id": "2d963bc6757b98ad80934456821cc040",
+        "logical_properties": {
+          "parameters": {
+            "Kll": {
+              "k": 1404
+            }
+          }
+        },
+        "window": {
+          "tumbling": {
+            "width_ms": 60000
+          }
+        }
+      }
     }
   ],
   "queries": [
@@ -62,28 +110,28 @@
       {
         "accepted_metric": "rank",
         "sketches": [
-          "Kll"
+          "KLL"
         ],
-        "summary": "accepted rank (Kll)"
+        "summary": "accepted rank (KLL)"
       },
       {
         "accepted_metric": "rank",
         "sketches": [
-          "Kll"
+          "KLL"
         ],
-        "summary": "accepted rank (Kll)"
+        "summary": "accepted rank (KLL)"
       },
       {
         "accepted_metric": "rank",
         "sketches": [
-          "Kll"
+          "KLL"
         ],
-        "summary": "accepted rank (Kll)"
+        "summary": "accepted rank (KLL)"
       }
     ],
     "cost": {
-      "cost_per_second": 4.21393310534e-7,
-      "cpu_core_seconds_per_second": 0.033541623812,
+      "cost_per_second": 4.25529259649e-7,
+      "cpu_core_seconds_per_second": 0.0339091400893,
       "per_node": {
         "0": {
           "cost_per_second": 3.14989416e-11,
@@ -103,7 +151,7 @@
           "cost_per_second": 1.9509573131e-8,
           "cost_source": "analytical",
           "cpu_core_seconds_per_second": 0.000262089333333,
-          "detail": "build Kll in tumbling windows of 300000 ms for 10000 groups: 667 rows x 84 ops, 667 group visits, 33.3 states emitted; x 1.0000/s; keeps 14400000 bytes",
+          "detail": "build KLL in tumbling windows of 300000 ms for 10000 groups: 667 rows x 84 ops, 667 group visits, 33.3 states emitted; x 1.0000/s; keeps 14400000 bytes",
           "ingest_cpu_core_seconds_per_second": 0.000178756,
           "multiplier": 1,
           "operator": "SummaryTumblingWindowChain",
@@ -117,7 +165,7 @@
           "cost_per_second": 5.34916587385e-8,
           "cost_source": "analytical",
           "cpu_core_seconds_per_second": 0.002678756,
-          "detail": "build Kll in tumbling windows of 10000 ms for 10000 groups: 667 rows x 84 ops, 667 group visits, 1000.0 states emitted; x 1.0000/s; keeps 20320000 bytes",
+          "detail": "build KLL in tumbling windows of 10000 ms for 10000 groups: 667 rows x 84 ops, 667 group visits, 1000.0 states emitted; x 1.0000/s; keeps 20320000 bytes",
           "ingest_cpu_core_seconds_per_second": 0.000178756,
           "multiplier": 1,
           "operator": "SummaryTumblingWindowChain",
@@ -128,17 +176,17 @@
           "timing": "ingestion_time"
         },
         "11": {
-          "cost_per_second": 1.32312454964e-8,
+          "cost_per_second": 1.33994557364e-8,
           "cost_source": "analytical",
-          "cpu_core_seconds_per_second": 0.000816666666667,
+          "cpu_core_seconds_per_second": 0.000831626666667,
           "detail": "merge tumbling windows of 10000 ms into 60000 ms for 10000 groups: 1000.0 states merged, 166.7 states emitted; x 1.0000/s; keeps 3520000 bytes",
           "ingest_cpu_core_seconds_per_second": 0.0,
           "multiplier": 1,
           "operator": "SummaryMergeWindows",
           "priced_outside_measured_scale": false,
           "query_ms_per_step": 0.0,
-          "refresh_cpu_ms_per_window": 49.0,
-          "refresh_wall_ms_per_window": 49.0,
+          "refresh_cpu_ms_per_window": 49.8976,
+          "refresh_wall_ms_per_window": 49.8976,
           "timing": "ingestion_time"
         },
         "12": {
@@ -156,15 +204,15 @@
           "timing": "query_time"
         },
         "13": {
-          "cost_per_second": 2.86002171012e-7,
+          "cost_per_second": 2.89899416426e-7,
           "cost_source": "analytical",
-          "cpu_core_seconds_per_second": 0.025413104712,
-          "detail": "merge 71667 states into 10000; x 0.1000/s; holds 8800000 bytes for 254.131 ms",
+          "cpu_core_seconds_per_second": 0.025759399656,
+          "detail": "merge 71667 states into 10000; x 0.1000/s; holds 8800000 bytes for 257.594 ms",
           "ingest_cpu_core_seconds_per_second": 0.0,
           "multiplier": 1,
           "operator": "SummaryMerge",
           "priced_outside_measured_scale": false,
-          "query_ms_per_step": 254.13104712,
+          "query_ms_per_step": 257.59399656,
           "refresh_cpu_ms_per_window": 0.0,
           "refresh_wall_ms_per_window": 0.0,
           "timing": "query_time"
@@ -268,15 +316,15 @@
           "timing": "query_time"
         },
         "7": {
-          "cost_per_second": 8.23440485742e-9,
+          "cost_per_second": 8.30489831867e-9,
           "cost_source": "analytical",
-          "cpu_core_seconds_per_second": 0.000731392,
-          "detail": "merge 20000 states into 10000; x 0.0033/s; holds 12640000 bytes for 219.418 ms",
+          "cpu_core_seconds_per_second": 0.000737653333333,
+          "detail": "merge 20000 states into 10000; x 0.0033/s; holds 12640000 bytes for 221.296 ms",
           "ingest_cpu_core_seconds_per_second": 0.0,
           "multiplier": 1,
           "operator": "SummaryMerge",
           "priced_outside_measured_scale": false,
-          "query_ms_per_step": 219.4176,
+          "query_ms_per_step": 221.296,
           "refresh_cpu_ms_per_window": 0.0,
           "refresh_wall_ms_per_window": 0.0,
           "timing": "query_time"
@@ -312,49 +360,49 @@
       },
       "source": "analytical-cost-v2 (illustrative statistics)",
       "usage": {
-        "average_memory_bytes": 38473249.7223,
-        "cpu_ops_per_second": 33539489.412,
+        "average_memory_bytes": 38476376.2611,
+        "cpu_ops_per_second": 33907005.6893,
         "disk_bytes": 0,
         "latency_per_query": [
           {
             "allowed_lateness_ms": 0.0,
             "evaluations_per_second": 0.00333333333333,
-            "latency_ms": 354.9516,
+            "latency_ms": 357.7276,
             "precompute_execution_ms": 25.0,
-            "precompute_queueing_ms": 74.0,
-            "query_execution_ms": 255.9516
+            "precompute_queueing_ms": 74.8976,
+            "query_execution_ms": 257.83
           },
           {
             "allowed_lateness_ms": 0.0,
             "evaluations_per_second": 0.00333333333333,
-            "latency_ms": 144.12,
+            "latency_ms": 145.0176,
             "precompute_execution_ms": 25.0,
-            "precompute_queueing_ms": 74.0,
+            "precompute_queueing_ms": 74.8976,
             "query_execution_ms": 45.12
           },
           {
             "allowed_lateness_ms": 0.0,
             "evaluations_per_second": 0.1,
-            "latency_ms": 386.77738412,
+            "latency_ms": 391.13793356,
             "precompute_execution_ms": 25.0,
-            "precompute_queueing_ms": 74.0,
-            "query_execution_ms": 287.77738412
+            "precompute_queueing_ms": 74.8976,
+            "query_execution_ms": 291.24033356
           }
         ],
         "peak_cpu_cores": 4,
         "peak_memory_bytes": 69760632,
-        "precompute_load": 0.0034,
+        "precompute_load": 0.00341496,
         "recommended_configuration": {
           "ingest": {
             "predicted_busy_thread_seconds_per_second": 0.0003603134,
             "recommended_threads": 1
           },
           "precompute": {
-            "predicted_busy_thread_seconds_per_second": 0.0034,
+            "predicted_busy_thread_seconds_per_second": 0.00341496,
             "recommended_threads": 1
           },
           "query": {
-            "predicted_busy_thread_seconds_per_second": 0.029781310412,
+            "predicted_busy_thread_seconds_per_second": 0.0301338666893,
             "recommended_threads": 1
           }
         },
@@ -426,7 +474,7 @@
               },
               {
                 "dtype": {
-                  "Sketch": "Kll"
+                  "Sketch": "KLL"
                 },
                 "name": "state",
                 "nullable": false
@@ -470,7 +518,7 @@
               },
               {
                 "dtype": {
-                  "Sketch": "Kll"
+                  "Sketch": "KLL"
                 },
                 "name": "state",
                 "nullable": false
@@ -514,7 +562,7 @@
               },
               {
                 "dtype": {
-                  "Sketch": "Kll"
+                  "Sketch": "KLL"
                 },
                 "name": "state",
                 "nullable": false
@@ -602,7 +650,7 @@
               },
               {
                 "dtype": {
-                  "Sketch": "Kll"
+                  "Sketch": "KLL"
                 },
                 "name": "state",
                 "nullable": false
@@ -646,7 +694,7 @@
               },
               {
                 "dtype": {
-                  "Sketch": "Kll"
+                  "Sketch": "KLL"
                 },
                 "name": "state",
                 "nullable": false
@@ -690,7 +738,7 @@
               },
               {
                 "dtype": {
-                  "Sketch": "Kll"
+                  "Sketch": "KLL"
                 },
                 "name": "state",
                 "nullable": false
@@ -822,7 +870,7 @@
               },
               {
                 "dtype": {
-                  "Sketch": "Kll"
+                  "Sketch": "KLL"
                 },
                 "name": "state",
                 "nullable": false
@@ -866,7 +914,7 @@
               },
               {
                 "dtype": {
-                  "Sketch": "Kll"
+                  "Sketch": "KLL"
                 },
                 "name": "state",
                 "nullable": false
@@ -910,7 +958,7 @@
               },
               {
                 "dtype": {
-                  "Sketch": "Kll"
+                  "Sketch": "KLL"
                 },
                 "name": "state",
                 "nullable": false
@@ -954,7 +1002,7 @@
               },
               {
                 "dtype": {
-                  "Sketch": "Kll"
+                  "Sketch": "KLL"
                 },
                 "name": "state",
                 "nullable": false
@@ -998,7 +1046,7 @@
               },
               {
                 "dtype": {
-                  "Sketch": "Kll"
+                  "Sketch": "KLL"
                 },
                 "name": "state",
                 "nullable": false
@@ -1172,7 +1220,7 @@
               },
               {
                 "dtype": {
-                  "Sketch": "Kll"
+                  "Sketch": "KLL"
                 },
                 "name": "state",
                 "nullable": false
@@ -1199,7 +1247,7 @@
           },
           "parameters": {
             "Kll": {
-              "k": 2863
+              "k": 1404
             }
           },
           "payload": {
@@ -1215,7 +1263,7 @@
                 },
                 "reduction": "PerEntity",
                 "summary_type": {
-                  "Sketch": "Kll"
+                  "Sketch": "KLL"
                 },
                 "tumbling_window_width_ms": 300000
               }
@@ -1223,7 +1271,7 @@
           },
           "retention_ms": 600000,
           "view_coverage": {
-            "definition_id": "bfbffb8f01ab202d585c3e18c9f78080",
+            "definition_id": "2d963bc6757b98ad80934456821cc040",
             "selection": [
               {
                 "columns": []
@@ -1246,7 +1294,7 @@
               },
               {
                 "dtype": {
-                  "Sketch": "Kll"
+                  "Sketch": "KLL"
                 },
                 "name": "state",
                 "nullable": false
@@ -1273,7 +1321,7 @@
           },
           "parameters": {
             "Kll": {
-              "k": 2863
+              "k": 1404
             }
           },
           "payload": {
@@ -1306,7 +1354,7 @@
               },
               {
                 "dtype": {
-                  "Sketch": "Kll"
+                  "Sketch": "KLL"
                 },
                 "name": "state",
                 "nullable": false
@@ -1333,7 +1381,7 @@
           },
           "parameters": {
             "Kll": {
-              "k": 2863
+              "k": 1404
             }
           },
           "payload": {
@@ -1482,7 +1530,7 @@
               },
               {
                 "dtype": {
-                  "Sketch": "Kll"
+                  "Sketch": "KLL"
                 },
                 "name": "state",
                 "nullable": false
@@ -1509,7 +1557,7 @@
           },
           "parameters": {
             "Kll": {
-              "k": 2863
+              "k": 1404
             }
           },
           "payload": {
@@ -1542,7 +1590,7 @@
               },
               {
                 "dtype": {
-                  "Sketch": "Kll"
+                  "Sketch": "KLL"
                 },
                 "name": "state",
                 "nullable": false
@@ -1569,7 +1617,7 @@
           },
           "parameters": {
             "Kll": {
-              "k": 2863
+              "k": 1404
             }
           },
           "payload": {
@@ -1720,7 +1768,7 @@
               },
               {
                 "dtype": {
-                  "Sketch": "Kll"
+                  "Sketch": "KLL"
                 },
                 "name": "state",
                 "nullable": false
@@ -1763,7 +1811,7 @@
                 },
                 "reduction": "PerEntity",
                 "summary_type": {
-                  "Sketch": "Kll"
+                  "Sketch": "KLL"
                 },
                 "tumbling_window_width_ms": 10000
               }
@@ -1771,7 +1819,7 @@
           },
           "retention_ms": 180000,
           "view_coverage": {
-            "definition_id": "bfbffb8f01ab202d585c3e18c9f78080",
+            "definition_id": "2d963bc6757b98ad80934456821cc040",
             "selection": [
               {
                 "columns": []
@@ -1796,7 +1844,7 @@
               },
               {
                 "dtype": {
-                  "Sketch": "Kll"
+                  "Sketch": "KLL"
                 },
                 "name": "state",
                 "nullable": false
@@ -1836,7 +1884,7 @@
           },
           "retention_ms": 180000,
           "view_coverage": {
-            "definition_id": "bfbffb8f01ab202d585c3e18c9f78080",
+            "definition_id": "2d963bc6757b98ad80934456821cc040",
             "selection": [
               {
                 "columns": []
@@ -1859,7 +1907,7 @@
               },
               {
                 "dtype": {
-                  "Sketch": "Kll"
+                  "Sketch": "KLL"
                 },
                 "name": "state",
                 "nullable": false
@@ -1921,7 +1969,7 @@
               },
               {
                 "dtype": {
-                  "Sketch": "Kll"
+                  "Sketch": "KLL"
                 },
                 "name": "state",
                 "nullable": false
