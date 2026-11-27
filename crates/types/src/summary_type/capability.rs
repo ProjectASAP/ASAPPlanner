@@ -138,22 +138,22 @@ impl SummaryTypeCapability {
             | A::UnivMonQ
             | A::UnivMonTwoTier
             | A::HydraUnivMon => true,
-            A::Cms
-            | A::CmsWithHeap
-            | A::CmsWithSpaceSaving
-            | A::CmsFold
-            | A::HydraCms
-            | A::Hll
-            | A::HllHip
-            | A::Kmv
-            | A::Kll
-            | A::KllDynamic
-            | A::HydraKll
-            | A::HydraHll
+            A::CountMinSketch
+            | A::CountMinSketchWithHeap
+            | A::CountMinSketchWithSpaceSaving
+            | A::CountMinSketchFold
+            | A::HydraCountMinSketch
+            | A::HLL
+            | A::HLLHip
+            | A::KMV
+            | A::KLL
+            | A::KLLDynamic
+            | A::HydraKLL
+            | A::HydraHLL
             | A::DDSketch
             | A::SpaceSaving
-            | A::Elastic
-            | A::Coco
+            | A::ElasticSketch
+            | A::CocoSketch
             | A::Bloom
             | A::SetAggregator => false,
         }
@@ -166,7 +166,11 @@ impl SummaryTypeCapability {
         matches!(
             summary_type,
             FieldDataType::Sketch(
-                A::HydraCms | A::HydraCountSketch | A::HydraKll | A::HydraHll | A::HydraUnivMon
+                A::HydraCountMinSketch
+                    | A::HydraCountSketch
+                    | A::HydraKLL
+                    | A::HydraHLL
+                    | A::HydraUnivMon
             )
         )
     }
@@ -209,7 +213,7 @@ impl SummaryTypeCapability {
                     // tumbling window does not keep across its boundary.
                     E::IRate => (None, &[]),
                 },
-                // A sketch algorithm's row is sketchlib's. HydraKll merges as
+                // A sketch algorithm's row is sketchlib's. HydraKLL merges as
                 // that row says: `Hydra::merge` requires the same k and m and
                 // otherwise returns an error (asap_sketchlib).
                 FieldDataType::Sketch(algorithm) => {
@@ -314,11 +318,11 @@ mod tests {
     /// HLL answers the distinct count, not its total.
     #[test]
     fn summary_capability_facts() {
-        let kll = FieldDataType::Sketch(SketchAlgorithm::Kll);
+        let kll = FieldDataType::Sketch(SketchAlgorithm::KLL);
         let ddsketch = FieldDataType::Sketch(SketchAlgorithm::DDSketch);
         let count_sketch = FieldDataType::Sketch(SketchAlgorithm::CountSketch);
-        let cms_heap = FieldDataType::Sketch(SketchAlgorithm::CmsWithHeap);
-        let hll = FieldDataType::Sketch(SketchAlgorithm::Hll);
+        let cms_heap = FieldDataType::Sketch(SketchAlgorithm::CountMinSketchWithHeap);
+        let hll = FieldDataType::Sketch(SketchAlgorithm::HLL);
         for (summary_type, yes, no) in [
             (
                 &kll,
@@ -375,7 +379,7 @@ mod tests {
     /// per group: not counters, IRate or a Hydra.
     #[test]
     fn only_per_group_mergeable_families_merge_groups() {
-        let kll = FieldDataType::Sketch(SketchAlgorithm::Kll);
+        let kll = FieldDataType::Sketch(SketchAlgorithm::KLL);
         assert!(SummaryTypeCapability::merges_groups(&kll));
         assert!(SummaryTypeCapability::merges_groups(
             &FieldDataType::ExactAggregate(ExactKind::Sum, ExactParams::Sum)
@@ -388,7 +392,7 @@ mod tests {
                 &FieldDataType::ExactAggregate(kind, params)
             ));
         }
-        let hydra = FieldDataType::Sketch(SketchAlgorithm::HydraCms);
+        let hydra = FieldDataType::Sketch(SketchAlgorithm::HydraCountMinSketch);
         assert_eq!(
             SummaryTypeCapability::of(&hydra).merge_inputs,
             Some(MergeInputRule::Disjoint)

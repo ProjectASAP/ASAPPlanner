@@ -341,9 +341,9 @@ class LaneTests(unittest.TestCase):
 
     def test_summary_nodes_print_their_summary_type_and_grouping(self):
         """Summary nodes print their summary type and grouping."""
-        kll = {"ASAP": {"SummaryAgg": {"child": 0, "filter": None, "reduction": {"Reduce": [0]}, "summary_type": {"Sketch": "Kll"}}}}
+        kll = {"ASAP": {"SummaryAgg": {"child": 0, "filter": None, "reduction": {"Reduce": [0]}, "summary_type": {"Sketch": "KLL"}}}}
         schema = {"fields": [{"name": "job"}]}
-        self.assertEqual(self.js.call("stageNodeLines", kll, schema), ["SummaryAgg", "summary: Kll", "group by job"])
+        self.assertEqual(self.js.call("stageNodeLines", kll, schema), ["SummaryAgg", "summary: KLL", "group by job"])
         exact = {"ASAP": {"SummaryAgg": {"child": 0, "summary_type": {"ExactAggregate": ["Sum", "Sum"]}, "reduction": "PerEntity"}}}
         self.assertEqual(self.js.call("stageNodeLines", exact, None)[1:], ["summary: exact Sum", "per series"])
         self.assertEqual(self.js.call("stageNodeLines", {"ASAP": {"FinalizeExactAccumulator": {"child": 0}}}, None), ["FinalizeExactAccumulator"])
@@ -538,7 +538,7 @@ class WorkloadViewTests(unittest.TestCase):
         """A tumbling-window chain's box shows its summary type and tumbling-window width."""
         chain = next(n for n in example3a()["stage3_plan_selection"]["plan"]["nodes"] if "SummaryTumblingWindowChain" in n["payload"].get("ASAP", {}))
         lines = self.js.call("stageNodeLines", chain["payload"], None)
-        self.assertEqual(lines[:3], ["SummaryTumblingWindowChain", "summary: Kll", "tumbling windows of 24 h"])
+        self.assertEqual(lines[:3], ["SummaryTumblingWindowChain", "summary: KLL", "tumbling windows of 24 h"])
 
     def test_usage_and_deployment_lines(self):
         """The usage and deployment lines read the plan's cost and capabilities."""
@@ -548,7 +548,7 @@ class WorkloadViewTests(unittest.TestCase):
         self.assertEqual([no_raw["raw data"], no_raw["query-time results"], no_raw["summaries"]], ["not retained", "not retained", "every summary the planner builds"])
         rows = dict(self.js.call("settingsRows", self.doc))
         self.assertEqual(rows["raw data"], "retained")
-        self.assertTrue(rows["summaries"].startswith("Cms (Total), "))
+        self.assertTrue(rows["summaries"].startswith("CountMinSketch (Total), "))
         self.assertEqual(rows["cost model"], cost["source"])
 
     def test_planning_workload_queries_read_the_workload_json(self):
@@ -979,7 +979,7 @@ class AppTests(unittest.TestCase):
         js = self.memo_page(doc)
         self.tap_memo(js, "g4")
         details = self.text(js, "details")
-        self.assertIn("#0 SummaryAgg Kll · θ Kll(k=26) · pruned by Pass 2", details)
+        self.assertIn("#0 SummaryAgg KLL · θ Kll(k=26) · pruned by Pass 2", details)
         self.assertIn("pruned by Pass 24", details)
         self.assertIn("#0: the producer", details)
         self.assertIn("#4 (query_time, AcrossEvaluations(Memory)): excluded by the deployment: query time results not retained", details)

@@ -3043,7 +3043,7 @@ fn operations_text(operations: f64) -> String {
 }
 
 /// A summary type's name in reports: a sketch by its algorithm, e.g.
-/// `HydraCms`; an exact accumulator by its kind.
+/// `HydraCountMinSketch`; an exact accumulator by its kind.
 // Any other type prints its Debug form, which names a new variant too, so
 // listing them would decide nothing.
 #[allow(clippy::wildcard_enum_match_arm)]

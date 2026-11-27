@@ -115,7 +115,7 @@ fn exact(kind: ExactKind) -> FieldDataType {
     FieldDataType::exact(kind)
 }
 fn kll() -> FieldDataType {
-    FieldDataType::Sketch(SketchAlgorithm::Kll)
+    FieldDataType::Sketch(SketchAlgorithm::KLL)
 }
 
 /// `operator` as a candidate at `physical_properties`, with θ `parameters`.
@@ -243,7 +243,7 @@ fn summary_family_and_parameter_range_match_state_builds_only() {
         described(&kll_merge, Some(&k547), qt_one()),
     ];
     let family = CandidateExclusion {
-        summary_family: Some(SummaryFamily::Sketch(SketchAlgorithm::Kll)),
+        summary_family: Some(SummaryFamily::Sketch(SketchAlgorithm::KLL)),
         ..Default::default()
     };
     assert_eq!(
@@ -485,14 +485,14 @@ fn counter_semantics_left_out_expand_into_the_functions_and_states_that_need_the
 fn readout_matches_an_estimate_by_statistic_and_the_state_it_reads() {
     let kll_total = CandidateExclusion {
         readout: Some(SketchReadout {
-            summary_type: SketchAlgorithm::Kll,
+            summary_type: SketchAlgorithm::KLL,
             statistic: StatisticKind::Total,
         }),
         ..Default::default()
     };
     let total_readout = estimate(total());
     let quantile_readout = estimate(SketchStatistic::Quantile { q: 0.99 });
-    let cms = FieldDataType::Sketch(SketchAlgorithm::Cms);
+    let cms = FieldDataType::Sketch(SketchAlgorithm::CountMinSketch);
     let reading = |operator, state| CandidateDescription {
         read_summary_type: state,
         ..described(operator, None, qt_none())
@@ -612,7 +612,7 @@ fn each_capability_left_out_expands_into_its_exclusions() {
 fn supported_summaries_expand_into_family_and_readout_exclusions() {
     let capabilities = DeploymentCapabilities {
         supported_summaries: Some(vec![SupportedSummary {
-            summary_type: SketchAlgorithm::Kll,
+            summary_type: SketchAlgorithm::KLL,
             readouts: vec![StatisticKind::Quantile],
         }]),
         query_time_results_retained: true,
@@ -630,7 +630,7 @@ fn supported_summaries_expand_into_family_and_readout_exclusions() {
         source: ExclusionSource::ReadoutNotSupported,
         exclusion: CandidateExclusion {
             readout: Some(SketchReadout {
-                summary_type: SketchAlgorithm::Kll,
+                summary_type: SketchAlgorithm::KLL,
                 statistic,
             }),
             ..Default::default()
@@ -638,7 +638,7 @@ fn supported_summaries_expand_into_family_and_readout_exclusions() {
     };
     let unlisted: Vec<_> = SketchAlgorithm::ALL
         .iter()
-        .filter(|&&algorithm| algorithm != SketchAlgorithm::Kll)
+        .filter(|&&algorithm| algorithm != SketchAlgorithm::KLL)
         .map(|&algorithm| family(algorithm))
         .collect();
     let unsupported_readouts: Vec<_> = SummaryTypeCapability::of(&kll())
@@ -651,7 +651,7 @@ fn supported_summaries_expand_into_family_and_readout_exclusions() {
     for expected in unlisted.iter().chain(&unsupported_readouts) {
         assert!(exclusions.contains(expected), "missing {expected:?}");
     }
-    assert!(!exclusions.contains(&family(SketchAlgorithm::Kll)));
+    assert!(!exclusions.contains(&family(SketchAlgorithm::KLL)));
     assert!(!exclusions.contains(&readout(StatisticKind::Quantile)));
     assert_eq!(
         exclusions.len(),
@@ -745,7 +745,7 @@ fn invalid_excluded_candidates_are_rejected() {
 fn self_contradicting_exclusions_are_rejected() {
     let data = crate::workload::DataWorkload::default();
     let kll_readout = SketchReadout {
-        summary_type: SketchAlgorithm::Kll,
+        summary_type: SketchAlgorithm::KLL,
         statistic: StatisticKind::Quantile,
     };
     let with_operator = |operator, exclusion: CandidateExclusion| CandidateExclusion {
@@ -835,7 +835,7 @@ fn self_contradicting_exclusions_are_rejected() {
 /// does not list; any further field narrows it.
 #[test]
 fn a_family_is_excluded_outright_only_by_a_family_only_exclusion() {
-    let kll = SummaryFamily::Sketch(SketchAlgorithm::Kll);
+    let kll = SummaryFamily::Sketch(SketchAlgorithm::KLL);
     let family_only = CandidateExclusion {
         summary_family: Some(kll),
         ..Default::default()
@@ -878,10 +878,10 @@ fn excluded_candidates_json_loads_field_by_field() {
         {"operator": "Aggregate", "per_entity_reduction": true},
         {"timing": "query_time", "operator": "SummaryAgg"},
         {"timing": "query_time", "operator": "SummaryTumblingWindowChain"},
-        {"summary_family": {"sketch": "Kll"}, "sketch_parameter_range": {"kll_k": {"at_most": 1403}}},
+        {"summary_family": {"sketch": "KLL"}, "sketch_parameter_range": {"kll_k": {"at_most": 1403}}},
         {"timing": "query_time", "aggregate_measure": "rate"},
         {"summary_family": {"exact": "Counter"}, "operator": "SummaryTumblingWindowChain"},
-        {"readout": {"summary_type": "Kll", "statistic": "Total"}},
+        {"readout": {"summary_type": "KLL", "statistic": "Total"}},
         {"operator": "Scan", "kept_across_evaluations": true}]}"#;
     let loaded: DeploymentCapabilities = serde_json::from_str(json).unwrap();
     let exclusion = |exclusion: CandidateExclusion| exclusion;
@@ -909,7 +909,7 @@ fn excluded_candidates_json_loads_field_by_field() {
                 ..Default::default()
             }),
             exclusion(CandidateExclusion {
-                summary_family: Some(SummaryFamily::Sketch(SketchAlgorithm::Kll)),
+                summary_family: Some(SummaryFamily::Sketch(SketchAlgorithm::KLL)),
                 sketch_parameter_range: Some(SketchParameterRange::KllK {
                     at_least: None,
                     at_most: Some(1403),
@@ -928,7 +928,7 @@ fn excluded_candidates_json_loads_field_by_field() {
             }),
             exclusion(CandidateExclusion {
                 readout: Some(SketchReadout {
-                    summary_type: SketchAlgorithm::Kll,
+                    summary_type: SketchAlgorithm::KLL,
                     statistic: StatisticKind::Total,
                 }),
                 ..Default::default()
@@ -993,13 +993,13 @@ fn default_capabilities_and_json_fill_the_rest() {
     assert!(default.raw_data_retained && !default.query_time_results_retained);
     assert_eq!(default.supported_summaries, None);
     let parsed: DeploymentCapabilities = serde_json::from_str(
-        r#"{"supported_summaries": [{"summary_type": "Kll", "readouts": ["Quantile"]}]}"#,
+        r#"{"supported_summaries": [{"summary_type": "KLL", "readouts": ["Quantile"]}]}"#,
     )
     .unwrap();
     assert_eq!(
         parsed.supported_summaries,
         Some(vec![SupportedSummary {
-            summary_type: SketchAlgorithm::Kll,
+            summary_type: SketchAlgorithm::KLL,
             readouts: vec![StatisticKind::Quantile],
         }])
     );

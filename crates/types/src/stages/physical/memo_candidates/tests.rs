@@ -79,7 +79,7 @@ fn memo() -> Memo {
             ),
         }))
         .unwrap();
-    let kll = FieldDataType::Sketch(SketchAlgorithm::Kll);
+    let kll = FieldDataType::Sketch(SketchAlgorithm::KLL);
     let build = Operator::ASAP(ASAPOp::SummaryAgg {
         child: scan,
         summary_type: kll.clone(),
@@ -762,7 +762,7 @@ fn a_stored_chain_and_an_ingestion_time_result_are_stored_on_their_refresh_windo
     let chain = add(
         Operator::ASAP(ASAPOp::SummaryTumblingWindowChain {
             child: shifted.group,
-            summary_type: FieldDataType::Sketch(SketchAlgorithm::Kll),
+            summary_type: FieldDataType::Sketch(SketchAlgorithm::KLL),
             input: SummaryUpdate::column(ColumnRef::SampleValue),
             reduction: Reduction::PerEntity,
             filter: None,

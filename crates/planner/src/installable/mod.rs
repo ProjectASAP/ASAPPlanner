@@ -44,8 +44,10 @@ use serde::{Deserialize, Serialize};
 use crate::{e2e_plan, PlanError, UserInput};
 
 /// The version of the plan-file format [`InstallablePlan`] serializes to:
-/// the DAG, its nodes' fields and the query texts.
-pub const INSTALLABLE_PLAN_WIRE_VERSION: u32 = 15;
+/// the DAG, its nodes' fields and the query texts. Bumped to 16 when a
+/// sketch family started being written by `asap_sketchlib`'s full
+/// `SketchAlgorithm` names (`{"Sketch": "KLL"}`, `"CountMinSketch"`, ...).
+pub const INSTALLABLE_PLAN_WIRE_VERSION: u32 = 16;
 
 /// The selected plan, ready to install and execute: what
 /// [`plan_installable`] returns and a runtime writes as its plan file.

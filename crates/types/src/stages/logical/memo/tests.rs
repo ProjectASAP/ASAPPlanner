@@ -37,9 +37,9 @@ fn find_or_add_group_lists_the_new_group_among_its_inputs_parents() {
         .find_or_add_group(scan("latency", &[], vec![]))
         .unwrap();
     let g2 = memo
-        .find_or_add_group(state(FieldDataType::Sketch(SketchAlgorithm::Kll), g1))
+        .find_or_add_group(state(FieldDataType::Sketch(SketchAlgorithm::KLL), g1))
         .unwrap();
-    memo.find_or_add_group(state(FieldDataType::Sketch(SketchAlgorithm::Kll), g1))
+    memo.find_or_add_group(state(FieldDataType::Sketch(SketchAlgorithm::KLL), g1))
         .unwrap();
     assert_eq!(memo.groups()[g1.0 as usize].parent_groups(), &[g2]);
     assert!(memo.groups()[g2.0 as usize].parent_groups().is_empty());
@@ -55,7 +55,7 @@ fn add_candidate_maintains_parents_and_queries() {
         .find_or_add_group(scan("latency", &[], vec![]))
         .unwrap();
     let g2 = memo
-        .find_or_add_group(state(FieldDataType::Sketch(SketchAlgorithm::Kll), g1))
+        .find_or_add_group(state(FieldDataType::Sketch(SketchAlgorithm::KLL), g1))
         .unwrap();
     let g3 = memo
         .find_or_add_group(readout(SketchStatistic::Quantile { q: 0.95 }, g2))
@@ -67,7 +67,7 @@ fn add_candidate_maintains_parents_and_queries() {
         .find_or_add_group(scan("latency_copy", &[], vec![]))
         .unwrap();
     let g5 = memo
-        .find_or_add_group(state(FieldDataType::Sketch(SketchAlgorithm::Kll), g4))
+        .find_or_add_group(state(FieldDataType::Sketch(SketchAlgorithm::KLL), g4))
         .unwrap();
     assert!(memo.groups()[g5.0 as usize].reached_by_queries().is_empty());
     // G3 gains a candidate reading G5: G5 and G4 now serve query 0.
@@ -105,7 +105,7 @@ fn add_candidate_rejects_a_candidate_whose_output_differs_from_its_group() {
         .find_or_add_group(scan("latency", &[], vec![]))
         .unwrap();
     let g2 = memo
-        .find_or_add_group(state(FieldDataType::Sketch(SketchAlgorithm::Kll), g1))
+        .find_or_add_group(state(FieldDataType::Sketch(SketchAlgorithm::KLL), g1))
         .unwrap();
     let before = format!("{memo:?}");
     assert!(matches!(
@@ -128,7 +128,7 @@ fn add_candidate_rejects_a_candidate_whose_inputs_fail_validation() {
         .find_or_add_group(scan("latency", &[], vec![]))
         .unwrap();
     let g2 = memo
-        .find_or_add_group(state(FieldDataType::Sketch(SketchAlgorithm::Kll), g1))
+        .find_or_add_group(state(FieldDataType::Sketch(SketchAlgorithm::KLL), g1))
         .unwrap();
     let g3 = memo
         .find_or_add_group(readout(SketchStatistic::Quantile { q: 0.95 }, g2))
@@ -191,7 +191,7 @@ fn output_schema_of_a_pending_expression_is_its_groups_schema() {
     let latency = memo
         .find_or_add_group(scan("latency", &[], vec![]))
         .unwrap();
-    let state_expression = state(FieldDataType::Sketch(SketchAlgorithm::Kll), latency);
+    let state_expression = state(FieldDataType::Sketch(SketchAlgorithm::KLL), latency);
     let pending_state = MemoGroupId(memo.groups().len() as u32);
     let readout_expression = readout(SketchStatistic::Quantile { q: 0.99 }, pending_state);
     let before = format!("{memo:?}");
@@ -248,7 +248,7 @@ fn set_candidate_input_requirements_replaces_only_the_named_candidate() {
         .find_or_add_group(scan("latency", &[], vec![]))
         .unwrap();
     let g2 = memo
-        .find_or_add_group(state(FieldDataType::Sketch(SketchAlgorithm::Kll), g1))
+        .find_or_add_group(state(FieldDataType::Sketch(SketchAlgorithm::KLL), g1))
         .unwrap();
     let p90 = || readout(SketchStatistic::Quantile { q: 0.9 }, g2);
     let g3 = memo.find_or_add_group(p90()).unwrap();
@@ -274,7 +274,7 @@ fn a_merge_carries_the_parameters_of_the_states_it_reads() {
     let g1 = memo
         .find_or_add_group(scan("latency", &[], vec![]))
         .unwrap();
-    let kll_state = || state(FieldDataType::Sketch(SketchAlgorithm::Kll), g1);
+    let kll_state = || state(FieldDataType::Sketch(SketchAlgorithm::KLL), g1);
     let g2 = memo.find_or_add_group(kll_state()).unwrap();
     for k in [269, 547] {
         try_candidate(&mut memo, g2, kll_state(), kll_k(k)).unwrap();
@@ -308,7 +308,7 @@ fn set_candidate_input_requirements_panics_on_a_length_mismatch() {
     let g1 = memo
         .find_or_add_group(scan("latency", &[], vec![]))
         .unwrap();
-    let kll_state = || state(FieldDataType::Sketch(SketchAlgorithm::Kll), g1);
+    let kll_state = || state(FieldDataType::Sketch(SketchAlgorithm::KLL), g1);
     let g2 = memo.find_or_add_group(kll_state()).unwrap();
     let build = try_candidate(&mut memo, g2, kll_state(), kll_k(269)).unwrap();
     memo.set_candidate_input_requirements(build, Vec::new());
@@ -329,7 +329,7 @@ fn add_candidate_checks_parameters_against_the_groups_output() {
     let g1 = memo
         .find_or_add_group(scan("latency", &[], vec![]))
         .unwrap();
-    let kll = FieldDataType::Sketch(SketchAlgorithm::Kll);
+    let kll = FieldDataType::Sketch(SketchAlgorithm::KLL);
     let kll_state = memo.find_or_add_group(state(kll.clone(), g1)).unwrap();
     let kll_chain = Operator::ASAP(ASAPOp::SummaryTumblingWindowChain {
         child: g1,
@@ -381,7 +381,10 @@ fn add_candidate_checks_parameters_against_the_groups_output() {
     let table = [
         (state(kll, g1), kll_state_output),
         (
-            state(FieldDataType::Sketch(SketchAlgorithm::HydraCms), g1),
+            state(
+                FieldDataType::Sketch(SketchAlgorithm::HydraCountMinSketch),
+                g1,
+            ),
             [
                 needs_parameters,
                 not_in_list,
@@ -452,7 +455,7 @@ fn max_values_per_evaluation_bounds_a_readout_by_its_states_keys() {
     ] {
         let state = memo
             .find_or_add_group(state_grouped_by(
-                FieldDataType::Sketch(SketchAlgorithm::Kll),
+                FieldDataType::Sketch(SketchAlgorithm::KLL),
                 reduction,
                 input,
             ))
@@ -518,7 +521,7 @@ fn max_estimates_per_evaluation_counts_every_item_a_top_k_ranks() {
             ))
             .unwrap()
         };
-        let heap = state_of(&mut memo, SketchAlgorithm::CmsWithHeap);
+        let heap = state_of(&mut memo, SketchAlgorithm::CountMinSketchWithHeap);
         let top_k = memo
             .find_or_add_group(readout(SketchStatistic::TopK { k: 5 }, heap))
             .unwrap();
@@ -527,7 +530,7 @@ fn max_estimates_per_evaluation_counts_every_item_a_top_k_ranks() {
             Some(estimates),
             "{max_distinct:?} {reduction_is_by_job}"
         );
-        let kll = state_of(&mut memo, SketchAlgorithm::Kll);
+        let kll = state_of(&mut memo, SketchAlgorithm::KLL);
         let quantile = memo
             .find_or_add_group(readout(SketchStatistic::Quantile { q: 0.9 }, kll))
             .unwrap();
@@ -561,7 +564,7 @@ fn max_distinct_per_evaluation_sums_the_scanned_sources_bounds() {
     let mut scan_of = |source: &str| memo.find_or_add_group(scan(source, &[], vec![])).unwrap();
     let (events, clicks, logs) = (scan_of("events"), scan_of("clicks"), scan_of("logs"));
     let state = memo
-        .find_or_add_group(state(FieldDataType::Sketch(SketchAlgorithm::Hll), events))
+        .find_or_add_group(state(FieldDataType::Sketch(SketchAlgorithm::HLL), events))
         .unwrap();
     assert_eq!(memo.max_distinct_per_evaluation(events), Some(9_636));
     assert_eq!(memo.max_distinct_per_evaluation(state), Some(9_636));
@@ -637,7 +640,7 @@ fn max_values_per_evaluation_is_unbounded_for_a_computed_or_time_key() {
     ] {
         let state = memo
             .find_or_add_group(state_grouped_by(
-                FieldDataType::Sketch(SketchAlgorithm::Kll),
+                FieldDataType::Sketch(SketchAlgorithm::KLL),
                 Reduction::by(keys.clone()),
                 bucketed,
             ))
@@ -707,7 +710,7 @@ fn max_values_per_evaluation_multiplies_the_keys_of_different_scans() {
     for (keys, values) in [(vec![2, 5], 400), (vec![2], 20)] {
         let state = memo
             .find_or_add_group(state_grouped_by(
-                FieldDataType::Sketch(SketchAlgorithm::Kll),
+                FieldDataType::Sketch(SketchAlgorithm::KLL),
                 Reduction::by(keys.clone()),
                 joined,
             ))

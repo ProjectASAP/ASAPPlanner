@@ -92,10 +92,10 @@ fn plan_rollup(sample_interval_ms: u64) -> (Vec<Vec<String>>, usize) {
                 node.asap(),
                 Some(
                     ASAPOp::SummaryAgg {
-                        summary_type: FieldDataType::Sketch(SketchAlgorithm::Kmv),
+                        summary_type: FieldDataType::Sketch(SketchAlgorithm::KMV),
                         ..
                     } | ASAPOp::SummaryTumblingWindowChain {
-                        summary_type: FieldDataType::Sketch(SketchAlgorithm::Kmv),
+                        summary_type: FieldDataType::Sketch(SketchAlgorithm::KMV),
                         ..
                     }
                 )
@@ -124,7 +124,7 @@ fn production_distinct_rollup_builds_kmv_at_60k_rows_per_state() {
     let (sketches, kmv_builds) = plan_rollup(5);
     assert_eq!(sketches.len(), 2);
     assert!(
-        sketches.iter().all(|sketches| sketches == &["Kmv"]),
+        sketches.iter().all(|sketches| sketches == &["KMV"]),
         "both queries read a KMV: {sketches:?}"
     );
     assert!(kmv_builds > 0, "the selected plan builds a KMV");

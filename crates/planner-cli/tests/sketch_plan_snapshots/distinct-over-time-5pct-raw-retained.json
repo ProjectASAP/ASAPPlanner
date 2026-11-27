@@ -10,16 +10,16 @@
       {
         "accepted_metric": "relative",
         "sketches": [
-          "Kmv"
+          "KMV"
         ],
-        "summary": "accepted relative (Kmv)"
+        "summary": "accepted relative (KMV)"
       },
       {
         "accepted_metric": "relative",
         "sketches": [
-          "Kmv"
+          "KMV"
         ],
-        "summary": "accepted relative (Kmv)"
+        "summary": "accepted relative (KMV)"
       }
     ],
     "cost": {
@@ -44,7 +44,7 @@
           "cost_per_second": 5.43807654299e-9,
           "cost_source": "analytical",
           "cpu_core_seconds_per_second": 0.0004796,
-          "detail": "build Kmv in tumbling windows of 300000 ms for 10000 groups: 400000 rows x 116.2 ops, 400000 group visits, 10000.0 states emitted; x 0.0033/s; holds 82400000 bytes for 143.880 ms",
+          "detail": "build KMV in tumbling windows of 300000 ms for 10000 groups: 400000 rows x 116.2 ops, 400000 group visits, 10000.0 states emitted; x 0.0033/s; holds 82400000 bytes for 143.880 ms",
           "ingest_cpu_core_seconds_per_second": 0.0,
           "multiplier": 1,
           "operator": "SummaryTumblingWindowChain",
@@ -275,7 +275,7 @@
               },
               {
                 "dtype": {
-                  "Sketch": "Kmv"
+                  "Sketch": "KMV"
                 },
                 "name": "state",
                 "nullable": false
@@ -319,7 +319,7 @@
               },
               {
                 "dtype": {
-                  "Sketch": "Kmv"
+                  "Sketch": "KMV"
                 },
                 "name": "state",
                 "nullable": false
@@ -363,7 +363,7 @@
               },
               {
                 "dtype": {
-                  "Sketch": "Kmv"
+                  "Sketch": "KMV"
                 },
                 "name": "state",
                 "nullable": false
@@ -451,7 +451,7 @@
               },
               {
                 "dtype": {
-                  "Sketch": "Kmv"
+                  "Sketch": "KMV"
                 },
                 "name": "state",
                 "nullable": false
@@ -495,7 +495,7 @@
               },
               {
                 "dtype": {
-                  "Sketch": "Kmv"
+                  "Sketch": "KMV"
                 },
                 "name": "state",
                 "nullable": false
@@ -539,7 +539,7 @@
               },
               {
                 "dtype": {
-                  "Sketch": "Kmv"
+                  "Sketch": "KMV"
                 },
                 "name": "state",
                 "nullable": false
@@ -714,7 +714,7 @@
               },
               {
                 "dtype": {
-                  "Sketch": "Kmv"
+                  "Sketch": "KMV"
                 },
                 "name": "state",
                 "nullable": false
@@ -757,7 +757,7 @@
                 },
                 "reduction": "PerEntity",
                 "summary_type": {
-                  "Sketch": "Kmv"
+                  "Sketch": "KMV"
                 },
                 "tumbling_window_width_ms": 300000
               }
@@ -779,7 +779,7 @@
               },
               {
                 "dtype": {
-                  "Sketch": "Kmv"
+                  "Sketch": "KMV"
                 },
                 "name": "state",
                 "nullable": false
@@ -839,7 +839,7 @@
               },
               {
                 "dtype": {
-                  "Sketch": "Kmv"
+                  "Sketch": "KMV"
                 },
                 "name": "state",
                 "nullable": false
@@ -1011,7 +1011,7 @@
               },
               {
                 "dtype": {
-                  "Sketch": "Kmv"
+                  "Sketch": "KMV"
                 },
                 "name": "state",
                 "nullable": false
@@ -1071,7 +1071,7 @@
               },
               {
                 "dtype": {
-                  "Sketch": "Kmv"
+                  "Sketch": "KMV"
                 },
                 "name": "state",
                 "nullable": false

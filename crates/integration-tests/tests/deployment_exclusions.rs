@@ -298,7 +298,7 @@ const STORED_KLL_PLAN: [(OperatorKind, ExecutionTiming); 6] = [
 
 fn kll(k: u32) -> (FieldDataType, Option<SketchParams>) {
     (
-        FieldDataType::Sketch(SketchAlgorithm::Kll),
+        FieldDataType::Sketch(SketchAlgorithm::KLL),
         Some(SketchParams::Kll { k }),
     )
 }
@@ -373,7 +373,7 @@ fn a_kll_k_range_moves_the_quantile_to_a_larger_k() {
 fn excluding_every_kll_size_selects_a_plan_without_kll() {
     let workload = kll_workload();
     let by_family = CandidateExclusion {
-        summary_family: Some(SummaryFamily::Sketch(SketchAlgorithm::Kll)),
+        summary_family: Some(SummaryFamily::Sketch(SketchAlgorithm::KLL)),
         ..Default::default()
     };
     for exclusion in [by_family, kll_at_most(2863)] {

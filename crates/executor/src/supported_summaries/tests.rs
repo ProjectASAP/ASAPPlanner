@@ -13,12 +13,12 @@ use planner_types::summary_type::{
 
 const ALGORITHMS: [SketchAlgorithm; 9] = [
     SketchAlgorithm::UnivMon,
-    SketchAlgorithm::Kll,
-    SketchAlgorithm::Cms,
-    SketchAlgorithm::Hll,
+    SketchAlgorithm::KLL,
+    SketchAlgorithm::CountMinSketch,
+    SketchAlgorithm::HLL,
     SketchAlgorithm::DDSketch,
-    SketchAlgorithm::CmsWithHeap,
-    SketchAlgorithm::Kmv,
+    SketchAlgorithm::CountMinSketchWithHeap,
+    SketchAlgorithm::KMV,
     SketchAlgorithm::CountSketch,
     SketchAlgorithm::CountSketchWithHeap,
 ];
@@ -82,7 +82,7 @@ fn evaluation_answers(family: &FieldDataType, readout: StatisticKind) -> bool {
     match (readout, family) {
         (StatisticKind::TopK, FieldDataType::Sketch(kind)) => matches!(
             kind,
-            planner_types::summary_type::SketchAlgorithm::CmsWithHeap
+            planner_types::summary_type::SketchAlgorithm::CountMinSketchWithHeap
                 | planner_types::summary_type::SketchAlgorithm::CountSketchWithHeap
         ),
         _ => {

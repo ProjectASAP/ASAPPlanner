@@ -165,7 +165,7 @@ fn an_excluded_exact_family_is_left_to_stage_2() {
 fn an_excluded_readout_of_the_measure_skips_the_summary() {
     let kll_with = |readouts| DeploymentCapabilities {
         supported_summaries: Some(vec![SupportedSummary {
-            summary_type: SketchAlgorithm::Kll,
+            summary_type: SketchAlgorithm::KLL,
             readouts,
         }]),
         ..Default::default()
@@ -178,7 +178,7 @@ fn an_excluded_readout_of_the_measure_skips_the_summary() {
         quantile(0.9),
         &kll_with(vec![StatisticKind::Quantile]).exclusions(),
     );
-    assert!(built_summary_types(&memo).contains(&FieldDataType::Sketch(SketchAlgorithm::Kll)));
+    assert!(built_summary_types(&memo).contains(&FieldDataType::Sketch(SketchAlgorithm::KLL)));
 }
 
 /// Only an exclusion of every state of a family, or of the readout the
@@ -187,9 +187,9 @@ fn an_excluded_readout_of_the_measure_skips_the_summary() {
 #[test]
 fn a_partial_exclusion_keeps_the_summary() {
     let kll_not_mergeable = DeploymentCapabilities {
-        state_not_mergeable_across_windows: vec![SummaryFamily::Sketch(SketchAlgorithm::Kll)],
+        state_not_mergeable_across_windows: vec![SummaryFamily::Sketch(SketchAlgorithm::KLL)],
         ..Default::default()
     };
     let (memo, _) = pass1_under(quantile(0.9), &kll_not_mergeable.exclusions());
-    assert!(built_summary_types(&memo).contains(&FieldDataType::Sketch(SketchAlgorithm::Kll)));
+    assert!(built_summary_types(&memo).contains(&FieldDataType::Sketch(SketchAlgorithm::KLL)));
 }

@@ -45,7 +45,7 @@ fn chain_dag(width_ms: u64) -> (PhysicalASAPDAG, usize, usize) {
     }));
     let chain: Rc<OperatorNode> = new(Operator::ASAP(ASAPOp::SummaryTumblingWindowChain {
         child: scan,
-        summary_type: FieldDataType::Sketch(SketchAlgorithm::Kll),
+        summary_type: FieldDataType::Sketch(SketchAlgorithm::KLL),
         input: SummaryUpdate::column(ColumnRef::Named("value".into())),
         reduction: Reduction::Reduce(GroupKeys::default()),
         filter: None,
@@ -176,7 +176,7 @@ fn cover_view() -> MaterializedView {
     let chain = |width_ms: u64| {
         new(Operator::ASAP(ASAPOp::SummaryTumblingWindowChain {
             child: scan.clone(),
-            summary_type: FieldDataType::Sketch(SketchAlgorithm::Kll),
+            summary_type: FieldDataType::Sketch(SketchAlgorithm::KLL),
             input: SummaryUpdate::column(ColumnRef::Named("value".into())),
             reduction: Reduction::Reduce(GroupKeys::default()),
             filter: None,
@@ -371,7 +371,7 @@ async fn the_view_state_key_of_a_planned_chain_is_pinned_and_round_trips_through
     assert_eq!(
         serde_json::to_value(key).unwrap(),
         serde_json::json!({
-            "definition_id": "bfbffb8f01ab202d585c3e18c9f78080",
+            "definition_id": "2d963bc6757b98ad80934456821cc040",
             "window": {"tumbling": {"width_ms": 300000}},
             "logical_properties": {"parameters": {"Kll": {"k": 2863}}}
         })

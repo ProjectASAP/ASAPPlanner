@@ -74,7 +74,7 @@ fn a_plus_b_above_10() -> ScalarExpr<MemoGroupId> {
 }
 
 fn kll_summary_type() -> FieldDataType {
-    FieldDataType::Sketch(SketchAlgorithm::Kll)
+    FieldDataType::Sketch(SketchAlgorithm::KLL)
 }
 
 /// `SummaryAgg[KLL]` of the sample value per series.

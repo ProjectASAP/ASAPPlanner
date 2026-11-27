@@ -46,8 +46,9 @@ impl Operator {
         use crate::summary_kernels::weighted_frequency::WeightedFrequency;
         use planner_types::summary_type::SketchAlgorithm as A;
         crate::values::validate_family(&family)?;
-        let SummaryFamilyType::Sketch(algorithm @ (A::CmsWithHeap | A::CountSketchWithHeap)) =
-            &family
+        let SummaryFamilyType::Sketch(
+            algorithm @ (A::CountMinSketchWithHeap | A::CountSketchWithHeap),
+        ) = &family
         else {
             return Err(invalid("keyed sketch required"));
         };
@@ -198,7 +199,7 @@ impl Operator {
         crate::values::validate_family(family)?;
         if !matches!(
             family,
-            SummaryFamilyType::Sketch(A::CmsWithHeap | A::CountSketchWithHeap)
+            SummaryFamilyType::Sketch(A::CountMinSketchWithHeap | A::CountSketchWithHeap)
         ) {
             return Err(invalid("keyed evaluation requires a keyed summary state"));
         }
@@ -367,7 +368,7 @@ fn accepts_update_type(family: &SummaryFamilyType, dtype: &DataType) -> bool {
     };
     match dtype {
         DataType::Float64 | DataType::Int64 => true,
-        DataType::Utf8 => matches!(kind, A::Kmv | A::Hll | A::UnivMon),
+        DataType::Utf8 => matches!(kind, A::KMV | A::HLL | A::UnivMon),
         DataType::Bool => kind == &A::UnivMon,
         _ => false,
     }
@@ -402,7 +403,7 @@ impl Operator {
 /// non-integral total rather than rounding it.
 fn integral_count(family: &SummaryFamilyType, query: &SummaryEvaluation) -> bool {
     matches!(family, SummaryFamilyType::Sketch(kind)
-        if kind == &planner_types::summary_type::SketchAlgorithm::Cms)
+        if kind == &planner_types::summary_type::SketchAlgorithm::CountMinSketch)
         && matches!(
             query,
             SummaryEvaluation::Sketch(planner_types::summary_type::SketchStatistic::PointCount {

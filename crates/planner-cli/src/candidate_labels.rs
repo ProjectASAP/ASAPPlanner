@@ -9,7 +9,7 @@ use asap_types::summary_type::SketchParams;
 
 /// An operator's kind with its summary type, its summary query, its time
 /// range and its tumbling-window width, when it has them, without its
-/// inputs: e.g. `SummaryAgg Kll`, `SummaryEstimate Quantile(q=0.5)`,
+/// inputs: e.g. `SummaryAgg KLL`, `SummaryEstimate Quantile(q=0.5)`,
 /// `TimeRange 600s`.
 pub fn operator_label<C>(operator: &Operator<C>) -> String {
     let operator = serde_json::to_value(operator.map_children(|_| ())).unwrap_or_default();
@@ -102,7 +102,7 @@ fn find_details(value: &Value, details: &mut Vec<String>, depth: usize) {
                             details.push(format!("{kind}({})", params.join(", ")));
                         }
                     }
-                    // A summary type, e.g. `Kll` or `ExactAggregate(Counter)`.
+                    // A summary type, e.g. `KLL` or `ExactAggregate(Counter)`.
                     "summary_type" => details.push(summary_type_text(field)),
                     // A time range's length, e.g. `60s`.
                     "range" => details.push(duration_text(field)),
@@ -121,7 +121,7 @@ fn find_details(value: &Value, details: &mut Vec<String>, depth: usize) {
     }
 }
 
-/// A serialized summary type: `Kll` (`{"Sketch": "Kll"}`),
+/// A serialized summary type: `KLL` (`{"Sketch": "KLL"}`),
 /// `ExactAggregate(Counter)` (`{"ExactAggregate": ["Counter", "Counter"]}`, the
 /// distinct names), or the JSON of any other value.
 fn summary_type_text(value: &Value) -> String {

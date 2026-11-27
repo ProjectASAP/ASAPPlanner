@@ -17,7 +17,7 @@ fn accumulator(
 
 fn family(k: u32) -> Family {
     (
-        FieldDataType::Sketch(SketchAlgorithm::Kll),
+        FieldDataType::Sketch(SketchAlgorithm::KLL),
         SketchParams::Kll { k },
     )
 }
@@ -205,7 +205,7 @@ fn deep_plain_count_sketch_rows_hash_independently() {
 
 fn heap_sketch(algorithm: SketchAlgorithm, width: u32, depth: u32, heap_size: u32) -> Family {
     let params = match algorithm {
-        SketchAlgorithm::CmsWithHeap => SketchParams::CmsWithHeap {
+        SketchAlgorithm::CountMinSketchWithHeap => SketchParams::CmsWithHeap {
             width,
             depth,
             heap_size,
@@ -224,7 +224,7 @@ fn heap_sketch(algorithm: SketchAlgorithm, width: u32, depth: u32, heap_size: u3
 #[test]
 fn deep_heap_sketch_rows_hash_independently() {
     for algorithm in [
-        SketchAlgorithm::CmsWithHeap,
+        SketchAlgorithm::CountMinSketchWithHeap,
         SketchAlgorithm::CountSketchWithHeap,
     ] {
         assert_rows_hash_independently(&heap_sketch(algorithm, 30_000, 25, 4), 30_000, 25, 1_000);
@@ -241,7 +241,7 @@ fn heap_sketch_states_load_as_dag_summary_values() {
         values::{Batch, Value},
     };
     for algorithm in [
-        SketchAlgorithm::CmsWithHeap,
+        SketchAlgorithm::CountMinSketchWithHeap,
         SketchAlgorithm::CountSketchWithHeap,
     ] {
         let family = heap_sketch(algorithm, 1_024, 5, 4);
@@ -287,7 +287,10 @@ fn factory_and_dag_heap_states_are_interchangeable() {
             .unwrap()
     };
     for (algorithm, frequency) in [
-        (SketchAlgorithm::CmsWithHeap, FrequencyAlgorithm::Cms),
+        (
+            SketchAlgorithm::CountMinSketchWithHeap,
+            FrequencyAlgorithm::Cms,
+        ),
         (
             SketchAlgorithm::CountSketchWithHeap,
             FrequencyAlgorithm::CountSketch,
@@ -320,7 +323,7 @@ fn count_min_heap_rejects_negative_inputs() {
     use asap_executor::planner::summary_type::SummaryInputExpr;
     let mut update = SummaryUpdate::column(ColumnRef::SampleValue);
     update.item = Some(SummaryInputExpr::Column(ColumnRef::Named("host".into())));
-    let family = heap_sketch(SketchAlgorithm::CmsWithHeap, 64, 3, 4);
+    let family = heap_sketch(SketchAlgorithm::CountMinSketchWithHeap, 64, 3, 4);
     let operator = accumulator(&family, &update).unwrap();
     assert!(operator.validate_single_input(-1.0).is_err());
     assert!(operator.validate_single_input(0.5).is_ok());

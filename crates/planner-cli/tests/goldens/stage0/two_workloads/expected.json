@@ -36,13 +36,13 @@
         "readouts": [
           "Total"
         ],
-        "summary_type": "Cms"
+        "summary_type": "CountMinSketch"
       },
       {
         "readouts": [
           "TopK"
         ],
-        "summary_type": "CmsWithHeap"
+        "summary_type": "CountMinSketchWithHeap"
       },
       {
         "readouts": [
@@ -54,19 +54,19 @@
         "readouts": [
           "Distinct"
         ],
-        "summary_type": "Hll"
+        "summary_type": "HLL"
       },
       {
         "readouts": [
           "Distinct"
         ],
-        "summary_type": "Kmv"
+        "summary_type": "KMV"
       },
       {
         "readouts": [
           "Quantile"
         ],
-        "summary_type": "Kll"
+        "summary_type": "KLL"
       },
       {
         "readouts": [

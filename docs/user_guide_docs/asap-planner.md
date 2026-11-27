@@ -77,7 +77,7 @@ object; an omitted field keeps its default.
 
 `supported_summaries` lists the sketch summary types the deployment builds,
 each with the statistics it reads from them, e.g.
-`[{"summary_type": "Kll", "readouts": ["Quantile"]}]`. Without the file, or
+`[{"summary_type": "KLL", "readouts": ["Quantile"]}]`. Without the file, or
 when the file leaves it out, the planner uses the summary types the
 Planner's executor builds. To plan for a runtime that builds every summary
 type, pass the ready-to-use
@@ -92,10 +92,10 @@ do or what the caller rules out:
 ```json
 {
   "counter_semantics": {"reset_handling": true, "extrapolation": false},
-  "state_not_mergeable_across_windows": [{"exact": "Counter"}, {"sketch": "Kll"}],
+  "state_not_mergeable_across_windows": [{"exact": "Counter"}, {"sketch": "KLL"}],
   "excluded_candidates": [
     {"timing": "query_time", "operator": "Scan"},
-    {"summary_family": {"sketch": "Kll"}, "sketch_parameter_range": {"kll_k": {"at_most": 1403}}},
+    {"summary_family": {"sketch": "KLL"}, "sketch_parameter_range": {"kll_k": {"at_most": 1403}}},
     {"timing": "query_time", "aggregate_measure": "rate"}
   ]
 }
@@ -115,7 +115,7 @@ do or what the caller rules out:
   the fields it sets: `timing`, `kept_across_evaluations`, `operator`,
   `per_entity_reduction`, `aggregate_measure` (an `Aggregate` measure's
   JSON `kind`, e.g. `"rate"` or `"i_rate"`), `summary_family`,
-  `sketch_parameter_range` and `readout` (`{"summary_type": "Kll",
+  `sketch_parameter_range` and `readout` (`{"summary_type": "KLL",
   "statistic": "Quantile"}`). `aggregate_measure` matches the `Aggregate`
   only: to rule out the counter state as well, add `{"summary_family":
   {"exact": "Counter"}}`. An entry that sets no field, or whose fields match

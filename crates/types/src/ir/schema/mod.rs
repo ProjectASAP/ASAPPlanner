@@ -119,8 +119,8 @@ impl From<Field<DataType>> for Field<FieldDataType> {
 ///
 /// Every non-`Plain` variant is a summary type: its family (the variant) and
 /// its algorithm, so the type system can reject merges of incompatible
-/// summaries at plan construction time — a `SummaryMerge` over `Sketch(Kll)`
-/// and `Sketch(Cms)` inputs is a plan-time error, and a `Sketch(…)` can never
+/// summaries at plan construction time — a `SummaryMerge` over `Sketch(KLL)`
+/// and `Sketch(CountMinSketch)` inputs is a plan-time error, and a `Sketch(…)` can never
 /// be confused for a `SummarySample(…)` even though both are "opaque summary
 /// state" at a glance.
 ///
@@ -289,7 +289,7 @@ pub fn is_label_set_column(field: &Field) -> bool {
 
 impl Schema {
     /// The type of the summary state this schema carries: its first field
-    /// that is not a plain value, e.g. `Sketch(Kll)` for a KLL state keyed
+    /// that is not a plain value, e.g. `Sketch(KLL)` for a KLL state keyed
     /// by series; `None` for rows of plain values.
     pub fn summary_state_type(&self) -> Option<&FieldDataType> {
         self.fields

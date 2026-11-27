@@ -10,7 +10,7 @@ fn a_readouts_metric_is_its_algorithms() {
     let quantile = SketchStatistic::Quantile { q: 0.9 };
     let sketch = |algorithm| FieldDataType::Sketch(algorithm);
     assert_eq!(
-        readout_error_metric(&sketch(SketchAlgorithm::Kll), &quantile),
+        readout_error_metric(&sketch(SketchAlgorithm::KLL), &quantile),
         Some(AccuracyMetric::Rank)
     );
     assert_eq!(
@@ -18,7 +18,7 @@ fn a_readouts_metric_is_its_algorithms() {
         Some(AccuracyMetric::Relative)
     );
     assert_eq!(
-        readout_error_metric(&sketch(SketchAlgorithm::Hll), &SketchStatistic::Cardinality),
+        readout_error_metric(&sketch(SketchAlgorithm::HLL), &SketchStatistic::Cardinality),
         Some(AccuracyMetric::Relative)
     );
     assert_eq!(

@@ -303,7 +303,7 @@ fn weighted_summary_build_yields_within_a_batch() {
             Lifetime::None,
         )
         .unwrap();
-    let family = FieldDataType::Sketch(SketchAlgorithm::CmsWithHeap);
+    let family = FieldDataType::Sketch(SketchAlgorithm::CountMinSketchWithHeap);
     let operator = Operator::per_group_keyed_summary_build(
         input,
         family,

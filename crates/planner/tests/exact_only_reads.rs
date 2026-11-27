@@ -87,7 +87,7 @@ async fn a_relative_query_reads_no_rank_sketch_of_a_query_sharing_its_groups() {
     .await;
     let read = payloads_read_by(&dag, 1);
     assert!(
-        !read.iter().any(|payload| payload.contains("Sketch(Kll)")),
+        !read.iter().any(|payload| payload.contains("Sketch(KLL)")),
         "the relative query reads a KLL sketch: {read:?}"
     );
 }

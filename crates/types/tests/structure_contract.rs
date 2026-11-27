@@ -118,7 +118,7 @@ fn state_evaluations_and_passthrough_keep_their_contracts() {
     use asap_types::ir::schema::FieldDataType;
     use asap_types::ir::{ASAPOp, Operator, ProjectItem};
     use asap_types::summary_type::{SketchAlgorithm, SketchStatistic, SummaryUpdate};
-    let family = FieldDataType::Sketch(SketchAlgorithm::Kll);
+    let family = FieldDataType::Sketch(SketchAlgorithm::KLL);
     let state = Rc::new(
         OperatorNode::new(Operator::ASAP(ASAPOp::SummaryAgg {
             child: scan(),

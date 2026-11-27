@@ -140,12 +140,12 @@ pub struct AcceptedAccuracy {
     /// accuracy target.
     pub accepted_metric: Option<AccuracyMetric>,
     /// The sketch algorithms the query's output reads, in plan order
-    /// (e.g. `["Kll"]`); empty for an exact plan.
+    /// (e.g. `["KLL"]`); empty for an exact plan.
     pub sketches: Vec<String>,
 }
 
 impl std::fmt::Display for AcceptedAccuracy {
-    /// E.g. `accepted rank (Kll)`, `accepted exact`, or `no accuracy
+    /// E.g. `accepted rank (KLL)`, `accepted exact`, or `no accuracy
     /// target (DDSketch)`.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self.accepted_metric {

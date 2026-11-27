@@ -297,7 +297,7 @@ fn a_project_or_filter_over_states_passes_their_family_on() {
     let kll = SketchParams::Kll { k: 547 };
     let state_field = Field {
         name: "state".into(),
-        dtype: FieldDataType::Sketch(asap_types::summary_type::SketchAlgorithm::Kll),
+        dtype: FieldDataType::Sketch(asap_types::summary_type::SketchAlgorithm::KLL),
         nullable: false,
     };
     let states = PhysicalASAPDAGNode {
@@ -964,7 +964,7 @@ fn a_query_time_chain_sizes_its_windows_from_the_time_its_input_spans() {
         retention_ms: Some(300_000),
         ..node(Payload::ASAP(ASAPOp::SummaryTumblingWindowChain {
             child: 0,
-            summary_type: FieldDataType::Sketch(asap_types::summary_type::SketchAlgorithm::Kll),
+            summary_type: FieldDataType::Sketch(asap_types::summary_type::SketchAlgorithm::KLL),
             input: SummaryUpdate::column(ColumnRef::SampleValue),
             reduction: Reduction::PerEntity,
             filter: None,
@@ -1380,7 +1380,7 @@ fn a_kmv_build_costs_per_retained_hash_it_compares() {
             parameters: Some(SketchParams::Kmv { k }),
             ..node(Payload::ASAP(ASAPOp::SummaryAgg {
                 child: 0,
-                summary_type: FieldDataType::Sketch(SketchAlgorithm::Kmv),
+                summary_type: FieldDataType::Sketch(SketchAlgorithm::KMV),
                 input: SummaryUpdate::column(ColumnRef::Named("user_id".into())),
                 reduction: Reduction::by(keys.clone()),
                 filter: None,
@@ -1465,7 +1465,7 @@ fn an_operation_count_prints_to_three_decimals() {
 #[test]
 fn a_build_detail_prints_its_operations_per_row_to_three_decimals() {
     use asap_types::summary_type::SketchAlgorithm;
-    let detail = user_id_sketch_detail(SketchParams::Kmv { k: 4_323 }, SketchAlgorithm::Kmv, false);
+    let detail = user_id_sketch_detail(SketchParams::Kmv { k: 4_323 }, SketchAlgorithm::KMV, false);
     assert!(detail.contains("300000 rows x 304.926 ops"), "{detail}");
 }
 
@@ -1474,7 +1474,7 @@ fn a_build_detail_prints_its_operations_per_row_to_three_decimals() {
 #[test]
 fn a_chain_detail_prints_its_operations_per_row_to_three_decimals() {
     use asap_types::summary_type::SketchAlgorithm;
-    let detail = user_id_sketch_detail(SketchParams::Kmv { k: 4_323 }, SketchAlgorithm::Kmv, true);
+    let detail = user_id_sketch_detail(SketchParams::Kmv { k: 4_323 }, SketchAlgorithm::KMV, true);
     assert!(detail.contains("300000 rows x 714.976 ops"), "{detail}");
 }
 
@@ -1485,7 +1485,7 @@ fn a_state_allocation_prints_to_three_decimals() {
     use asap_types::summary_type::SketchAlgorithm;
     let detail = user_id_sketch_detail(
         SketchParams::Cms { width: 7, depth: 1 },
-        SketchAlgorithm::Cms,
+        SketchAlgorithm::CountMinSketch,
         false,
     );
     assert!(
@@ -1531,7 +1531,7 @@ fn a_kmv_build_charges_its_measured_time_per_row() {
             parameters: Some(SketchParams::Kmv { k }),
             ..node(Payload::ASAP(ASAPOp::SummaryAgg {
                 child: 0,
-                summary_type: FieldDataType::Sketch(SketchAlgorithm::Kmv),
+                summary_type: FieldDataType::Sketch(SketchAlgorithm::KMV),
                 input: SummaryUpdate::column(ColumnRef::Named("user_id".into())),
                 reduction: Reduction::by(keys.clone()),
                 filter: None,
@@ -1655,11 +1655,11 @@ fn a_kmv_rollup_merge_costs_per_hash_it_inserts() {
         output_schema: Schema::new(vec![
             Field::new("region", FieldDataType::Plain(DataType::Utf8), false),
             Field::new("service", FieldDataType::Plain(DataType::Utf8), false),
-            Field::new("state", FieldDataType::Sketch(SketchAlgorithm::Kmv), false),
+            Field::new("state", FieldDataType::Sketch(SketchAlgorithm::KMV), false),
         ]),
         ..node(Payload::ASAP(ASAPOp::SummaryAgg {
             child: 0,
-            summary_type: FieldDataType::Sketch(SketchAlgorithm::Kmv),
+            summary_type: FieldDataType::Sketch(SketchAlgorithm::KMV),
             input: SummaryUpdate::column(ColumnRef::Named("user_id".into())),
             reduction: Reduction::by(vec![0, 1]),
             filter: None,
@@ -1735,11 +1735,11 @@ fn a_rollup_merges_its_states_when_its_group_estimate_ties_its_input() {
         output_schema: Schema::new(vec![
             Field::new("region", FieldDataType::Plain(DataType::Utf8), false),
             Field::new("service", FieldDataType::Plain(DataType::Utf8), false),
-            Field::new("state", FieldDataType::Sketch(SketchAlgorithm::Kmv), false),
+            Field::new("state", FieldDataType::Sketch(SketchAlgorithm::KMV), false),
         ]),
         ..node(Payload::ASAP(ASAPOp::SummaryAgg {
             child: 0,
-            summary_type: FieldDataType::Sketch(SketchAlgorithm::Kmv),
+            summary_type: FieldDataType::Sketch(SketchAlgorithm::KMV),
             input: SummaryUpdate::column(ColumnRef::Named("user_id".into())),
             reduction: Reduction::by(vec![0, 1]),
             filter: None,
@@ -2653,7 +2653,7 @@ fn kll_merge_cpu_ops_over(k: u32, window_ms: u64, range_s: u64) -> f64 {
     };
     let mut chain = node(Payload::ASAP(ASAPOp::SummaryTumblingWindowChain {
         child: 0,
-        summary_type: FieldDataType::Sketch(asap_types::summary_type::SketchAlgorithm::Kll),
+        summary_type: FieldDataType::Sketch(asap_types::summary_type::SketchAlgorithm::KLL),
         input: SummaryUpdate::column(ColumnRef::SampleValue),
         reduction: Reduction::PerEntity,
         filter: None,
@@ -2664,7 +2664,7 @@ fn kll_merge_cpu_ops_over(k: u32, window_ms: u64, range_s: u64) -> f64 {
     chain.retention_ms = Some(range_s * 1_000);
     chain.parameters = Some(SketchParams::Kll { k });
     chain.output_schema = state_schema(
-        FieldDataType::Sketch(asap_types::summary_type::SketchAlgorithm::Kll),
+        FieldDataType::Sketch(asap_types::summary_type::SketchAlgorithm::KLL),
         &[asap_types::ir::schema::PROMQL_SERIES_IDENTITY],
     );
     let chain_usage = node_resource_usage_and_cost(
@@ -2926,7 +2926,7 @@ fn a_merge_over_several_inputs_sizes_its_state_for_all_of_them() {
     let k = 4_000;
     let windows = PhysicalASAPDAGNode {
         output_schema: state_schema(
-            FieldDataType::Sketch(asap_types::summary_type::SketchAlgorithm::Kll),
+            FieldDataType::Sketch(asap_types::summary_type::SketchAlgorithm::KLL),
             &[asap_types::ir::schema::PROMQL_SERIES_IDENTITY],
         ),
         ..node(Payload::NonASAP(NonASAPOp::TimeRange {
@@ -3114,7 +3114,7 @@ fn a_kll_estimate_over_a_state_built_by_updates_charges_its_measured_time() {
         kll_estimate_us_per_group(
             Payload::ASAP(ASAPOp::SummaryAgg {
                 child: 0,
-                summary_type: FieldDataType::Sketch(asap_types::summary_type::SketchAlgorithm::Kll),
+                summary_type: FieldDataType::Sketch(asap_types::summary_type::SketchAlgorithm::KLL),
                 input: SummaryUpdate::column(ColumnRef::SampleValue),
                 reduction: Reduction::PerEntity,
                 filter: None,
@@ -3241,7 +3241,7 @@ fn an_ingestion_time_kll_chain_is_updates_routing_visits_emits_and_a_carried_lab
     use asap_types::summary_type::SketchAlgorithm;
     let settings = CostInputs::default();
     let data = thousand_series_sampled_every(1_000);
-    let kll = FieldDataType::Sketch(SketchAlgorithm::Kll);
+    let kll = FieldDataType::Sketch(SketchAlgorithm::KLL);
     let scan = node(metric_scan("latency"));
     let chain = PhysicalASAPDAGNode {
         retention_ms: Some(300_000),
@@ -3487,13 +3487,13 @@ fn terms_reproduce_the_formula_cpu_of_every_costed_node() {
         ),
         (
             "KLL k = 547",
-            FieldDataType::Sketch(SketchAlgorithm::Kll),
+            FieldDataType::Sketch(SketchAlgorithm::KLL),
             StateFamily::Sketch(&kll_547),
             Some(kll_547.clone()),
         ),
         (
             "KLL k = 1,404",
-            FieldDataType::Sketch(SketchAlgorithm::Kll),
+            FieldDataType::Sketch(SketchAlgorithm::KLL),
             StateFamily::Sketch(&kll_1404),
             Some(kll_1404.clone()),
         ),
@@ -3601,7 +3601,7 @@ fn terms_reproduce_the_formula_cpu_of_every_costed_node() {
             parameters: Some(SketchParams::Kmv { k }),
             ..node(Payload::ASAP(ASAPOp::SummaryAgg {
                 child: 0,
-                summary_type: FieldDataType::Sketch(SketchAlgorithm::Kmv),
+                summary_type: FieldDataType::Sketch(SketchAlgorithm::KMV),
                 input: SummaryUpdate::column(ColumnRef::Named("user_id".into())),
                 reduction: Reduction::by(keys.clone()),
                 filter: None,
@@ -3651,11 +3651,11 @@ fn terms_reproduce_the_formula_cpu_of_every_costed_node() {
         output_schema: Schema::new(vec![
             Field::new("region", FieldDataType::Plain(DataType::Utf8), false),
             Field::new("service", FieldDataType::Plain(DataType::Utf8), false),
-            Field::new("state", FieldDataType::Sketch(SketchAlgorithm::Kmv), false),
+            Field::new("state", FieldDataType::Sketch(SketchAlgorithm::KMV), false),
         ]),
         ..node(Payload::ASAP(ASAPOp::SummaryAgg {
             child: 0,
-            summary_type: FieldDataType::Sketch(SketchAlgorithm::Kmv),
+            summary_type: FieldDataType::Sketch(SketchAlgorithm::KMV),
             input: SummaryUpdate::column(ColumnRef::Named("user_id".into())),
             reduction: Reduction::by(vec![0, 1]),
             filter: None,
@@ -3734,7 +3734,7 @@ fn terms_reproduce_the_formula_cpu_of_every_costed_node() {
     }));
     let kll_updates = node(Payload::ASAP(ASAPOp::SummaryAgg {
         child: 0,
-        summary_type: FieldDataType::Sketch(SketchAlgorithm::Kll),
+        summary_type: FieldDataType::Sketch(SketchAlgorithm::KLL),
         input: SummaryUpdate::column(ColumnRef::SampleValue),
         reduction: Reduction::PerEntity,
         filter: None,
@@ -3943,7 +3943,7 @@ fn terms_ignore_the_measured_table_and_the_calibration_factor() {
         parameters: Some(SketchParams::Kll { k: 547 }),
         ..node(Payload::ASAP(ASAPOp::SummaryAgg {
             child: 0,
-            summary_type: FieldDataType::Sketch(SketchAlgorithm::Kll),
+            summary_type: FieldDataType::Sketch(SketchAlgorithm::KLL),
             input: SummaryUpdate::column(ColumnRef::SampleValue),
             reduction: Reduction::PerEntity,
             filter: None,
@@ -4250,7 +4250,11 @@ fn counter_sketch_charges_ms(shape: &CounterSketchShape) -> CounterSketchCharges
             keyed(SummaryInputExpr::Constant(1.0)),
             SketchStatistic::FrequencyL2,
         ),
-        SketchParams::CmsWithHeap { .. } => (SketchAlgorithm::CmsWithHeap, keyed(value()), top_10),
+        SketchParams::CmsWithHeap { .. } => (
+            SketchAlgorithm::CountMinSketchWithHeap,
+            keyed(value()),
+            top_10,
+        ),
         SketchParams::CountSketchWithHeap { .. } => {
             (SketchAlgorithm::CountSketchWithHeap, keyed(value()), top_10)
         }
@@ -4835,7 +4839,7 @@ fn ingestion_and_query_time_chains_over_a_fractional_rate_fold_the_same_rows() {
         parameters: Some(SketchParams::Kll { k: 547 }),
         ..node(Payload::ASAP(ASAPOp::SummaryTumblingWindowChain {
             child: 0,
-            summary_type: FieldDataType::Sketch(asap_types::summary_type::SketchAlgorithm::Kll),
+            summary_type: FieldDataType::Sketch(asap_types::summary_type::SketchAlgorithm::KLL),
             input: SummaryUpdate::column(ColumnRef::SampleValue),
             reduction: Reduction::PerEntity,
             filter: None,

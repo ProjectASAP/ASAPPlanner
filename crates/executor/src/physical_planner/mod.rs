@@ -1593,7 +1593,7 @@ fn summary_agg_build(
     };
     if matches!(
         family,
-        FieldDataType::Sketch(planner_types::summary_type::SketchAlgorithm::HydraCms)
+        FieldDataType::Sketch(planner_types::summary_type::SketchAlgorithm::HydraCountMinSketch)
     ) {
         crate::capability::validate_summary_kernel(family, parameters, update)
             .map_err(Error::Invalid)?;
@@ -1693,7 +1693,7 @@ fn unkeyed_frequency_family(family: &FieldDataType) -> bool {
     matches!(family, FieldDataType::Sketch(kind) if matches!(
         kind,
         planner_types::summary_type::SketchAlgorithm::UnivMon
-            | planner_types::summary_type::SketchAlgorithm::Hll
+            | planner_types::summary_type::SketchAlgorithm::HLL
     ))
 }
 fn summary_column(input: &SchemaRef) -> Result<usize, Error> {

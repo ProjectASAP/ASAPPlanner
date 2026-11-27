@@ -87,12 +87,12 @@ impl StateColumnUpdater {
     pub fn new(family: &FieldDataType, parameters: Option<&SketchParams>) -> Result<Self, Error> {
         crate::values::validate_family(family)?;
         let states = match family {
-            FieldDataType::Sketch(planner_types::summary_type::SketchAlgorithm::HydraCms) => {
-                GroupStates::Hydra {
-                    grid: Box::new(create_hydra_cms(family, parameters).map_err(Error::Invalid)?),
-                    names: Vec::new(),
-                }
-            }
+            FieldDataType::Sketch(
+                planner_types::summary_type::SketchAlgorithm::HydraCountMinSketch,
+            ) => GroupStates::Hydra {
+                grid: Box::new(create_hydra_cms(family, parameters).map_err(Error::Invalid)?),
+                names: Vec::new(),
+            },
             FieldDataType::ExactAggregate(..) if parameters.is_some() => {
                 return Err(Error::Invalid(
                     "an exact summary has no parameters θ".into(),
@@ -103,7 +103,7 @@ impl StateColumnUpdater {
                 states: Vec::new(),
             },
             FieldDataType::Sketch(
-                algorithm @ (planner_types::summary_type::SketchAlgorithm::CmsWithHeap
+                algorithm @ (planner_types::summary_type::SketchAlgorithm::CountMinSketchWithHeap
                 | planner_types::summary_type::SketchAlgorithm::CountSketchWithHeap),
             ) => {
                 let Some(parameters) = parameters else {
@@ -262,7 +262,7 @@ impl StateColumnUpdater {
     }
 
     /// Add a group with an empty state; returns its number. Bad input for a
-    /// HydraCms family, whose groups are added with
+    /// HydraCountMinSketch family, whose groups are added with
     /// [`Self::add_group_with_key`].
     pub fn add_group(&mut self) -> Result<u32, Error> {
         let group = u32::try_from(self.group_count())

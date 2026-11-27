@@ -265,14 +265,14 @@ pub enum StatModelParams {
     },
 }
 
-/// θ of the `Hydra*` algorithms ([`SketchAlgorithm::HydraKll`](crate::summary_type::SketchAlgorithm::HydraKll),
-/// [`SketchAlgorithm::HydraCms`](crate::summary_type::SketchAlgorithm::HydraCms), [`SketchAlgorithm::HydraCountSketch`](crate::summary_type::SketchAlgorithm::HydraCountSketch)): one
+/// θ of the `Hydra*` algorithms ([`SketchAlgorithm::HydraKLL`](crate::summary_type::SketchAlgorithm::HydraKLL),
+/// [`SketchAlgorithm::HydraCountMinSketch`](crate::summary_type::SketchAlgorithm::HydraCountMinSketch), [`SketchAlgorithm::HydraCountSketch`](crate::summary_type::SketchAlgorithm::HydraCountSketch)): one
 /// structure shared by every subpopulation of a grouped aggregate (Manousis
 /// et al., "Enabling Efficient and General Subpopulation Analytics in
 /// Multidimensional Data Streams", VLDB 2022). It holds both the
-/// per-subpopulation sketch's sizes and the shared grid's. HydraCms and
+/// per-subpopulation sketch's sizes and the shared grid's. HydraCountMinSketch and
 /// HydraCountSketch are the paper's proven construction (§4.5, Theorem 2);
-/// HydraKll is not (the paper excludes quantiles, §4.3), so no error model
+/// HydraKLL is not (the paper excludes quantiles, §4.3), so no error model
 /// covers it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum HydraParams {
@@ -364,20 +364,20 @@ pub enum SketchParameterRange {
 }
 
 impl SketchParameterRange {
-    /// The algorithm whose parameter it ranges over (`Kll`, `Kmv`,
+    /// The algorithm whose parameter it ranges over (`KLL`, `KMV`,
     /// `DDSketch`).
     pub fn algorithm(&self) -> super::SketchAlgorithm {
         use super::SketchAlgorithm;
         match self {
-            Self::KllK { .. } => SketchAlgorithm::Kll,
-            Self::KmvK { .. } => SketchAlgorithm::Kmv,
+            Self::KllK { .. } => SketchAlgorithm::KLL,
+            Self::KmvK { .. } => SketchAlgorithm::KMV,
             Self::DDSketchAlpha { .. } => SketchAlgorithm::DDSketch,
         }
     }
 
     /// Whether `parameters` are that algorithm's and the parameter is in
     /// range, both ends included: `KllK { at_most: Some(547) }` contains
-    /// `Kll { k: 547 }`, not `Kll { k: 1404 }` nor any `Kmv`.
+    /// `Kll { k: 547 }`, not `Kll { k: 1404 }` nor any `KMV`.
     pub fn contains(&self, parameters: &SketchParams) -> bool {
         fn within<T: PartialOrd>(value: T, at_least: Option<T>, at_most: Option<T>) -> bool {
             at_least.is_none_or(|low| value >= low) && at_most.is_none_or(|high| value <= high)
@@ -449,7 +449,7 @@ mod sketch_parameter_range_tests {
             at_least: None,
             at_most: Some(2863),
         };
-        assert_eq!(at_most_2863.algorithm(), SketchAlgorithm::Kll);
+        assert_eq!(at_most_2863.algorithm(), SketchAlgorithm::KLL);
         assert!(!at_most_2863.contains(&SketchParams::Kmv { k: 547 }));
         assert!(!at_most_2863.contains(&SketchParams::DDSketch { alpha: 0.01 }));
     }
@@ -462,7 +462,7 @@ mod sketch_parameter_range_tests {
             at_least: Some(4323),
             at_most: None,
         };
-        assert_eq!(kmv.algorithm(), SketchAlgorithm::Kmv);
+        assert_eq!(kmv.algorithm(), SketchAlgorithm::KMV);
         let kmv_contained: Vec<bool> = [1_118, 4_323, 26_656, 106_263]
             .into_iter()
             .map(|k| kmv.contains(&SketchParams::Kmv { k }))

@@ -151,7 +151,7 @@ async fn production_three_sql_groupings_share_kll() {
         .accuracy_metric(AccuracyMetric::Rank)
         .accuracy_scope(AccuracyScope::PerValue);
     let queries: Vec<_> = ["region, service", "region", "service"].iter().map(|keys| format!("SELECT {keys}, approx_percentile_cont(latency, 0.99) AS value FROM http WHERE ts >= now() - INTERVAL '5 minutes' GROUP BY {keys}")).collect();
-    check(&sql(&queries, accuracy).await, 3, 2, "Kll");
+    check(&sql(&queries, accuracy).await, 3, 2, "KLL");
 }
 
 /// `COUNT(DISTINCT user_id)` by (region, service) and by service: the two

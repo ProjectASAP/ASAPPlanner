@@ -33,7 +33,7 @@ fn key_filters_and_value_preserving_projects_have_unit_contracts() {
     let state = memo
         .find_or_add_group(Operator::ASAP(ASAPOp::SummaryAgg {
             child: g1,
-            summary_type: FieldDataType::Sketch(SketchAlgorithm::Kll),
+            summary_type: FieldDataType::Sketch(SketchAlgorithm::KLL),
             input: SummaryUpdate::column(asap_types::ir::scalar::ColumnRef::SampleValue),
             reduction: Reduction::by(vec![2]),
             filter: None,
@@ -199,7 +199,7 @@ fn a_reduction_keyed_by_an_estimate_has_no_contract() {
     let state = memo
         .find_or_add_group(Operator::ASAP(ASAPOp::SummaryAgg {
             child: g1,
-            summary_type: FieldDataType::Sketch(SketchAlgorithm::Kll),
+            summary_type: FieldDataType::Sketch(SketchAlgorithm::KLL),
             input: SummaryUpdate::column(asap_types::ir::scalar::ColumnRef::SampleValue),
             reduction: Reduction::by(vec![2]),
             filter: None,

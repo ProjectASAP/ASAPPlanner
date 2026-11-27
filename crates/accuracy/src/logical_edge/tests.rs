@@ -39,7 +39,7 @@ fn a_tiny_limit_is_widened_only_relatively() {
 /// reach the root unbounded; with no target reaching it, it holds.
 #[test]
 fn a_distinct_count_readout_without_an_evaluable_guarantee_serves_no_query_with_a_target() {
-    for algorithm in [SketchAlgorithm::Hll, SketchAlgorithm::UnivMon] {
+    for algorithm in [SketchAlgorithm::HLL, SketchAlgorithm::UnivMon] {
         let mut memo = Memo::new(&DataWorkload::default());
         let events = memo.find_or_add_group(scan("events", &[], vec![])).unwrap();
         let build = Operator::ASAP(ASAPOp::SummaryAgg {
@@ -121,7 +121,7 @@ fn a_heap_smaller_than_k_fails_the_topk_readouts_edge() {
     let state = sketch_state(
         &mut memo,
         window,
-        SketchAlgorithm::CmsWithHeap,
+        SketchAlgorithm::CountMinSketchWithHeap,
         Reduction::by(vec![]),
     );
     let readout = estimate(&mut memo, state, SketchStatistic::TopK { k: 50 });
@@ -235,7 +235,7 @@ fn a_distinct_count_readout_reads_the_scanned_sources_distinct_bound() {
         };
         let edge = readout_edge(
             facts,
-            SketchAlgorithm::Hll,
+            SketchAlgorithm::HLL,
             SketchParams::Hll { precision: 18 },
             SketchStatistic::Cardinality,
             RequiredAccuracy {

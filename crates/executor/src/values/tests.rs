@@ -6,7 +6,7 @@ use planner_types::summary_type::SketchAlgorithm;
 // batch; states of different shapes (θ) do not merge.
 #[test]
 fn weighted_state_family_must_match_and_shapes_must_merge() {
-    let cms = SummaryFamilyType::Sketch(SketchAlgorithm::CmsWithHeap);
+    let cms = SummaryFamilyType::Sketch(SketchAlgorithm::CountMinSketchWithHeap);
     let cs = SummaryFamilyType::Sketch(SketchAlgorithm::CountSketchWithHeap);
     let state = WeightedFrequency::new(FrequencyAlgorithm::CountSketch, 32, 5, 8).unwrap();
     assert!(validate_state(&cs, &state).is_ok());

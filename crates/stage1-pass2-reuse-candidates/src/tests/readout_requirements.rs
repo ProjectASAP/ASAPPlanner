@@ -16,7 +16,7 @@ use asap_types::test_support::memo_builders::*;
 #[test]
 fn a_single_readout_requires_the_query_target() {
     let mut memo = Memo::new(&DataWorkload::default());
-    let (_, state, readout) = quantile_over_time(&mut memo, SketchAlgorithm::Kll, 0.9, 300);
+    let (_, state, readout) = quantile_over_time(&mut memo, SketchAlgorithm::KLL, 0.9, 300);
     query(&mut memo, readout, Some(AccuracyTarget::max_error(0.01)));
     let logical = pass2(memo, &[entry(60_000)]);
     assert_eq!(
@@ -61,7 +61,7 @@ fn a_single_readout_requires_the_query_target() {
 #[test]
 fn a_whole_result_failure_probability_without_values_per_evaluation_prunes_the_readout() {
     let mut memo = Memo::new(&DataWorkload::default());
-    let (_, _, readout) = quantile_over_time(&mut memo, SketchAlgorithm::Kll, 0.9, 300);
+    let (_, _, readout) = quantile_over_time(&mut memo, SketchAlgorithm::KLL, 0.9, 300);
     let query = memo.add_query(MemoQuery {
         root: QueryRoot::Operator(readout),
         accuracy_target: Some(AccuracyTarget::max_error(0.01).failure_probability(0.01)),
@@ -92,7 +92,7 @@ fn a_whole_result_failure_probability_without_values_per_evaluation_prunes_the_r
 #[test]
 fn a_readout_another_query_gives_a_level_survives_unknown_values_per_evaluation() {
     let mut memo = Memo::new(&DataWorkload::default());
-    let (window, state, readout) = quantile_over_time(&mut memo, SketchAlgorithm::Kll, 0.9, 300);
+    let (window, state, readout) = quantile_over_time(&mut memo, SketchAlgorithm::KLL, 0.9, 300);
     let q0 = memo.add_query(MemoQuery {
         root: QueryRoot::Operator(readout),
         accuracy_target: Some(AccuracyTarget::max_error(0.01).failure_probability(0.01)),

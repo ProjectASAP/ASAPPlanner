@@ -5,7 +5,7 @@ use super::*;
 fn sketch_kernels_need_their_own_parameters() {
     use planner_types::summary_type::{ExactKind, ExactParams, SummaryUpdate};
     let update = SummaryUpdate::column(planner_types::ir::scalar::ColumnRef::SampleValue);
-    let kll = SummaryFamilyType::Sketch(SketchAlgorithm::Kll);
+    let kll = SummaryFamilyType::Sketch(SketchAlgorithm::KLL);
     let k200 = SketchParams::Kll { k: 200 };
     assert!(create_planner_accumulator(&kll, Some(&k200), &update).is_ok());
     assert!(create_planner_accumulator(&kll, None, &update).is_err());
@@ -21,7 +21,7 @@ fn sketch_kernels_need_their_own_parameters() {
 #[test]
 fn hydra_cms_builds_one_shared_grid() {
     use planner_types::summary_type::{HydraParams, SummaryInputExpr, SummaryUpdate};
-    let family = SummaryFamilyType::Sketch(SketchAlgorithm::HydraCms);
+    let family = SummaryFamilyType::Sketch(SketchAlgorithm::HydraCountMinSketch);
     let hydra = SketchParams::Hydra(HydraParams::HydraCms {
         width: 128,
         depth: 3,

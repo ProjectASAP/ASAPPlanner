@@ -206,7 +206,7 @@ impl UnivMonAccumulator {
 
 impl AggregateCore for UnivMonAccumulator {
     /// This accumulator's own fields, sketchlib's bytes for the sketch's
-    /// shape with keys that own no bytes ([`UnivMon::estimated_memory_bytes`]:
+    /// shape with keys that own no bytes ([`UnivMon::theoretical_memory_bytes`]:
     /// at least what it holds), and an upper bound on the variable-length
     /// keys the heaps retain: the smaller of every slot holding the longest
     /// key seen and every layer holding a copy of every key inserted.
@@ -221,7 +221,7 @@ impl AggregateCore for UnivMonAccumulator {
             .saturating_mul(self.max_key_bytes)
             .min(layers.saturating_mul(self.inserted_key_bytes));
         (std::mem::size_of::<Self>() - std::mem::size_of::<UnivMon>())
-            .saturating_add(UnivMon::estimated_memory_bytes(
+            .saturating_add(UnivMon::theoretical_memory_bytes(
                 heap_size,
                 rows,
                 cols,

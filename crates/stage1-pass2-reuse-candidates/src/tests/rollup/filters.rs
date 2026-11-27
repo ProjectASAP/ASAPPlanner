@@ -44,13 +44,13 @@ fn a_filtered_coarse_sketch_state_merges_the_finer_states_through_a_compensating
     let fine = sketch_state(
         &mut memo,
         fine_window,
-        SketchAlgorithm::Kll,
+        SketchAlgorithm::KLL,
         Reduction::by(vec![2, 3]),
     );
     let coarse = sketch_state(
         &mut memo,
         coarse_window,
-        SketchAlgorithm::Kll,
+        SketchAlgorithm::KLL,
         Reduction::by(vec![3]),
     );
     let groups_before = memo.groups().len();
@@ -117,13 +117,13 @@ fn a_narrowing_on_a_column_that_is_no_key_gives_no_rollup() {
     let fine = sketch_state(
         &mut memo,
         all_window,
-        SketchAlgorithm::Kll,
+        SketchAlgorithm::KLL,
         Reduction::by(vec![2, 3]),
     );
     let coarse = sketch_state(
         &mut memo,
         errors_window,
-        SketchAlgorithm::Kll,
+        SketchAlgorithm::KLL,
         Reduction::by(vec![2]),
     );
     for state in [fine, coarse] {
@@ -339,7 +339,7 @@ fn a_narrower_group_of_the_same_keys_filters_the_wider_state_and_estimate() {
         sketch_state(
             &mut memo,
             window,
-            SketchAlgorithm::Kll,
+            SketchAlgorithm::KLL,
             Reduction::by(vec![2, 3]),
         )
     });
@@ -479,7 +479,7 @@ fn nested_selections_of_the_same_keys_each_filter_every_wider_one() {
         let state = sketch_state(
             &mut memo,
             window,
-            SketchAlgorithm::Kll,
+            SketchAlgorithm::KLL,
             Reduction::by(vec![2]),
         );
         let readout = estimate(&mut memo, state, SketchStatistic::Quantile { q: 0.99 });

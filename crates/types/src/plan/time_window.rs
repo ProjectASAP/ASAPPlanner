@@ -510,7 +510,7 @@ mod tests {
         let chain = || {
             Operator::ASAP(ASAPOp::SummaryTumblingWindowChain {
                 child: 0,
-                summary_type: FieldDataType::Sketch(SketchAlgorithm::Kll),
+                summary_type: FieldDataType::Sketch(SketchAlgorithm::KLL),
                 input: SummaryUpdate::column(ColumnRef::SampleValue),
                 reduction: Reduction::PerEntity,
                 filter: None,

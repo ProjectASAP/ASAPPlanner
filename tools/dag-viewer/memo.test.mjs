@@ -113,7 +113,7 @@ test('each candidate sits inside its group, colored by origin, with θ, and an e
   const kll = byId(elements, 'g4c6');
   assert.equal(kll.data.parent, 'g4');
   assert.equal(kll.data.color, vm.runInContext('MEMO_ORIGINS.pass1.color', context));
-  assert.equal(kll.data.label, '#6 SummaryAgg Kll\nθ Kll(k=2863)\nPass1');
+  assert.equal(kll.data.label, '#6 SummaryAgg KLL\nθ Kll(k=2863)\nPass1');
   // A candidate without θ says so on its middle line; a new one is marked
   // (its last line clipped).
   assert.equal(byId(elements, 'g0c1').data.label, '#1 Project\n—\nPass1 · ✓ selected');
@@ -133,7 +133,7 @@ test("Pass 2's pruned candidates are marked and counted on their group", () => {
   const elements = call('memoStepElements', fixture(), PASS2, {});
   assert.deepEqual(nodesOf(elements).filter((e) => /\bpruned\b/.test(e.classes || '')).map((e) => e.data.id), ['g4c0', 'g4c1', 'g4c2', 'g4c3']);
   assert.match(byId(elements, 'g4c0').data.label, /Pass1 · ✗ pruned$/);
-  assert.match(byId(elements, 'g4').data.label, /^G4 · SummaryAgg Kll\n10 candidates \(4 pruned by Pass 2\)$/);
+  assert.match(byId(elements, 'g4').data.label, /^G4 · SummaryAgg KLL\n10 candidates \(4 pruned by Pass 2\)$/);
   // Pass 1 does not prune.
   assert.ok(!call('memoStepElements', fixture(), 1, {}).some((e) => /pruned/.test(e.classes || '')));
 });

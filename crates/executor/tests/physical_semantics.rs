@@ -1010,7 +1010,7 @@ fn kll_partial_merge_and_multiple_evaluations_preserve_population() {
     use planner_types::summary_type::SketchAlgorithm;
 
     let input = schema(&[("v", DataType::Float64, false)]);
-    let family = FieldDataType::Sketch(SketchAlgorithm::Kll);
+    let family = FieldDataType::Sketch(SketchAlgorithm::KLL);
     let mut dag = PhysicalDAG::default();
     for (id, range) in [(0, 0..64), (1, 64..128), (2, 0..128)] {
         let rows = range.map(|n| vec![Value::Float64(n as f64)]).collect();
@@ -1119,7 +1119,7 @@ fn compacted_kll_tumbling_windows_merge_within_the_calibrated_rank_error() {
     let bound = 2.296 / f64::from(K).powf(0.9723);
     let n = (TUMBLING_WINDOW_COUNT * ROWS_PER_TUMBLING_WINDOW) as f64;
     let input = schema(&[("v", DataType::Float64, false)]);
-    let family = FieldDataType::Sketch(SketchAlgorithm::Kll);
+    let family = FieldDataType::Sketch(SketchAlgorithm::KLL);
     let build = || {
         Operator::per_group_summary_build(
             input.clone(),
@@ -1522,7 +1522,7 @@ fn filtered_summary_build_keeps_empty_groups() {
         ExactKind, ExactParams, SketchAlgorithm, SketchStatistic, SummaryUpdate,
     };
     let (input, rows) = filtered_input();
-    let kll = FieldDataType::Sketch(SketchAlgorithm::Kll);
+    let kll = FieldDataType::Sketch(SketchAlgorithm::KLL);
     let count = FieldDataType::ExactAggregate(ExactKind::Count, ExactParams::Count);
     let cases = [
         (

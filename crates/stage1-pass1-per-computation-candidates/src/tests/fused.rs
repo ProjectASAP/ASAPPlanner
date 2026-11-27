@@ -38,7 +38,7 @@ fn whole_expression_topk_heaps_read_the_raw_samples() {
     query(&mut memo, ranked, None);
     let memo = pass1_memo(memo, &[]).unwrap();
     for algorithm in [
-        SketchAlgorithm::CmsWithHeap,
+        SketchAlgorithm::CountMinSketchWithHeap,
         SketchAlgorithm::CountSketchWithHeap,
     ] {
         let (state, update) = state_group(&memo, algorithm);
@@ -101,7 +101,7 @@ fn whole_expression_topk_heap_candidates() {
         memo_printout(&memo)
     );
     for (project, algorithm) in ranked_candidates[1..].iter().zip([
-        SketchAlgorithm::CmsWithHeap,
+        SketchAlgorithm::CountMinSketchWithHeap,
         SketchAlgorithm::CountSketchWithHeap,
     ]) {
         assert!(project.fused_groups.is_empty());
@@ -150,7 +150,7 @@ fn count_ranked_topk_counts_with_unit_weight() {
     );
     query(&mut memo, ranked, None);
     let memo = pass1_memo(memo, &[]).unwrap();
-    let (_, update) = state_group(&memo, SketchAlgorithm::CmsWithHeap);
+    let (_, update) = state_group(&memo, SketchAlgorithm::CountMinSketchWithHeap);
     assert_eq!(update.weight, SummaryInputExpr::Constant(1.0));
 }
 

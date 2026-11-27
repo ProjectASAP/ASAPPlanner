@@ -3,7 +3,7 @@
   "materialized_views": [
     {
       "coverage": {
-        "definition_id": "a446d509bf79a41e64d4c7dc4e541037",
+        "definition_id": "6f1cdb35c5c714b2f0c0d076a4f2f3f7",
         "selection": [
           {
             "columns": []
@@ -14,11 +14,11 @@
         "materialized_views": []
       },
       "node_id": 5,
-      "plan_id": "6d7351cc3cf7ce07c425fd0b394d9508",
+      "plan_id": "d79a20a6ab11b3524444d7c9ec9f2b14",
       "refresh": "at_ingestion",
       "retention_ms": 300000,
       "view_state_key": {
-        "definition_id": "a446d509bf79a41e64d4c7dc4e541037",
+        "definition_id": "6f1cdb35c5c714b2f0c0d076a4f2f3f7",
         "logical_properties": {
           "parameters": {
             "Kll": {
@@ -44,9 +44,9 @@
       {
         "accepted_metric": "rank",
         "sketches": [
-          "Kll"
+          "KLL"
         ],
-        "summary": "accepted rank (Kll)"
+        "summary": "accepted rank (KLL)"
       },
       {
         "accepted_metric": null,
@@ -146,7 +146,7 @@
           "cost_per_second": 1.883841902e-9,
           "cost_source": "analytical",
           "cpu_core_seconds_per_second": 0.0000659526666667,
-          "detail": "build Kll in tumbling windows of 60000 ms for 10 groups: 667 rows x 84 ops, 1 group visits, 0.2 states emitted; x 1.0000/s; keeps 993120 bytes",
+          "detail": "build KLL in tumbling windows of 60000 ms for 10 groups: 667 rows x 84 ops, 1 group visits, 0.2 states emitted; x 1.0000/s; keeps 993120 bytes",
           "ingest_cpu_core_seconds_per_second": 0.000065536,
           "multiplier": 1,
           "operator": "SummaryTumblingWindowChain",
@@ -466,7 +466,7 @@
               },
               {
                 "dtype": {
-                  "Sketch": "Kll"
+                  "Sketch": "KLL"
                 },
                 "name": "state",
                 "nullable": false
@@ -510,7 +510,7 @@
               },
               {
                 "dtype": {
-                  "Sketch": "Kll"
+                  "Sketch": "KLL"
                 },
                 "name": "state",
                 "nullable": false
@@ -547,7 +547,7 @@
               },
               {
                 "dtype": {
-                  "Sketch": "Kll"
+                  "Sketch": "KLL"
                 },
                 "name": "state",
                 "nullable": false
@@ -1034,7 +1034,7 @@
               },
               {
                 "dtype": {
-                  "Sketch": "Kll"
+                  "Sketch": "KLL"
                 },
                 "name": "state",
                 "nullable": false
@@ -1076,7 +1076,7 @@
                   ]
                 },
                 "summary_type": {
-                  "Sketch": "Kll"
+                  "Sketch": "KLL"
                 },
                 "tumbling_window_width_ms": 60000
               }
@@ -1084,7 +1084,7 @@
           },
           "retention_ms": 300000,
           "view_coverage": {
-            "definition_id": "a446d509bf79a41e64d4c7dc4e541037",
+            "definition_id": "6f1cdb35c5c714b2f0c0d076a4f2f3f7",
             "selection": [
               {
                 "columns": []
@@ -1114,7 +1114,7 @@
               },
               {
                 "dtype": {
-                  "Sketch": "Kll"
+                  "Sketch": "KLL"
                 },
                 "name": "state",
                 "nullable": false
@@ -1167,7 +1167,7 @@
               },
               {
                 "dtype": {
-                  "Sketch": "Kll"
+                  "Sketch": "KLL"
                 },
                 "name": "state",
                 "nullable": false

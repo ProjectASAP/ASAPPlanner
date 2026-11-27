@@ -110,7 +110,7 @@ fn chain(width_ms: i64, built: Built) -> Rc<OperatorNode> {
             Built::Sum => FieldDataType::ExactAggregate(ExactKind::Sum, ExactParams::Sum),
             Built::Max => FieldDataType::ExactAggregate(ExactKind::Max, ExactParams::Max),
             Built::DDSketchP99 => FieldDataType::Sketch(SketchAlgorithm::DDSketch),
-            Built::KllP99 => FieldDataType::Sketch(SketchAlgorithm::Kll),
+            Built::KllP99 => FieldDataType::Sketch(SketchAlgorithm::KLL),
         },
         input: SummaryUpdate::column(ColumnRef::SampleValue),
         reduction: Reduction::by(vec![0]),
