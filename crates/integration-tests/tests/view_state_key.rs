@@ -101,7 +101,12 @@ fn view_at(dag: &mut PhysicalASAPDAG, id: usize) -> MaterializedView {
 /// share), over its chain kept as a view refreshed at ingestion.
 fn view_over_chain(width_ms: u64, is_view: fn(&Operator<usize>) -> bool) -> MaterializedView {
     let (mut dag, chain, _) = chain_dag(width_ms);
-    let view = dag.nodes.iter().find(|node| is_view(&node.payload)).unwrap().id;
+    let view = dag
+        .nodes
+        .iter()
+        .find(|node| is_view(&node.payload))
+        .unwrap()
+        .id;
     let node = node_mut(&mut dag, view);
     node.lifetime = Lifetime::AcrossEvaluations(StorageMedium::Memory);
     node.retention_ms = Some(5 * MINUTE_MS);
@@ -191,8 +196,8 @@ fn cover_view() -> MaterializedView {
         summary_input: merge,
         query: SketchStatistic::Quantile { q: 0.5 },
     }));
-    let mut dag = asap_types::test_support::forwarders::physical_asap_dag_at_query_time(&p50)
-        .unwrap();
+    let mut dag =
+        asap_types::test_support::forwarders::physical_asap_dag_at_query_time(&p50).unwrap();
     set_build_parameters(&mut dag.nodes, Some(&SketchParams::Kll { k: 200 }));
     let chains: Vec<u64> = dag
         .nodes
@@ -208,7 +213,12 @@ fn cover_view() -> MaterializedView {
     let cover = dag
         .nodes
         .iter()
-        .find(|node| matches!(node.payload, Operator::NonASAP(NonASAPOp::TimeRangeCover { .. })))
+        .find(|node| {
+            matches!(
+                node.payload,
+                Operator::NonASAP(NonASAPOp::TimeRangeCover { .. })
+            )
+        })
         .unwrap()
         .id;
     let node = node_mut(&mut dag, cover);
@@ -363,7 +373,7 @@ async fn the_view_state_key_of_a_planned_chain_is_pinned_and_round_trips_through
         serde_json::json!({
             "definition_id": "bfbffb8f01ab202d585c3e18c9f78080",
             "window": {"tumbling": {"width_ms": 300000}},
-            "logical_properties": {"parameters": {"Kll": {"k": 1404}}}
+            "logical_properties": {"parameters": {"Kll": {"k": 2863}}}
         })
     );
     let json = serde_json::to_string(key).unwrap();

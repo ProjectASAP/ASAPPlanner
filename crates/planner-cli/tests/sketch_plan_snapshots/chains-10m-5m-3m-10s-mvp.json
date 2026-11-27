@@ -14,7 +14,7 @@
         "materialized_views": []
       },
       "node_id": 1,
-      "plan_id": "7529260abaa004819c13c3b4a99ca750",
+      "plan_id": "f6f31722b12fc85f69ff48e068761870",
       "refresh": "at_ingestion",
       "retention_ms": 600000,
       "view_state_key": {
@@ -22,7 +22,7 @@
         "logical_properties": {
           "parameters": {
             "Kll": {
-              "k": 1404
+              "k": 2863
             }
           }
         },
@@ -46,7 +46,7 @@
         "materialized_views": []
       },
       "node_id": 10,
-      "plan_id": "7529260abaa004819c13c3b4a99ca750",
+      "plan_id": "f6f31722b12fc85f69ff48e068761870",
       "refresh": "at_ingestion",
       "retention_ms": 180000,
       "view_state_key": {
@@ -80,7 +80,7 @@
         ]
       },
       "node_id": 11,
-      "plan_id": "7529260abaa004819c13c3b4a99ca750",
+      "plan_id": "f6f31722b12fc85f69ff48e068761870",
       "refresh": "at_ingestion",
       "retention_ms": 180000,
       "view_state_key": {
@@ -1247,7 +1247,7 @@
           },
           "parameters": {
             "Kll": {
-              "k": 1404
+              "k": 2863
             }
           },
           "payload": {
@@ -1321,7 +1321,7 @@
           },
           "parameters": {
             "Kll": {
-              "k": 1404
+              "k": 2863
             }
           },
           "payload": {
@@ -1381,7 +1381,7 @@
           },
           "parameters": {
             "Kll": {
-              "k": 1404
+              "k": 2863
             }
           },
           "payload": {
@@ -1557,7 +1557,7 @@
           },
           "parameters": {
             "Kll": {
-              "k": 1404
+              "k": 2863
             }
           },
           "payload": {
@@ -1617,7 +1617,7 @@
           },
           "parameters": {
             "Kll": {
-              "k": 1404
+              "k": 2863
             }
           },
           "payload": {
