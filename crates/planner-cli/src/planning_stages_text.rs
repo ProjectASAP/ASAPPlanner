@@ -1027,8 +1027,8 @@ pub fn root_prune_reason_text(reason: &RootPruneReason) -> String {
         }
         RootPruneReason::InputHasNoProducer { .. } => "the input has no producer".to_owned(),
         RootPruneReason::AboveReaderThreshold { .. } => {
-            "another θ of the producer's set, no larger, meets the same readers in the same \
-             places (search-space pruning rule threshold_theta)"
+            "another θ of the producer's set, no larger, meets every reader it meets, in every \
+             place it has a candidate (search-space pruning rule threshold_theta)"
                 .to_owned()
         }
         RootPruneReason::NoConsumer => "no consumer, and not a query output".to_owned(),

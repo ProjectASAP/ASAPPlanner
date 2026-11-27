@@ -445,7 +445,8 @@ fn quantile_rank_without_raw_data_charges_the_larger_kll_more() {
     use asap_types::summary_type::SketchParams;
     for setting in [ONE_HZ_EVERY_10_S, ONE_HZ_EVERY_60_S] {
         let w = workload(QUANTILE_RANK, setting);
-        // Every listed k (rule 1 off): the test compares the costs of two.
+        // Every listed k: the test compares the costs of two (rule 1 off as a
+        // guard; it leaves KLL θ sets as they are).
         let mut every_theta = SearchSpacePruning::default();
         every_theta
             .set("threshold_theta", false)
