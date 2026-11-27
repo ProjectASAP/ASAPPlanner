@@ -4,7 +4,9 @@
 use crate::ir::operator::asap::summary_type_of_operator;
 use crate::ir::schema::FieldDataType;
 use crate::ir::Operator;
-use crate::stages::{LogicalRequirements, MemoGroupError, MemoGroupId, RequiredAccuracy};
+use crate::stages::{
+    GroupProperties, LogicalRequirements, MemoGroupError, MemoGroupId, RequiredAccuracy,
+};
 use crate::summary_type::{parameter_list, SketchAlgorithm, SketchParams};
 
 /// One candidate: position `index_in_group` in group `group`'s candidates
@@ -73,10 +75,19 @@ impl CandidateForMemoGroup {
     }
 }
 
-/// The θ of each build candidate of `build`: every listed θ
-/// (`parameter_list`) of a sketch build, `[None]` for any other operator
-/// (an exact build). A group gets one build candidate per entry.
-pub fn listed_build_parameters(build: &Operator<MemoGroupId>) -> Vec<Option<SketchParams>> {
+/// The θ of each build candidate of `build`, whose group has `properties`:
+/// every listed θ (`parameter_list`) of a sketch build, `[None]` for any
+/// other operator (an exact build), and none for a Count-Min state whose
+/// weights are not proven non-negative
+/// (`GroupProperties::count_min_weights_not_proven_non_negative`). A group
+/// gets one build candidate per entry.
+pub fn listed_build_parameters(
+    build: &Operator<MemoGroupId>,
+    properties: &GroupProperties,
+) -> Vec<Option<SketchParams>> {
+    if properties.count_min_weights_not_proven_non_negative() {
+        return Vec::new();
+    }
     match summary_type_of_operator(build) {
         Some(FieldDataType::Sketch(algorithm)) => parameter_list(*algorithm)
             .iter()

@@ -138,8 +138,9 @@ pub enum PruneReason {
     ReachesNoQueryOutput,
     /// Stage 2: a Count-Min build (`CountMinSketch`, `CountMinSketchWithHeap`, `HydraCountMinSketch`) whose
     /// weight column's `column_signs` is not `NonNegative`: its estimates are
-    /// bounds only for non-negative weights. Pass 1 and Pass 2 list no such
-    /// build, so Stage 2 prunes one only if a later rule adds it.
+    /// bounds only for non-negative weights. `listed_build_parameters`
+    /// lists no such build, so Stage 2 prunes one only if a later rule adds
+    /// it.
     CountMinWeightsNotProvenNonNegative,
     /// Stage 2: the deployment's capabilities exclude it
     /// (`DeploymentCapabilities::exclusions`): the executor cannot run it,

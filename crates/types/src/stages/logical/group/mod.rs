@@ -124,9 +124,8 @@ impl GroupProperties {
     /// `HydraCms`) whose weights are not proven non-negative: its state
     /// column, which records the sign of the weights it is updated with,
     /// is not `NonNegative`. Its estimates are bounds only for
-    /// non-negative weights, so no plan builds it: Pass 1 and Pass 2 list
-    /// no build of it, and Stage 2 prunes any that is left
-    /// (`PruneReason::CountMinWeightsNotProvenNonNegative`).
+    /// non-negative weights, so no plan can build it
+    /// (`listed_build_parameters` lists none).
     ///
     /// Example: `topk(5, sum by (host) (m))` over a gauge `m` with no
     /// declared sign: true for its `CmsWithHeap` state group.

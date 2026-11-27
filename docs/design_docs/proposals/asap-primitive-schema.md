@@ -1260,7 +1260,7 @@ This part of the code answers two questions about summary state:
 | how often each `endpoint` occurs | Count-Min | `Column(endpoint)` | `Constant(1.0)`: each row counts once |
 | `topk(5, rate(http_requests_total[5m]))` | Count-Min with heap | `Tuple(every column except value and the group columns)`: one item per series, including its timestamp | `Column(value)`: the rate |
 
-Some sketches (e.g. Count-Min) are only accurate when weights are never negative. The sign of the weights is not part of the update: it is the state group's `column_signs` entry for its state column, derived from the input groups and the declared source signs, and Pass 1 lists no build of a Count-Min state whose weights are not proven non-negative (`GroupProperties::count_min_weights_not_proven_non_negative`; Stage 2 prunes any later rule adds, `CountMinWeightsNotProvenNonNegative`).
+Some sketches (e.g. Count-Min) are only accurate when weights are never negative. The sign of the weights is not part of the update: it is the state group's `column_signs` entry for its state column, derived from the input groups and the declared source signs, and no build of a Count-Min state whose weights are not proven non-negative is listed (`listed_build_parameters`, `GroupProperties::count_min_weights_not_proven_non_negative`); Stage 2 prunes any that a later rule adds (`CountMinWeightsNotProvenNonNegative`).
 
 **Evaluation examples:** `Quantile { q: 0.99 }` reads p99 from a KLL; `PointCount { key: endpoint, value: Some("checkout") }` reads how often `checkout` occurred from a Count-Min; `TopK { k: 5 }` reads the 5 heaviest items.
 

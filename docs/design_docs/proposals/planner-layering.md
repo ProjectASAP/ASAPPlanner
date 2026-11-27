@@ -548,8 +548,7 @@ The sections below describe each stage.
 | Stage | Prunes (`PruneReason`) | Recorded in | `candidate` |
 |---|---|---|---|
 | 0. Frontends | nothing: a query that cannot be lowered fails planning with an error | — | — |
-| 1, Pass 1 | nothing is recorded: a way the measure or the deployment cannot compute is not offered (the exact accumulator of an `avg` over a nullable input, a count sketch over relational rows, a summary of a sketch algorithm the deployment excludes outright, a quantile summary outside [0, 1], a top-k heap over one row per item), nor a way Pass 1 cannot build | — | — |
-| 1, Pass 1 | a Count-Min state whose weights are not proven non-negative gets no build (`GroupProperties::count_min_weights_not_proven_non_negative`) | — | — |
+| 1, Pass 1 | nothing is recorded: a way the measure or the deployment cannot compute is not offered (the exact accumulator of an `avg` over a nullable input, a count sketch over relational rows, a summary of a sketch algorithm the deployment excludes outright, a quantile summary outside [0, 1], a top-k heap over one row per item, a Count-Min state whose weights are not proven non-negative), nor a way Pass 1 cannot build | — | — |
 | 1, Pass 2 | nothing: it only adds candidates | — | — |
 | 2 | what cannot be built or materialized: `NoIngestionPipeline`, `CountMinWeightsNotProvenNonNegative`, `ExcludedByDeployment` (what the deployment's capabilities exclude: an unsupported summary or readout, a scan of raw data it does not keep, a query-time result kept across evaluations, counter semantics or state merges it lacks, a candidate the caller excludes), `InputHasNoBuildableProducer`, `ReachesNoQueryOutput` | `PhysicalASAPMemoCandidates::pruned_candidates` | the `PhysicalCandidate` it would have been |
 | 3 | valid candidates that lose, and the checks only a whole plan can make (accuracy; latency and cluster capacity later) | its own `RejectionCause` | — |

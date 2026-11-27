@@ -5,29 +5,13 @@ use asap_types::ir::operator::arguments::Reduction;
 use asap_types::ir::operator::AggIntent;
 use asap_types::ir::scalar::ColumnRef;
 use asap_types::ir::{ASAPOp, Operator, TimeRangeKind};
-use asap_types::stages::{Memo, ValueSign};
+use asap_types::stages::Memo;
 use asap_types::summary_type::{parameter_list, SketchAlgorithm, SummaryInputExpr};
-use asap_types::test_support::memo_builders::{candidates_of, query};
-use asap_types::workload::{DataWorkload, SourceFacts};
+use asap_types::test_support::memo_builders::{candidates_of, query, with_non_negative_values};
+use asap_types::workload::DataWorkload;
 
-/// A data workload declaring `m`'s values non-negative, so its Count-Min
-/// heaps are listed (Pass 1 lists none over weights not proven
-/// non-negative).
-fn non_negative_m() -> DataWorkload {
-    DataWorkload {
-        sources: [(
-            "m".to_owned(),
-            SourceFacts {
-                column_signs: [("value".to_owned(), ValueSign::NonNegative)].into(),
-                ..Default::default()
-            },
-        )]
-        .into(),
-        ..Default::default()
-    }
-}
-
-/// The same top-k over a gauge with no declared sign: its `CmsWithHeap`
+/// `topk(5, sum by (job) (sum_over_time(m[5m])))` over a gauge with no
+/// declared sign: its `CmsWithHeap`
 /// state lists no build (its weights are not proven non-negative), while
 /// the Count Sketch heap, which needs no sign, lists every θ.
 #[test]
@@ -68,7 +52,7 @@ fn a_count_min_heap_over_weights_of_unknown_sign_lists_no_build() {
 /// heaps over its one-row-per-item input are pruned.
 #[test]
 fn whole_expression_topk_heaps_read_the_raw_samples() {
-    let mut memo = Memo::new(&non_negative_m());
+    let mut memo = Memo::new(&with_non_negative_values("m"));
     let rows = selector(&mut memo, TimeRangeKind::Range, "m", &["job"]);
     let per_series = aggregate_group(&mut memo, rows, Reduction::PerEntity, vec![sum()], None);
     let by_job = aggregate_group(
@@ -119,7 +103,7 @@ fn whole_expression_topk_heaps_read_the_raw_samples() {
 /// state's builds list the absorbed groups.
 #[test]
 fn whole_expression_topk_heap_candidates() {
-    let mut memo = Memo::new(&non_negative_m());
+    let mut memo = Memo::new(&with_non_negative_values("m"));
     let rows = selector(&mut memo, TimeRangeKind::Range, "m", &["job"]);
     let per_series = aggregate_group(&mut memo, rows, Reduction::PerEntity, vec![sum()], None);
     let by_job = aggregate_group(
