@@ -445,8 +445,9 @@ pub struct InstallablePlan {
 impl InstallablePlan {
     /// Reads `wire_version` before the rest, so an older file is refused by version.
     pub fn from_json(text: &str) -> Result<Self, InstallablePlanError>;
-    /// Every materialized view, in dependency order: its node, refresh mode
-    /// (at ingestion, or on first read and kept), coverage, inputs and retention.
+    /// Every materialized view, in dependency order: its node, plan id, view
+    /// state key, refresh mode (at ingestion, or on first read and kept),
+    /// coverage, inputs and retention.
     pub fn materialized_views(&self) -> Result<Vec<MaterializedView>, InstallablePlanError>;
     /// The views refreshed at ingestion, by refresh group (one refresh window
     /// each), each group after the groups it reads.
@@ -470,8 +471,12 @@ impl PhysicalASAPDAG {
     /// The plan's content id: 128-bit FNV-1a, in hex, of the DAG's JSON.
     pub fn plan_id(&self) -> String;
 }
+pub struct MaterializedView {
+    pub node_id: PhysicalASAPNodeId,          // the view's node
+    pub inputs: MaterializedViewInputs,       // the views its refresh reads
+    /* plan id, view state key, refresh, coverage, retention: read by the methods */
+}
 impl MaterializedView {
-    pub node_id: PhysicalASAPNodeId;
     pub fn plan_id(&self) -> &str;                    // with node_id: the view in one installed plan
     pub fn view_state_key(&self) -> &ViewStateKey;    // what its stored state is, in any plan
     pub fn coverage(&self) -> &ViewCoverage;          // definition_id and selection (logical)
@@ -484,7 +489,7 @@ pub struct ViewStateKey {
     pub logical_properties: LogicalProperties, // the view node's candidate's θ
 }
 pub enum ViewWindow {                         // non_exhaustive
-    Tumbling { width_ms: u64 },               // a chain's rows, also through TimeRange / TimeShift
+    Tumbling { width_ms: u64 },               // a chain's or SummaryMergeWindows' rows, also through TimeRange / TimeShift
     TumblingLevels { widths_ms: Vec<u64> },   // a TimeRangeCover's levels
 }
 ```
