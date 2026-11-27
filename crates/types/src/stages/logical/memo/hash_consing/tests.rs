@@ -33,7 +33,7 @@ fn find_or_add_group_returns_the_group_of_an_equal_expression() {
         .find_or_add_group(scan("latency", &[], vec![]))
         .unwrap();
     let g2 = memo
-        .find_or_add_group(state(FieldDataType::Sketch(SketchAlgorithm::Kll), g1))
+        .find_or_add_group(state(FieldDataType::Sketch(SketchAlgorithm::KLL), g1))
         .unwrap();
     assert_eq!(
         memo.find_or_add_group(scan("latency", &[], vec![]))
@@ -41,7 +41,7 @@ fn find_or_add_group_returns_the_group_of_an_equal_expression() {
         g1
     );
     assert_eq!(
-        memo.find_or_add_group(state(FieldDataType::Sketch(SketchAlgorithm::Kll), g1))
+        memo.find_or_add_group(state(FieldDataType::Sketch(SketchAlgorithm::KLL), g1))
             .unwrap(),
         g2
     );
@@ -65,9 +65,9 @@ fn find_or_add_group_separates_equal_operators_over_different_inputs() {
         .unwrap();
     let errors = memo.find_or_add_group(scan("errors", &[], vec![])).unwrap();
     assert_ne!(
-        memo.find_or_add_group(state(FieldDataType::Sketch(SketchAlgorithm::Kll), latency))
+        memo.find_or_add_group(state(FieldDataType::Sketch(SketchAlgorithm::KLL), latency))
             .unwrap(),
-        memo.find_or_add_group(state(FieldDataType::Sketch(SketchAlgorithm::Kll), errors))
+        memo.find_or_add_group(state(FieldDataType::Sketch(SketchAlgorithm::KLL), errors))
             .unwrap()
     );
 }
@@ -95,22 +95,22 @@ fn kll_builds_with_k_269_and_k_547_share_one_group() {
         .find_or_add_group(scan("latency", &[], vec![]))
         .unwrap();
     let k269_group = memo
-        .find_or_add_group(state(FieldDataType::Sketch(SketchAlgorithm::Kll), g1))
+        .find_or_add_group(state(FieldDataType::Sketch(SketchAlgorithm::KLL), g1))
         .unwrap();
     let k269 = try_candidate(
         &mut memo,
         k269_group,
-        state(FieldDataType::Sketch(SketchAlgorithm::Kll), g1),
+        state(FieldDataType::Sketch(SketchAlgorithm::KLL), g1),
         kll_k(269),
     )
     .unwrap();
     let k547_group = memo
-        .find_or_add_group(state(FieldDataType::Sketch(SketchAlgorithm::Kll), g1))
+        .find_or_add_group(state(FieldDataType::Sketch(SketchAlgorithm::KLL), g1))
         .unwrap();
     let k547 = try_candidate(
         &mut memo,
         k547_group,
-        state(FieldDataType::Sketch(SketchAlgorithm::Kll), g1),
+        state(FieldDataType::Sketch(SketchAlgorithm::KLL), g1),
         kll_k(547),
     )
     .unwrap();
@@ -132,19 +132,19 @@ fn add_candidate_returns_the_existing_candidate_for_a_duplicate() {
         .find_or_add_group(scan("latency", &[], vec![]))
         .unwrap();
     let g2 = memo
-        .find_or_add_group(state(FieldDataType::Sketch(SketchAlgorithm::Kll), g1))
+        .find_or_add_group(state(FieldDataType::Sketch(SketchAlgorithm::KLL), g1))
         .unwrap();
     let first = try_candidate(
         &mut memo,
         g2,
-        state(FieldDataType::Sketch(SketchAlgorithm::Kll), g1),
+        state(FieldDataType::Sketch(SketchAlgorithm::KLL), g1),
         kll_k(269),
     )
     .unwrap();
     let again = try_candidate(
         &mut memo,
         g2,
-        state(FieldDataType::Sketch(SketchAlgorithm::Kll), g1),
+        state(FieldDataType::Sketch(SketchAlgorithm::KLL), g1),
         kll_k(269),
     )
     .unwrap();
@@ -159,7 +159,7 @@ fn add_candidate_returns_the_existing_candidate_for_a_duplicate() {
     let other_size = try_candidate(
         &mut memo,
         g2,
-        state(FieldDataType::Sketch(SketchAlgorithm::Kll), g1),
+        state(FieldDataType::Sketch(SketchAlgorithm::KLL), g1),
         kll_k(547),
     );
     assert_ne!(other_size.unwrap(), first);

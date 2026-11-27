@@ -533,7 +533,7 @@ fn state_batch(count: u32, exact: bool) -> Batch {
         )
     } else {
         (
-            FieldDataType::Sketch(SketchAlgorithm::Kll),
+            FieldDataType::Sketch(SketchAlgorithm::KLL),
             Some(planner_types::summary_type::SketchParams::Kll { k: 200 }),
         )
     };

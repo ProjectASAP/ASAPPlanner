@@ -28,18 +28,16 @@ resolver = "2"
 arrow = { version = "58.4", default-features = false }
 # The hasher Arrow already uses, for the executor's hot interning maps.
 ahash = { version = "0.8", default-features = false, features = ["std", "runtime-rng"] }
-# main after release 0.4.0 (eb04e7f): #245 (checked f64 updates, heap
-# rescoring), #246 (KLL lazy-buffer follow-ups), #247 (Count Sketch stack
-# medians), #248 (`DdSketch::quantile_interpolated`), #249 (`memory_bytes` and
-# `estimated_memory_bytes`; KMV without `experimental`), #251 (the public
-# capability table) and #254 (Planner names in that table), plus
-# `Kll::shrink_to_fit` from #267 and `DdSketch::shrink_to_fit` from #270
-# (branch `planner-pin/dd-kll-shrink-to-fit`: 21b6357, #267's commit, and
-# #270's change and tests, since main has renamed the capability
-# vocabulary since). Moves to a release once #267 and #270 are in one.
-# Plus the zero-copy sketch views of #271 (branch `feat/zero-copy-views`,
-# on that branch), which the executor's mapped state columns read.
-asap_sketchlib = { git = "https://github.com/ProjectASAP/asap_sketchlib", rev = "389530ce23b121520f0218a4471e376db2c35945" }
+# main at a05b35c (through #262: sketch analytics; #260 renamed the
+# `SketchAlgorithm` variants to full names with upper-case acronyms; #252,
+# #256, #257, #258 and #259 dropped exact side fields from the DDSketch,
+# Bloom, Space-Saving and HLL-HIP states and moved them to new ASAPv1 kinds),
+# plus three open PRs the executor needs, merged onto that main on branch
+# `planner-pin/main-a05b35c-shrink-to-fit`: `Kll::shrink_to_fit` (#267),
+# `DdSketch::shrink_to_fit` (#270), and the zero-copy sketch views of #271
+# (head 355093f, ported to main's DDSketch without sum/min/max), which the
+# executor's mapped state columns read. Moves to main once they merge.
+asap_sketchlib = { git = "https://github.com/ProjectASAP/asap_sketchlib", rev = "01f3333cbdc7c55a36642e0938aa7f0040f2cfa8" }
 
 [profile.dev]
 # Backtraces and profilers keep file:line; full variable info is opt-in via

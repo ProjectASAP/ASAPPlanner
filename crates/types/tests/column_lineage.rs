@@ -62,7 +62,7 @@ fn equals(column: usize, value: &str) -> ScalarExpr<MemoGroupId> {
 fn hll(child: MemoGroupId, keys: Vec<usize>, column: &str) -> Operator<MemoGroupId> {
     Operator::ASAP(ASAPOp::SummaryAgg {
         child,
-        summary_type: FieldDataType::Sketch(SketchAlgorithm::Hll),
+        summary_type: FieldDataType::Sketch(SketchAlgorithm::HLL),
         input: SummaryUpdate::column(ColumnRef::Named(column.into())),
         reduction: Reduction::by(keys),
         filter: None,
@@ -351,7 +351,7 @@ fn a_chain_computes_window_end_and_state_and_its_window_selections_pass_lineage_
     let chain = memo
         .find_or_add_group(Operator::ASAP(ASAPOp::SummaryTumblingWindowChain {
             child: series,
-            summary_type: FieldDataType::Sketch(SketchAlgorithm::Kll),
+            summary_type: FieldDataType::Sketch(SketchAlgorithm::KLL),
             input: SummaryUpdate::column(ColumnRef::SampleValue),
             reduction: Reduction::by(vec![2]),
             filter: None,

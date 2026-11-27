@@ -9,7 +9,7 @@ use crate::test_support::memo_fixtures::state;
 /// and of a chain, and of no other operator.
 #[test]
 fn summary_type_of_operator_reads_the_builds_summary_type() {
-    let kll = FieldDataType::Sketch(SketchAlgorithm::Kll);
+    let kll = FieldDataType::Sketch(SketchAlgorithm::KLL);
     let chain = Operator::ASAP(ASAPOp::SummaryTumblingWindowChain {
         child: MemoGroupId(0),
         summary_type: kll.clone(),
@@ -34,7 +34,7 @@ fn summary_type_of_operator_reads_the_builds_summary_type() {
 /// without θ.
 #[test]
 fn listed_build_parameters_lists_a_sketch_builds_parameters() {
-    let kll = SketchAlgorithm::Kll;
+    let kll = SketchAlgorithm::KLL;
     assert_eq!(
         listed_build_parameters(&state(FieldDataType::Sketch(kll), MemoGroupId(0))),
         parameter_list(kll)

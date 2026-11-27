@@ -157,11 +157,11 @@ fn latest_snapshot_replaces_decreases_expires_and_retains_full_identity() {
 #[test]
 fn spatial_heap_ranks_latest_values_in_independent_runs() {
     for algorithm in [
-        SketchAlgorithm::CmsWithHeap,
+        SketchAlgorithm::CountMinSketchWithHeap,
         SketchAlgorithm::CountSketchWithHeap,
     ] {
         let params = match algorithm {
-            SketchAlgorithm::CmsWithHeap => SketchParams::CmsWithHeap {
+            SketchAlgorithm::CountMinSketchWithHeap => SketchParams::CmsWithHeap {
                 width: 2048,
                 depth: 5,
                 heap_size: 100,

@@ -105,7 +105,7 @@ impl WeightedFrequency {
         use planner_types::summary_type::{SketchAlgorithm as A, SketchParams as P};
         let (algorithm, width, depth, capacity) = match (algorithm, params) {
             (
-                A::CmsWithHeap,
+                A::CountMinSketchWithHeap,
                 P::CmsWithHeap {
                     width,
                     depth,

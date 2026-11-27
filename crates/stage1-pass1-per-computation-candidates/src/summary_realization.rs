@@ -24,13 +24,13 @@ use crate::{expression, schema, PerComputationCandidateError};
 /// offers those that answer an intent's statistic: the specialized algorithms
 /// before the universal UnivMon.
 const ALGORITHM_PREFERENCE: &[SketchAlgorithm] = &[
-    SketchAlgorithm::Kll,
+    SketchAlgorithm::KLL,
     SketchAlgorithm::DDSketch,
-    SketchAlgorithm::Hll,
-    SketchAlgorithm::Kmv,
-    SketchAlgorithm::Cms,
+    SketchAlgorithm::HLL,
+    SketchAlgorithm::KMV,
+    SketchAlgorithm::CountMinSketch,
     SketchAlgorithm::CountSketch,
-    SketchAlgorithm::CmsWithHeap,
+    SketchAlgorithm::CountMinSketchWithHeap,
     SketchAlgorithm::CountSketchWithHeap,
     SketchAlgorithm::UnivMon,
 ];
@@ -416,12 +416,11 @@ pub(crate) fn summary_update(
                 weight,
             }
         }
-        (_, Some(SketchAlgorithm::UnivMon)) | (AggIntent::Count, Some(SketchAlgorithm::Cms)) => {
-            SummaryUpdate {
-                item: Some(weight),
-                weight: SummaryInputExpr::Constant(1.0),
-            }
-        }
+        (_, Some(SketchAlgorithm::UnivMon))
+        | (AggIntent::Count, Some(SketchAlgorithm::CountMinSketch)) => SummaryUpdate {
+            item: Some(weight),
+            weight: SummaryInputExpr::Constant(1.0),
+        },
         _ => SummaryUpdate { item: None, weight },
     })
 }

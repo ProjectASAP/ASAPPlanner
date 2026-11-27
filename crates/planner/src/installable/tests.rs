@@ -321,7 +321,7 @@ fn unrestricted_summaries_default_to_the_executors_families() {
         }));
     let kll_only = DeploymentCapabilities {
         supported_summaries: Some(vec![SupportedSummary {
-            summary_type: SketchAlgorithm::Kll,
+            summary_type: SketchAlgorithm::KLL,
             readouts: vec![StatisticKind::Quantile],
         }]),
         ..DeploymentCapabilities::default()

@@ -27,7 +27,7 @@ fn tumbling_window() -> (Arc<Schema>, Batch) {
 
 /// One tumbling window of `series` KLL states (k = 200), keyed by series.
 fn tumbling_window_of(series_count: u32) -> (Arc<Schema>, Batch) {
-    let family = FieldDataType::Sketch(SketchAlgorithm::Kll);
+    let family = FieldDataType::Sketch(SketchAlgorithm::KLL);
     let schema = Arc::new(Schema {
         fields: vec![
             Field {

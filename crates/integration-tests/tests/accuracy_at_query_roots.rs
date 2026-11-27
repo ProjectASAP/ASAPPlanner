@@ -143,7 +143,7 @@ fn each_query_meets_its_target_at_its_root() {
     let (plan, accepted) = selection(&PROBLEM_EXAMPLE, LATENCY_SERIES, false);
     assert_eq!(
         accepted,
-        ["accepted rank (Kll)", "accepted relative (DDSketch)"],
+        ["accepted rank (KLL)", "accepted relative (DDSketch)"],
         "the metric of each query's readouts"
     );
     let parameters = sketch_parameters(&plan);

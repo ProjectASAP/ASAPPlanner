@@ -366,7 +366,7 @@ fn state_bytes_bound_the_executors_charge() {
     let univmon_key_bounds = 2 * size_of::<usize>();
     let families = [
         (
-            A::Kll,
+            A::KLL,
             SketchParams::Kll { k: 200 },
             Rows::Values,
             Priced::Kll { k: 200 },
@@ -382,7 +382,7 @@ fn state_bytes_bound_the_executors_charge() {
             10_000,
         ),
         (
-            A::Cms,
+            A::CountMinSketch,
             SketchParams::Cms {
                 width: 1_024,
                 depth: 5,
@@ -404,7 +404,7 @@ fn state_bytes_bound_the_executors_charge() {
             10_000,
         ),
         (
-            A::CmsWithHeap,
+            A::CountMinSketchWithHeap,
             SketchParams::CmsWithHeap {
                 width: 16,
                 depth: 1,
@@ -428,7 +428,7 @@ fn state_bytes_bound_the_executors_charge() {
             1_024,
         ),
         (
-            A::Hll,
+            A::HLL,
             SketchParams::Hll { precision: 12 },
             Rows::Values,
             Priced::Exact,
@@ -436,7 +436,7 @@ fn state_bytes_bound_the_executors_charge() {
             10_000,
         ),
         (
-            A::Kmv,
+            A::KMV,
             SketchParams::Kmv { k: 1_024 },
             Rows::Values,
             Priced::Exact,
@@ -597,12 +597,12 @@ fn next_uniform(state: &mut u64) -> f64 {
 /// sets. Its charge as the executor seals it (a sketch shrunk, its
 /// `approx_memory_bytes`, but KLL, whose 10,000 rows are past `k` and
 /// priced open; an exact family's sealed column of 1,024 groups,
-/// per group; for HydraCms its shared grid over its 10 groups) is compared
+/// per group; for HydraCountMinSketch its shared grid over its 10 groups) is compared
 /// with `summary_state_bytes` for the same rows. Priced ÷
 /// charged lies within [`BYTES_AGREEMENT_FACTOR`], or the family's row
 /// carries its [`KnownBytesGap`].
 ///
-/// HydraKll is left out: no plan builds it (it has no parameter list,
+/// HydraKLL is left out: no plan builds it (it has no parameter list,
 /// and the executor's factory refuses it).
 #[test]
 fn priced_bytes_agree_with_the_executor() {
@@ -642,25 +642,25 @@ fn priced_bytes_agree_with_the_executor() {
         // coin differs per run: the charge varies by about 0.2% (e.g.
         // 10,376 or 10,392 bytes), well inside `BYTES_AGREEMENT_FACTOR`.
         (
-            sketch(A::Kll),
+            sketch(A::KLL),
             Some(SketchParams::Kll { k: 269 }),
             Rows::Values,
             None,
         ),
         (
-            sketch(A::Hll),
+            sketch(A::HLL),
             Some(SketchParams::Hll { precision: 18 }),
             Rows::Values,
             None,
         ),
         (
-            sketch(A::Kmv),
+            sketch(A::KMV),
             Some(SketchParams::Kmv { k: 106_263 }),
             Rows::Values,
             None,
         ),
         (
-            sketch(A::Cms),
+            sketch(A::CountMinSketch),
             Some(SketchParams::Cms {
                 width: 272,
                 depth: 5,
@@ -678,7 +678,7 @@ fn priced_bytes_agree_with_the_executor() {
             None,
         ),
         (
-            sketch(A::CmsWithHeap),
+            sketch(A::CountMinSketchWithHeap),
             Some(SketchParams::CmsWithHeap {
                 width: 272,
                 depth: 5,
@@ -773,7 +773,7 @@ fn priced_bytes_agree_with_the_executor() {
         // As the executor seals a window, except a KLL past `k` rows,
         // which is priced as the open sketch a query-time merge holds
         // (`kll_sealed_bytes`).
-        if !matches!(family, FieldDataType::Sketch(A::Kll)) {
+        if !matches!(family, FieldDataType::Sketch(A::KLL)) {
             updater.shrink_to_fit();
         }
         let charged = updater.into_accumulator().approx_memory_bytes() as u64;
@@ -824,7 +824,7 @@ fn priced_bytes_agree_with_the_executor() {
         shared_rows: 3,
         shared_columns: 64,
     });
-    let hydra_family = sketch(A::HydraCms);
+    let hydra_family = sketch(A::HydraCountMinSketch);
     let mut grid = create_hydra_cms(&hydra_family, Some(&hydra)).unwrap();
     let hydra_rows_fed = Rows::Keyed.fed();
     let mut seed = 0x5EED_u64;
@@ -946,9 +946,9 @@ fn counter_near_a_million(series: u64, n: u32) -> Vec<f64> {
 /// stored sparse, priced closely); the count width is bounded by the rows,
 /// which over-charges 256 to 65,535 rows whose largest count fits a byte
 /// up to about 2x (latency-like values in the generator's declared range
-/// 4.7x at 600 rows); narrow values without a declared range (a gauge, a
+/// 4.9x at 600 rows); narrow values without a declared range (a gauge, a
 /// counter's readings, per-series levels) are over-charged by the
-/// wide-spread margin's span, up to 20x at 36,000 rows.
+/// wide-spread margin's span, up to 28x.
 #[test]
 fn ddsketch_state_bytes_by_value_shape_lie_within_their_bands() {
     let alpha = 0.01;
@@ -988,20 +988,20 @@ fn ddsketch_state_bytes_by_value_shape_lie_within_their_bands() {
             range(1.0, 1e6),
             0.95..=2.0,
         ),
-        ("narrow gauge", narrow_gauge, None, 1.3..=21.2),
+        ("narrow gauge", narrow_gauge, None, 1.3..=26.0),
         (
             "narrow gauge, declared",
             narrow_gauge,
             range(90.0, 110.0),
             0.95..=1.15,
         ),
-        ("counter near 1e6", counter_near_a_million, None, 1.4..=22.9),
-        ("per-series levels", per_series_levels, None, 1.3..=21.2),
+        ("counter near 1e6", counter_near_a_million, None, 1.4..=28.7),
+        ("per-series levels", per_series_levels, None, 1.3..=26.0),
         (
             "per-series levels, column range declared",
             per_series_levels,
             range(1.0, 1e5),
-            1.3..=12.2,
+            1.3..=14.9,
         ),
     ];
     for (name, values, value_magnitude_range, band) in shapes {
@@ -1025,8 +1025,30 @@ fn ddsketch_state_bytes_by_value_shape_lie_within_their_bands() {
     }
 }
 
+/// The view header the price charges is the library's: a one-value
+/// DDSketch's view bytes (header and one 1-byte count padded to 8), plus
+/// the state's 4-byte offset in its column, are what a one-row state is
+/// priced at.
+#[test]
+fn stored_ddsketch_header_is_the_librarys_view_header() {
+    let alpha = 0.01;
+    let mut sketch = asap_sketchlib::DdSketch::new(alpha);
+    sketch.add(&42.0);
+    let held = sketch.to_view_bytes().len() as u64 + 4;
+    let priced = sketch_state_bytes(
+        &SketchParams::DDSketch { alpha },
+        StateInputRows {
+            folded_rows_per_state: Some(1.0),
+            non_negative: true,
+            value_magnitude_range: None,
+            distinct_values: None,
+        },
+    );
+    assert_eq!(priced, held, "priced {priced} B, view layout {held} B");
+}
+
 /// A stored DDSketch is priced at its view layout and its offset in the
-/// column (88 + 4 bytes), then the occupied buckets dense over the
+/// column (the library's 64-byte header + 4 bytes), then the occupied buckets dense over the
 /// column's range (declared, or the assumed nine decades; plus one bucket
 /// for an unaligned start) or sparse at one bucket per row (4-byte index
 /// and count each), whichever is smaller, at the narrowest count width the
@@ -1034,6 +1056,9 @@ fn ddsketch_state_bytes_by_value_shape_lie_within_their_bands() {
 #[test]
 fn stored_ddsketch_states_are_priced_at_their_view_layout() {
     let alpha = 0.01;
+    // The library's view header (an empty sketch's view holds only it) and
+    // the state's 4-byte offset in its column.
+    let fixed = asap_sketchlib::DdSketch::new(alpha).to_view_bytes().len() as u64 + 4;
     let priced = |rows_per_state: Option<u64>, non_negative, value_magnitude_range| {
         sketch_state_bytes(
             &SketchParams::DDSketch { alpha },
@@ -1050,26 +1075,26 @@ fn stored_ddsketch_states_are_priced_at_their_view_layout() {
         max_abs: 110.0,
     });
     // One row: one bucket, a 1-byte count dense (padded to 8).
-    assert_eq!(priced(Some(1), true, None), 92 + 8);
+    assert_eq!(priced(Some(1), true, None), fixed + 8);
     // 10 rows over the assumed nine decades: sparse, 10 buckets at most.
-    assert_eq!(priced(Some(10), true, None), 92 + 40 + 16);
+    assert_eq!(priced(Some(10), true, None), fixed + 40 + 16);
     // A gauge's 12 buckets, dense: 1, 2 and 2 bytes per count.
-    assert_eq!(priced(Some(10), true, gauge), 92 + 16);
-    assert_eq!(priced(Some(600), true, gauge), 92 + 24);
-    assert_eq!(priced(Some(36_000), true, gauge), 92 + 24);
+    assert_eq!(priced(Some(10), true, gauge), fixed + 16);
+    assert_eq!(priced(Some(600), true, gauge), fixed + 24);
+    assert_eq!(priced(Some(36_000), true, gauge), fixed + 24);
     // 4 bytes up to u32::MAX rows, then 8 (2^33: past u32::MAX once the
     // rows are rounded within their relative 1e-9, `rows_per_state`).
-    assert_eq!(priced(Some(u64::from(u32::MAX)), true, gauge), 92 + 48);
-    assert_eq!(priced(Some(1 << 33), true, gauge), 92 + 96);
+    assert_eq!(priced(Some(u64::from(u32::MAX)), true, gauge), fixed + 48);
+    assert_eq!(priced(Some(1 << 33), true, gauge), fixed + 96);
     assert!(priced(Some(10), true, None) < priced(Some(100), true, None));
     // Unknown rows: the assumed range, dense at 8 bytes.
     let unknown = priced(None, true, None);
-    assert_eq!((unknown - 92) % 8, 0);
+    assert_eq!((unknown - fixed) % 8, 0);
     assert!(unknown > priced(Some(1_000_000), true, None));
     // Signed values fill two stores.
     assert_eq!(
-        priced(Some(20_000), false, None) - 92,
-        2 * (priced(Some(10_000), true, None) - 92)
+        priced(Some(20_000), false, None) - fixed,
+        2 * (priced(Some(10_000), true, None) - fixed)
     );
 }
 

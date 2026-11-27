@@ -24,35 +24,35 @@ use super::{SketchAlgorithm, SketchParams};
 /// valid candidate.
 pub fn parameter_list(algorithm: SketchAlgorithm) -> &'static [SketchParams] {
     match algorithm {
-        SketchAlgorithm::Kll => &KLL_PARAMETERS,
+        SketchAlgorithm::KLL => &KLL_PARAMETERS,
         SketchAlgorithm::DDSketch => &DDSKETCH_PARAMETERS,
-        SketchAlgorithm::Hll => &HLL_PARAMETERS,
-        SketchAlgorithm::Kmv => &KMV_PARAMETERS,
-        SketchAlgorithm::Cms => &CMS_PARAMETERS,
+        SketchAlgorithm::HLL => &HLL_PARAMETERS,
+        SketchAlgorithm::KMV => &KMV_PARAMETERS,
+        SketchAlgorithm::CountMinSketch => &CMS_PARAMETERS,
         SketchAlgorithm::CountSketch => &COUNT_SKETCH_PARAMETERS,
-        SketchAlgorithm::CmsWithHeap => &CMS_WITH_HEAP_PARAMETERS,
+        SketchAlgorithm::CountMinSketchWithHeap => &CMS_WITH_HEAP_PARAMETERS,
         SketchAlgorithm::CountSketchWithHeap => &COUNT_SKETCH_WITH_HEAP_PARAMETERS,
         SketchAlgorithm::UnivMon => &UNIVMON_PARAMETERS,
         // Listed, not `_`: an algorithm `asap_sketchlib` adds fails to
         // compile here until it gets a list or is listed without one.
         SketchAlgorithm::CountSketchWithL2Norm
-        | SketchAlgorithm::CmsWithSpaceSaving
+        | SketchAlgorithm::CountMinSketchWithSpaceSaving
         | SketchAlgorithm::CountSketchWithSpaceSaving
-        | SketchAlgorithm::CmsFold
+        | SketchAlgorithm::CountMinSketchFold
         | SketchAlgorithm::CountSketchFold
-        | SketchAlgorithm::HllHip
-        | SketchAlgorithm::KllDynamic
+        | SketchAlgorithm::HLLHip
+        | SketchAlgorithm::KLLDynamic
         | SketchAlgorithm::SpaceSaving
-        | SketchAlgorithm::Elastic
-        | SketchAlgorithm::Coco
+        | SketchAlgorithm::ElasticSketch
+        | SketchAlgorithm::CocoSketch
         | SketchAlgorithm::Bloom
         | SketchAlgorithm::SetAggregator
         | SketchAlgorithm::UnivMonTwoTier
         | SketchAlgorithm::UnivMonQ
-        | SketchAlgorithm::HydraCms
+        | SketchAlgorithm::HydraCountMinSketch
         | SketchAlgorithm::HydraCountSketch
-        | SketchAlgorithm::HydraKll
-        | SketchAlgorithm::HydraHll
+        | SketchAlgorithm::HydraKLL
+        | SketchAlgorithm::HydraHLL
         | SketchAlgorithm::HydraUnivMon => &[],
     }
 }

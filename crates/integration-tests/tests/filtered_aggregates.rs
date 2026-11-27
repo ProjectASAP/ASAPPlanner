@@ -259,7 +259,7 @@ async fn hand_filtered_kll_compiles_and_executes() {
     .await;
     let roots = hand_filtered(
         "SELECT g, approx_percentile_cont(x, 0.5) AS q FROM events GROUP BY g",
-        |f| matches!(f, FieldDataType::Sketch(kind) if kind == &SketchAlgorithm::Kll),
+        |f| matches!(f, FieldDataType::Sketch(kind) if kind == &SketchAlgorithm::KLL),
         &filter,
     )
     .await;
@@ -277,7 +277,7 @@ async fn kll_candidates(sql: &str) -> Vec<Rc<OperatorNode>> {
         supported_summaries: Some(
             asap_executor::supported_summary_families()
                 .into_iter()
-                .filter(|family| family.summary_type == SketchAlgorithm::Kll)
+                .filter(|family| family.summary_type == SketchAlgorithm::KLL)
                 .collect(),
         ),
         ..DeploymentCapabilities::default()
@@ -288,7 +288,7 @@ async fn kll_candidates(sql: &str) -> Vec<Rc<OperatorNode>> {
             .filter(|root| {
                 OperatorNode::reachable(root).iter().any(|n| {
             matches!(n.asap(), Some(ASAPOp::SummaryAgg { summary_type: FieldDataType::Sketch(kind), .. })
-                    if kind == &SketchAlgorithm::Kll)
+                    if kind == &SketchAlgorithm::KLL)
         })
             })
             .collect();

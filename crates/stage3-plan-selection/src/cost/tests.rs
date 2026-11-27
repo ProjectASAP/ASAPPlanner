@@ -59,8 +59,8 @@ fn kll_group(
 /// and a retention cost per ms inflated by those rows).
 #[test]
 fn no_execution_reading_a_producer_costs_less_than_nothing() {
-    let kll = &parameter_list(SketchAlgorithm::Kll)[6];
-    let summary_type = FieldDataType::Sketch(SketchAlgorithm::Kll);
+    let kll = &parameter_list(SketchAlgorithm::KLL)[6];
+    let summary_type = FieldDataType::Sketch(SketchAlgorithm::KLL);
     let mut memo = Memo::new(&DataWorkload::default());
     let scan = scan_group(&mut memo, "m", &[], vec![]);
     let chain = kll_group(

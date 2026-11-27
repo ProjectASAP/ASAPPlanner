@@ -417,7 +417,7 @@ function formatTiming(timing) {
   return String(timing || 'unknown');
 }
 
-// A summary type (`FieldDataType` JSON), e.g. `{"Sketch": "Kll"}` as "Kll"
+// A summary type (`FieldDataType` JSON), e.g. `{"Sketch": "KLL"}` as "KLL"
 // and `{"ExactAggregate": ["Sum", "Sum"]}` as "exact Sum". θ is not part
 // of the type: the memo view shows each candidate's.
 function summaryTypeText(summaryType) {

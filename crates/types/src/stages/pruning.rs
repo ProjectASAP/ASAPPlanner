@@ -129,7 +129,7 @@ pub enum PruneReason {
     /// Stage 2: no query output can read it, directly or through other
     /// candidates, once each candidate's allowed consumers are applied.
     ReachesNoQueryOutput,
-    /// Stage 2: a Count-Min build (`Cms`, `CmsWithHeap`, `HydraCms`) whose
+    /// Stage 2: a Count-Min build (`CountMinSketch`, `CountMinSketchWithHeap`, `HydraCountMinSketch`) whose
     /// weight column's `column_signs` is not `NonNegative`: its estimates are
     /// bounds only for non-negative weights.
     CountMinWeightsNotProvenNonNegative,

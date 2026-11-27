@@ -41,7 +41,7 @@ fn heap_params() -> Option<SketchParams> {
 }
 
 fn heap_family() -> FieldDataType {
-    FieldDataType::Sketch(SketchAlgorithm::CmsWithHeap)
+    FieldDataType::Sketch(SketchAlgorithm::CountMinSketchWithHeap)
 }
 
 fn schema(fields: Vec<Field>) -> SchemaRef {

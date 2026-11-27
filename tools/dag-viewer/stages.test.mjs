@@ -63,7 +63,7 @@ test("the plan's lane draws each node with its timing and Stage 3 cost; cytoscap
     assert.deepEqual(node.data.reachedBy, ['q1']);
   }
   const kll = nodesOf(elements).find((n) => n.data.kind === 'SummaryTumblingWindowChain');
-  assert.deepEqual(kll.data.label.split('\n').slice(0, 4), ['SummaryTumblingWindowChain', 'summary: Kll', 'tumbling windows of 1 min', 'per series']);
+  assert.deepEqual(kll.data.label.split('\n').slice(0, 4), ['SummaryTumblingWindowChain', 'summary: KLL', 'tumbling windows of 1 min', 'per series']);
   assert.deepEqual(nodesOf(elements).filter((n) => n.data.rootFor.length).map((n) => n.data.nodeId), plan.roots);
   assert.equal(cytoscape(elements).nodes().length, plan.nodes.length);
 });
@@ -77,10 +77,10 @@ test('Stage 0 nodes carry no timing; timing classes color the plan', () => {
 });
 
 test('summary types read as their algorithm or exact kind', () => {
-  assert.equal(call('summaryTypeText', { Sketch: 'Kll' }), 'Kll');
+  assert.equal(call('summaryTypeText', { Sketch: 'KLL' }), 'KLL');
   assert.equal(call('summaryTypeText', { ExactAggregate: ['Sum', 'Sum'] }), 'exact Sum');
-  const chain = { ASAP: { SummaryTumblingWindowChain: { child: 0, summary_type: { Sketch: 'Kll' }, reduction: 'PerEntity', tumbling_window_width_ms: 86400000 } } };
-  assert.deepEqual(call('stageNodeLines', chain, null), ['SummaryTumblingWindowChain', 'summary: Kll', 'tumbling windows of 24 h', 'per series']);
+  const chain = { ASAP: { SummaryTumblingWindowChain: { child: 0, summary_type: { Sketch: 'KLL' }, reduction: 'PerEntity', tumbling_window_width_ms: 86400000 } } };
+  assert.deepEqual(call('stageNodeLines', chain, null), ['SummaryTumblingWindowChain', 'summary: KLL', 'tumbling windows of 24 h', 'per series']);
 });
 
 test('the header shows why a stage failed and the selection\'s warnings', () => {
@@ -129,7 +129,7 @@ test('a materialized view row names its plan node, kind, refresh, inputs, cost a
   const chain = s3.plan.nodes.find((n) => n.payload.ASAP && n.payload.ASAP.SummaryTumblingWindowChain);
   assert.deepEqual(call('validateStagePipeline', doc), []);
   assert.deepEqual(call('materializedViewRows', doc), [{
-    nodeId: chain.id, definition: s3.materialized_views[0].coverage.definition_id, kind: 'SummaryTumblingWindowChain · Kll',
+    nodeId: chain.id, definition: s3.materialized_views[0].coverage.definition_id, kind: 'SummaryTumblingWindowChain · KLL',
     refresh: 'at ingestion', inputs: 'raw data', retention: '5 min', cost: s3.cost.per_node[String(chain.id)].detail, readBy: ['q1'],
   }]);
   // A view that reads other views names them.
@@ -210,9 +210,9 @@ test('the deployment settings name each capability left out and the caller exclu
   assert.match(text, /excluded candidates: 2/);
   // Each supported summary by its wire field `summary_type`.
   const kllOnly = call('settingsRows', {
-    deployment_capabilities: { supported_summaries: [{ summary_type: 'Kll', readouts: ['Quantile'] }] },
+    deployment_capabilities: { supported_summaries: [{ summary_type: 'KLL', readouts: ['Quantile'] }] },
   });
-  assert.deepEqual(kllOnly.find(([name]) => name === 'summaries'), ['summaries', 'Kll (Quantile)']);
+  assert.deepEqual(kllOnly.find(([name]) => name === 'summaries'), ['summaries', 'KLL (Quantile)']);
   // The defaults leave nothing out, so the line names none of them.
   const defaults = call('capabilityLimitsText', { raw_data_retained: true, query_time_results_retained: false });
   assert.equal(defaults, '');

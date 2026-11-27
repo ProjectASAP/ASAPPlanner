@@ -66,7 +66,7 @@ a per-value guarantee is restated over a scope.
 
 A scope bounds only the failure probability; the error bound is unchanged.
 Every estimator produces a per-value guarantee (for a grouped
-query, one per group: a Kmv or HLL distinct count per group, a KLL or DDSketch
+query, one per group: a KMV or HLL distinct count per group, a KLL or DDSketch
 quantile per group, a Count-Min or Count Sketch frequency per key, a Hydra
 estimate per subpopulation; an exact value fails with probability 0). Stated
 over a scope, a per-value failure probability `δ` becomes `V · δ` by the union

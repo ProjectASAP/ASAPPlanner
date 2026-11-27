@@ -56,7 +56,7 @@ To run it, see [RUNNING.md](RUNNING.md).
   when a node that is not materialized is computed once per consumer).
   Each lane is the whole workload's DAG, so a node shared by several queries
   appears once and says `shared ×n`. Summary builds print their summary type
-  (`summary: Kll`, `summary: exact Sum`) and grouping; a
+  (`summary: KLL`, `summary: exact Sum`) and grouping; a
   `SummaryTumblingWindowChain` prints its tumbling-window width. A
   standalone scalar query (`time()`, `scalar(v)`, `1 + 2`) is a dashed
   `Scalar` node over the nodes it reads. Query roots have a thick border.

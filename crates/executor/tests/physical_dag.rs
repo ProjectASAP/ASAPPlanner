@@ -385,7 +385,7 @@ fn kll_raw_partial_and_precomputed_are_native_dags() {
     use planner_types::summary_type::SketchAlgorithm;
 
     let input = schema(&[("value", DataType::Float64, false)]);
-    let family = FieldDataType::Sketch(SketchAlgorithm::Kll);
+    let family = FieldDataType::Sketch(SketchAlgorithm::KLL);
     let build = Operator::per_group_summary_build(
         input.clone(),
         family,
@@ -1080,7 +1080,7 @@ fn assert_weighted_rate_topk(count_sketch: bool) {
     let family = FieldDataType::Sketch(if count_sketch {
         SketchAlgorithm::CountSketchWithHeap
     } else {
-        SketchAlgorithm::CmsWithHeap
+        SketchAlgorithm::CountMinSketchWithHeap
     });
     let parameters = if count_sketch {
         SketchParams::CountSketchWithHeap {

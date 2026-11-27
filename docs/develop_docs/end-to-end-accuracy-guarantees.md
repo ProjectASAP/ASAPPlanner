@@ -291,7 +291,7 @@ declared facts, and is recorded in provenance. The default evidence has no measu
 ### TopK membership
 
 Planner has no membership certificate for a top-k. A top-k readout from a
-heap variant (`CmsWithHeap`, `CountSketchWithHeap`) is admitted when its
+heap variant (`CountMinSketchWithHeap`, `CountSketchWithHeap`) is admitted when its
 heap holds at least `k` entries (else the edge fails with
 `RootPruneReason::HeapSmallerThanTopK`) and the counts it reports meet the
 requirement: the Count-Min L1 or Count Sketch L2 absolute stream bound of

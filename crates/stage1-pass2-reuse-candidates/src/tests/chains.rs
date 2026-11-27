@@ -24,7 +24,7 @@ use asap_types::test_support::memo_fixtures::{range, shift};
 #[test]
 fn a_mergeable_state_reads_a_chain_with_one_build_per_surviving_parameters() {
     let mut memo = Memo::new(&DataWorkload::default());
-    let (_, state, readout) = quantile_over_time(&mut memo, SketchAlgorithm::Kll, 0.9, 300);
+    let (_, state, readout) = quantile_over_time(&mut memo, SketchAlgorithm::KLL, 0.9, 300);
     query(&mut memo, readout, None);
     let logical = pass2(memo, &[entry(120_000)]);
     let memo = &logical.memo;
@@ -32,7 +32,7 @@ fn a_mergeable_state_reads_a_chain_with_one_build_per_surviving_parameters() {
     let chains = groups_where(memo, |e| {
         matches!(e, Operator::ASAP(ASAPOp::SummaryTumblingWindowChain { .. }))
     });
-    let listed = parameter_list(SketchAlgorithm::Kll).len();
+    let listed = parameter_list(SketchAlgorithm::KLL).len();
     assert_eq!(candidates_of(memo, chains[0]).len(), listed);
     // The builds and one merge per θ.
     assert_eq!(
@@ -101,7 +101,7 @@ fn no_chain_without_a_merge_an_anchor_or_a_grid() {
 #[test]
 fn a_chain_whose_width_does_not_divide_the_readers_grid_fails_its_edge() {
     let mut memo = Memo::new(&DataWorkload::default());
-    let (_, state, readout) = quantile_over_time(&mut memo, SketchAlgorithm::Kll, 0.9, 30);
+    let (_, state, readout) = quantile_over_time(&mut memo, SketchAlgorithm::KLL, 0.9, 30);
     query(&mut memo, readout, None);
     query(&mut memo, readout, None);
     let logical = pass2(memo, &[entry(15_000), entry(10_000)]);

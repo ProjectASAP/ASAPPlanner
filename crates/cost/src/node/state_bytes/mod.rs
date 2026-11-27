@@ -93,7 +93,7 @@ pub fn keeps_every_value(measure: &AggIntent) -> bool {
 
 /// Bytes per state, from the summary's family, its
 /// parameters and `input_rows` (the rows one state folds). The bytes are
-/// `asap_sketchlib`'s `estimated_memory_bytes` for the type the executor
+/// `asap_sketchlib`'s `theoretical_memory_bytes` for the type the executor
 /// builds (Count-Min and Count Sketch over `f64` counters), given what the
 /// state is assumed to hold:
 /// - a Count-Min / Count Sketch top-k heap full of keys of
@@ -282,10 +282,10 @@ pub fn sketch_state_bytes(params: &SketchParams, input_rows: StateInputRows) -> 
     match params {
         SketchParams::Hydra(hydra) => sketch_state_bytes(&hydra.per_subpopulation(), input_rows),
         SketchParams::Cms { width, depth } => {
-            CountMinF64::estimated_memory_bytes(*depth as usize, *width as usize) as u64
+            CountMinF64::theoretical_memory_bytes(*depth as usize, *width as usize) as u64
         }
         SketchParams::CountSketch { width, depth } => {
-            CountSketch::<Vector2D<f64>, RegularPath>::estimated_memory_bytes(
+            CountSketch::<Vector2D<f64>, RegularPath>::theoretical_memory_bytes(
                 *depth as usize,
                 *width as usize,
             ) as u64
@@ -294,7 +294,7 @@ pub fn sketch_state_bytes(params: &SketchParams, input_rows: StateInputRows) -> 
             width,
             depth,
             heap_size,
-        } => CountMinSketchWithHeap::<Vector2D<f64>, RegularPath>::estimated_memory_bytes(
+        } => CountMinSketchWithHeap::<Vector2D<f64>, RegularPath>::theoretical_memory_bytes(
             *depth as usize,
             *width as usize,
             *heap_size as usize,
@@ -304,7 +304,7 @@ pub fn sketch_state_bytes(params: &SketchParams, input_rows: StateInputRows) -> 
             width,
             depth,
             heap_size,
-        } => CountSketchWithHeap::<Vector2D<f64>, RegularPath>::estimated_memory_bytes(
+        } => CountSketchWithHeap::<Vector2D<f64>, RegularPath>::theoretical_memory_bytes(
             *depth as usize,
             *width as usize,
             *heap_size as usize,
@@ -320,16 +320,16 @@ pub fn sketch_state_bytes(params: &SketchParams, input_rows: StateInputRows) -> 
         // one assumed when none is declared (`assumed_magnitude_range`).
         SketchParams::DDSketch { alpha } => ddsketch_state_bytes(*alpha, input_rows),
         SketchParams::Hll { precision, .. } => {
-            HyperLogLog::<Classic>::estimated_memory_bytes(usize::from(*precision)) as u64
+            HyperLogLog::<Classic>::theoretical_memory_bytes(usize::from(*precision)) as u64
         }
-        SketchParams::Kmv { k, .. } => Kmv::estimated_memory_bytes(*k as usize, rows) as u64,
+        SketchParams::Kmv { k, .. } => Kmv::theoretical_memory_bytes(*k as usize, rows) as u64,
         SketchParams::UnivMon {
             heap_size,
             sketch_rows,
             sketch_cols,
             layers,
             ..
-        } => UnivMon::estimated_memory_bytes(
+        } => UnivMon::theoretical_memory_bytes(
             *heap_size as usize,
             *sketch_rows as usize,
             *sketch_cols as usize,
@@ -603,7 +603,7 @@ fn ddsketch_span(alpha: f64, input_rows: StateInputRows) -> (u64, u64) {
 /// read in place), so its price is that layout's size, an upper bound on
 /// it whatever the values within the column's range:
 ///
-/// - an 88-byte header (scalars, count width, form, each store's offset and
+/// - a 64-byte header (scalars, count width, form, each store's offset and
 ///   length) and the state's 4-byte offset in its column;
 /// - its counts at the narrowest width holding every count (1, 2, 4 or 8
 ///   bytes; no count exceeds the state's rows, so the width follows from
@@ -628,19 +628,19 @@ fn ddsketch_span(alpha: f64, input_rows: StateInputRows) -> (u64, u64) {
 ///
 /// | values | range declared | charged ÷ held |
 /// |---|---|---|
-/// | exponential (latency-like) | no | 1.0–4.0 |
-/// | exponential (latency-like) | the generator's [2.7e-8, 1104] | 1.0–4.7 |
-/// | lognormal σ = 1 | no | 1.0–5.4 |
-/// | lognormal σ = 2 | no | 1.0–3.0 |
-/// | log-uniform over 7 decades | no | 1.0–2.4 |
+/// | exponential (latency-like) | no | 1.0–4.2 |
+/// | exponential (latency-like) | the generator's [2.7e-8, 1104] | 1.0–4.9 |
+/// | lognormal σ = 1 | no | 1.0–5.6 |
+/// | lognormal σ = 2 | no | 1.0–3.1 |
+/// | log-uniform over 7 decades | no | 1.0–2.5 |
 /// | log-uniform over 7 decades | [0.001, 1e4] | 1.0–1.9 |
-/// | Zipf(1.1) integers in [1, 1e6] | no | 1.02–2.8 |
+/// | Zipf(1.1) integers in [1, 1e6] | no | 1.03–2.8 |
 /// | Zipf(1.1) integers in [1, 1e6] | [1, 1e6] | 1.0–1.9 |
-/// | narrow gauge 100 ± 10 | no | 1.4–20 |
-/// | narrow gauge 100 ± 10 | [90, 110] | 1.0–1.07 |
-/// | counter readings near 1e6 | no | 1.5–22 |
-/// | per-series levels ± 10%, levels over [1, 1e5] | no | 1.4–20 |
-/// | per-series levels ± 10%, levels over [1, 1e5] | [1, 1e5] | 1.4–12 |
+/// | narrow gauge 100 ± 10 | no | 1.5–26 |
+/// | narrow gauge 100 ± 10 | [90, 110] | 1.0–1.10 |
+/// | counter readings near 1e6 | no | 1.6–28 |
+/// | per-series levels ± 10%, levels over [1, 1e5] | no | 1.5–26 |
+/// | per-series levels ± 10%, levels over [1, 1e5] | [1, 1e5] | 1.5–14.6 |
 ///
 /// Few rows per state are stored sparse and priced closely. Past them the
 /// price is the whole column range dense: values narrower than it (without
@@ -653,12 +653,12 @@ fn ddsketch_span(alpha: f64, input_rows: StateInputRows) -> (u64, u64) {
 /// family, replace it.
 ///
 /// Example: at α = 0.01, a state of 10 values with no declared range is
-/// stored sparse in at most 10 buckets at 1-byte counts: 88 + 4 + 40 + 16 =
-/// 148 bytes. A gauge declared within [90, 110] spans 12 buckets: 600 rows,
-/// dense at 2-byte counts, 88 + 4 + 24 = 116 bytes.
+/// stored sparse in at most 10 buckets at 1-byte counts: 64 + 4 + 40 + 16 =
+/// 124 bytes. A gauge declared within [90, 110] spans 12 buckets: 600 rows,
+/// dense at 2-byte counts, 64 + 4 + 24 = 92 bytes.
 fn ddsketch_state_bytes(alpha: f64, input_rows: StateInputRows) -> u64 {
     // The view's header, and the state's 4-byte offset in its column.
-    const HEADER_BYTES: u64 = 88;
+    const HEADER_BYTES: u64 = 64;
     const OFFSET_BYTES: u64 = 4;
     let padded = |bytes: u64| bytes.div_ceil(8) * 8;
     let (_, stores) = ddsketch_span(alpha, input_rows);
@@ -701,7 +701,7 @@ fn ddsketch_open_state_bytes(alpha: f64, input_rows: StateInputRows) -> u64 {
     use asap_sketchlib::DdSketch;
     let struct_bytes = std::mem::size_of::<DdSketch>() as u64;
     let block_bytes =
-        DdSketch::estimated_memory_bytes(alpha, 1, 1.0, 1.0, false) as u64 - struct_bytes;
+        DdSketch::theoretical_memory_bytes(alpha, 1, 1.0, 1.0, false) as u64 - struct_bytes;
     let (span, stores) = ddsketch_span(alpha, input_rows);
     struct_bytes + stores * (block_bytes + 8 * (span - 1))
 }

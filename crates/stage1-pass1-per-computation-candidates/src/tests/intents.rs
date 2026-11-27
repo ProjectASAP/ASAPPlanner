@@ -24,8 +24,8 @@ fn cardinality_keeps_specialized_and_universal_summaries() {
     assert_eq!(
         algorithms(&choices),
         vec![
-            SketchAlgorithm::Hll,
-            SketchAlgorithm::Kmv,
+            SketchAlgorithm::HLL,
+            SketchAlgorithm::KMV,
             SketchAlgorithm::UnivMon
         ]
     );
@@ -57,7 +57,7 @@ fn topk_keeps_both_specialized_heap_choices() {
     assert_eq!(
         algorithms(&choices),
         vec![
-            SketchAlgorithm::CmsWithHeap,
+            SketchAlgorithm::CountMinSketchWithHeap,
             SketchAlgorithm::CountSketchWithHeap
         ]
     );

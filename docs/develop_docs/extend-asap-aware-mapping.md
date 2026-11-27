@@ -33,7 +33,7 @@ A new sketch that Pass 1 can offer for an intent.
    it from `theoretical_guarantee`, evaluated at the required failure
    probability. Without a guarantee, every candidate that uses it is
    rejected.
-5. **Cost.** Give it a state size (the library's `estimated_memory_bytes`
+5. **Cost.** Give it a state size (the library's `theoretical_memory_bytes`
    for the type the executor builds; KLL keeps the planner's own formula)
    in `sketch_state_bytes` (`crates/cost/src/node/state_bytes/mod.rs`),
    its per-row and per-merge CPU in

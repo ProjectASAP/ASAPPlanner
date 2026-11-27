@@ -3,7 +3,7 @@
   "query_time_results_retained": false,
   "supported_summaries": [
     {
-      "summary_type": "Kll",
+      "summary_type": "KLL",
       "readouts": [
         "Quantile"
       ]

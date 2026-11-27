@@ -250,7 +250,7 @@ fn sketch_rollup_witness_costs_for_a_grouped_quantile() {
     .expect("the data facts deserialize");
     match check(Relation::CoarserGrouping, workload, 0) {
         Outcome::Holds(m) | Outcome::Violated(m) => {
-            assert!(m.base_plan.contains("Kll"), "{}", m.base_plan);
+            assert!(m.base_plan.contains("KLL"), "{}", m.base_plan);
             assert_eq!(
                 m.witness.and_then(|w| w.derivation),
                 Some(Witness::SketchRollup {

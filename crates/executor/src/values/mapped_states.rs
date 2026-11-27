@@ -33,8 +33,8 @@ impl MappedSketchKernel {
     pub(crate) fn of(family: &FieldDataType) -> Option<Self> {
         match family {
             FieldDataType::Sketch(SketchAlgorithm::DDSketch) => Some(Self::DDSketch),
-            FieldDataType::Sketch(SketchAlgorithm::Kll) => Some(Self::Kll),
-            FieldDataType::Sketch(SketchAlgorithm::Cms) => Some(Self::CountMin),
+            FieldDataType::Sketch(SketchAlgorithm::KLL) => Some(Self::Kll),
+            FieldDataType::Sketch(SketchAlgorithm::CountMinSketch) => Some(Self::CountMin),
             _ => None,
         }
     }
@@ -452,7 +452,7 @@ mod tests {
         series: u32,
         samples: u32,
     ) -> Vec<Arc<dyn AggregateCore>> {
-        if *family == FieldDataType::Sketch(SketchAlgorithm::Cms) {
+        if *family == FieldDataType::Sketch(SketchAlgorithm::CountMinSketch) {
             return (0..series)
                 .map(|s| {
                     let mut state = CountMinSketchAccumulator::new(3, 64).unwrap();
@@ -624,12 +624,12 @@ mod tests {
                 false,
             ),
             (
-                FieldDataType::Sketch(SketchAlgorithm::Kll),
+                FieldDataType::Sketch(SketchAlgorithm::KLL),
                 SketchParams::Kll { k: 200 },
                 true,
             ),
             (
-                FieldDataType::Sketch(SketchAlgorithm::Cms),
+                FieldDataType::Sketch(SketchAlgorithm::CountMinSketch),
                 SketchParams::Cms {
                     width: 64,
                     depth: 3,
@@ -667,7 +667,7 @@ mod tests {
     /// (each group's accumulator is seeded from its key).
     #[test]
     fn kll_view_merges_are_reproducible_and_within_the_bound() {
-        let family = FieldDataType::Sketch(SketchAlgorithm::Kll);
+        let family = FieldDataType::Sketch(SketchAlgorithm::KLL);
         let parameters = SketchParams::Kll { k: 200 };
         let windows = |views: bool| -> Vec<Batch> {
             (0..12)

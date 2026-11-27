@@ -126,7 +126,7 @@ fn ten_thousand_series(
 #[test]
 fn sealed_ten_thousand_series_answer_alike_and_hold_less() {
     use planner_types::summary_type::{SketchAlgorithm, SketchStatistic};
-    let kll = FieldDataType::Sketch(SketchAlgorithm::Kll);
+    let kll = FieldDataType::Sketch(SketchAlgorithm::KLL);
     let k132 = SketchParams::Kll { k: 132 };
     let updater = ten_thousand_series(&kll, Some(&k132));
     let open_bytes = updater.memory_bytes();

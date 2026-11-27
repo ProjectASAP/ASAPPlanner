@@ -3,7 +3,7 @@
   "materialized_views": [
     {
       "coverage": {
-        "definition_id": "bfbffb8f01ab202d585c3e18c9f78080",
+        "definition_id": "2d963bc6757b98ad80934456821cc040",
         "selection": [
           {
             "columns": []
@@ -14,11 +14,11 @@
         "materialized_views": []
       },
       "node_id": 1,
-      "plan_id": "f6f31722b12fc85f69ff48e068761870",
+      "plan_id": "0d803bcba0819ca0aa4d8407f9c79197",
       "refresh": "at_ingestion",
       "retention_ms": 600000,
       "view_state_key": {
-        "definition_id": "bfbffb8f01ab202d585c3e18c9f78080",
+        "definition_id": "2d963bc6757b98ad80934456821cc040",
         "logical_properties": {
           "parameters": {
             "Kll": {
@@ -35,7 +35,7 @@
     },
     {
       "coverage": {
-        "definition_id": "bfbffb8f01ab202d585c3e18c9f78080",
+        "definition_id": "2d963bc6757b98ad80934456821cc040",
         "selection": [
           {
             "columns": []
@@ -46,11 +46,11 @@
         "materialized_views": []
       },
       "node_id": 10,
-      "plan_id": "f6f31722b12fc85f69ff48e068761870",
+      "plan_id": "0d803bcba0819ca0aa4d8407f9c79197",
       "refresh": "at_ingestion",
       "retention_ms": 180000,
       "view_state_key": {
-        "definition_id": "bfbffb8f01ab202d585c3e18c9f78080",
+        "definition_id": "2d963bc6757b98ad80934456821cc040",
         "logical_properties": {
           "parameters": {
             "Kll": {
@@ -67,7 +67,7 @@
     },
     {
       "coverage": {
-        "definition_id": "bfbffb8f01ab202d585c3e18c9f78080",
+        "definition_id": "2d963bc6757b98ad80934456821cc040",
         "selection": [
           {
             "columns": []
@@ -80,11 +80,11 @@
         ]
       },
       "node_id": 11,
-      "plan_id": "f6f31722b12fc85f69ff48e068761870",
+      "plan_id": "0d803bcba0819ca0aa4d8407f9c79197",
       "refresh": "at_ingestion",
       "retention_ms": 180000,
       "view_state_key": {
-        "definition_id": "bfbffb8f01ab202d585c3e18c9f78080",
+        "definition_id": "2d963bc6757b98ad80934456821cc040",
         "logical_properties": {
           "parameters": {
             "Kll": {
@@ -110,23 +110,23 @@
       {
         "accepted_metric": "rank",
         "sketches": [
-          "Kll"
+          "KLL"
         ],
-        "summary": "accepted rank (Kll)"
+        "summary": "accepted rank (KLL)"
       },
       {
         "accepted_metric": "rank",
         "sketches": [
-          "Kll"
+          "KLL"
         ],
-        "summary": "accepted rank (Kll)"
+        "summary": "accepted rank (KLL)"
       },
       {
         "accepted_metric": "rank",
         "sketches": [
-          "Kll"
+          "KLL"
         ],
-        "summary": "accepted rank (Kll)"
+        "summary": "accepted rank (KLL)"
       }
     ],
     "cost": {
@@ -151,7 +151,7 @@
           "cost_per_second": 1.78533090643e-8,
           "cost_source": "analytical",
           "cpu_core_seconds_per_second": 0.000262089333333,
-          "detail": "build Kll in tumbling windows of 300000 ms for 10000 groups: 667 rows x 84 ops, 667 group visits, 33.3 states emitted; x 1.0000/s; keeps 12960000 bytes",
+          "detail": "build KLL in tumbling windows of 300000 ms for 10000 groups: 667 rows x 84 ops, 667 group visits, 33.3 states emitted; x 1.0000/s; keeps 12960000 bytes",
           "ingest_cpu_core_seconds_per_second": 0.000178756,
           "multiplier": 1,
           "operator": "SummaryTumblingWindowChain",
@@ -165,7 +165,7 @@
           "cost_per_second": 9.13096882614e-8,
           "cost_source": "analytical",
           "cpu_core_seconds_per_second": 0.002678756,
-          "detail": "build Kll in tumbling windows of 10000 ms for 10000 groups: 667 rows x 84 ops, 667 group visits, 1000.0 states emitted; x 1.0000/s; keeps 53200000 bytes",
+          "detail": "build KLL in tumbling windows of 10000 ms for 10000 groups: 667 rows x 84 ops, 667 group visits, 1000.0 states emitted; x 1.0000/s; keeps 53200000 bytes",
           "ingest_cpu_core_seconds_per_second": 0.000178756,
           "multiplier": 1,
           "operator": "SummaryTumblingWindowChain",
@@ -474,7 +474,7 @@
               },
               {
                 "dtype": {
-                  "Sketch": "Kll"
+                  "Sketch": "KLL"
                 },
                 "name": "state",
                 "nullable": false
@@ -518,7 +518,7 @@
               },
               {
                 "dtype": {
-                  "Sketch": "Kll"
+                  "Sketch": "KLL"
                 },
                 "name": "state",
                 "nullable": false
@@ -562,7 +562,7 @@
               },
               {
                 "dtype": {
-                  "Sketch": "Kll"
+                  "Sketch": "KLL"
                 },
                 "name": "state",
                 "nullable": false
@@ -650,7 +650,7 @@
               },
               {
                 "dtype": {
-                  "Sketch": "Kll"
+                  "Sketch": "KLL"
                 },
                 "name": "state",
                 "nullable": false
@@ -694,7 +694,7 @@
               },
               {
                 "dtype": {
-                  "Sketch": "Kll"
+                  "Sketch": "KLL"
                 },
                 "name": "state",
                 "nullable": false
@@ -738,7 +738,7 @@
               },
               {
                 "dtype": {
-                  "Sketch": "Kll"
+                  "Sketch": "KLL"
                 },
                 "name": "state",
                 "nullable": false
@@ -870,7 +870,7 @@
               },
               {
                 "dtype": {
-                  "Sketch": "Kll"
+                  "Sketch": "KLL"
                 },
                 "name": "state",
                 "nullable": false
@@ -914,7 +914,7 @@
               },
               {
                 "dtype": {
-                  "Sketch": "Kll"
+                  "Sketch": "KLL"
                 },
                 "name": "state",
                 "nullable": false
@@ -958,7 +958,7 @@
               },
               {
                 "dtype": {
-                  "Sketch": "Kll"
+                  "Sketch": "KLL"
                 },
                 "name": "state",
                 "nullable": false
@@ -1002,7 +1002,7 @@
               },
               {
                 "dtype": {
-                  "Sketch": "Kll"
+                  "Sketch": "KLL"
                 },
                 "name": "state",
                 "nullable": false
@@ -1046,7 +1046,7 @@
               },
               {
                 "dtype": {
-                  "Sketch": "Kll"
+                  "Sketch": "KLL"
                 },
                 "name": "state",
                 "nullable": false
@@ -1220,7 +1220,7 @@
               },
               {
                 "dtype": {
-                  "Sketch": "Kll"
+                  "Sketch": "KLL"
                 },
                 "name": "state",
                 "nullable": false
@@ -1263,7 +1263,7 @@
                 },
                 "reduction": "PerEntity",
                 "summary_type": {
-                  "Sketch": "Kll"
+                  "Sketch": "KLL"
                 },
                 "tumbling_window_width_ms": 300000
               }
@@ -1271,7 +1271,7 @@
           },
           "retention_ms": 600000,
           "view_coverage": {
-            "definition_id": "bfbffb8f01ab202d585c3e18c9f78080",
+            "definition_id": "2d963bc6757b98ad80934456821cc040",
             "selection": [
               {
                 "columns": []
@@ -1294,7 +1294,7 @@
               },
               {
                 "dtype": {
-                  "Sketch": "Kll"
+                  "Sketch": "KLL"
                 },
                 "name": "state",
                 "nullable": false
@@ -1354,7 +1354,7 @@
               },
               {
                 "dtype": {
-                  "Sketch": "Kll"
+                  "Sketch": "KLL"
                 },
                 "name": "state",
                 "nullable": false
@@ -1530,7 +1530,7 @@
               },
               {
                 "dtype": {
-                  "Sketch": "Kll"
+                  "Sketch": "KLL"
                 },
                 "name": "state",
                 "nullable": false
@@ -1590,7 +1590,7 @@
               },
               {
                 "dtype": {
-                  "Sketch": "Kll"
+                  "Sketch": "KLL"
                 },
                 "name": "state",
                 "nullable": false
@@ -1768,7 +1768,7 @@
               },
               {
                 "dtype": {
-                  "Sketch": "Kll"
+                  "Sketch": "KLL"
                 },
                 "name": "state",
                 "nullable": false
@@ -1811,7 +1811,7 @@
                 },
                 "reduction": "PerEntity",
                 "summary_type": {
-                  "Sketch": "Kll"
+                  "Sketch": "KLL"
                 },
                 "tumbling_window_width_ms": 10000
               }
@@ -1819,7 +1819,7 @@
           },
           "retention_ms": 180000,
           "view_coverage": {
-            "definition_id": "bfbffb8f01ab202d585c3e18c9f78080",
+            "definition_id": "2d963bc6757b98ad80934456821cc040",
             "selection": [
               {
                 "columns": []
@@ -1844,7 +1844,7 @@
               },
               {
                 "dtype": {
-                  "Sketch": "Kll"
+                  "Sketch": "KLL"
                 },
                 "name": "state",
                 "nullable": false
@@ -1884,7 +1884,7 @@
           },
           "retention_ms": 180000,
           "view_coverage": {
-            "definition_id": "bfbffb8f01ab202d585c3e18c9f78080",
+            "definition_id": "2d963bc6757b98ad80934456821cc040",
             "selection": [
               {
                 "columns": []
@@ -1907,7 +1907,7 @@
               },
               {
                 "dtype": {
-                  "Sketch": "Kll"
+                  "Sketch": "KLL"
                 },
                 "name": "state",
                 "nullable": false
@@ -1969,7 +1969,7 @@
               },
               {
                 "dtype": {
-                  "Sketch": "Kll"
+                  "Sketch": "KLL"
                 },
                 "name": "state",
                 "nullable": false

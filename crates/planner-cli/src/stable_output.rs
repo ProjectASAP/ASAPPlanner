@@ -36,7 +36,7 @@ use serde_json::{json, Value};
 /// quantile` root group id 0, the `TimeRange 300s` below it 1 and the
 /// `Scan` 2 (the planner numbers them the other way round, `Scan` first),
 /// then the groups its candidates read: the `SummaryEstimate` readout 3
-/// and its `SummaryAgg Kll` 4.
+/// and its `SummaryAgg KLL` 4.
 pub struct CanonicalIds {
     /// Indexed by the planner's group id.
     canonical_group_of_planner_group: Vec<u32>,

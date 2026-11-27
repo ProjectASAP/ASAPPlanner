@@ -275,7 +275,7 @@ pub fn assumed_in_order_arrival(
 }
 
 /// Whether a build of `summary_type` in group `group` is a Count-Min state
-/// (`Cms`, `CmsWithHeap`, `HydraCms`) whose weights are not proven
+/// (`CountMinSketch`, `CountMinSketchWithHeap`, `HydraCountMinSketch`) whose weights are not proven
 /// non-negative: the state column of its group, which records the sign of
 /// the weights it is updated with (`column_signs`), is not `NonNegative`.
 fn count_min_weights_not_proven_non_negative(
@@ -286,7 +286,9 @@ fn count_min_weights_not_proven_non_negative(
     if !matches!(
         summary_type,
         FieldDataType::Sketch(
-            SketchAlgorithm::Cms | SketchAlgorithm::CmsWithHeap | SketchAlgorithm::HydraCms
+            SketchAlgorithm::CountMinSketch
+                | SketchAlgorithm::CountMinSketchWithHeap
+                | SketchAlgorithm::HydraCountMinSketch
         )
     ) {
         return false;

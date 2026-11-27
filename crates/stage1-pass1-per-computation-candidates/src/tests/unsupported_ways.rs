@@ -103,7 +103,7 @@ fn a_readout_an_open_group_cannot_rename_adds_nothing() {
     assert_unsupported_way_adds_nothing(
         &mut memo,
         &measure,
-        HowToComputeAggregateMeasure::Summary(SketchAlgorithm::Kll),
+        HowToComputeAggregateMeasure::Summary(SketchAlgorithm::KLL),
         per_series,
     );
 }

@@ -34,7 +34,7 @@ fn levels_of(memo: &Memo, readout: MemoGroupId) -> Vec<RequiredAccuracy> {
 #[test]
 fn a_whole_result_failure_probability_is_split_per_value() {
     let mut memo = Memo::new(&with_series("m", 100));
-    let (_, _, readout) = quantile_over_time(&mut memo, SketchAlgorithm::Kll, 0.9, 300);
+    let (_, _, readout) = quantile_over_time(&mut memo, SketchAlgorithm::KLL, 0.9, 300);
     memo.add_query(MemoQuery {
         root: QueryRoot::Operator(readout),
         accuracy_target: Some(AccuracyTarget::max_error(0.01).failure_probability(0.01)),
@@ -144,7 +144,7 @@ fn a_count_over_readouts_gives_them_no_level() {
 fn a_readout_of_one_value_keeps_the_whole_failure_probability() {
     let mut memo = Memo::new(&with_series("flows", 1000));
     let rows = scan_group(&mut memo, "flows", &["dst"], vec![]);
-    let state = sketch_state(&mut memo, rows, SketchAlgorithm::Kmv, Reduction::by(vec![]));
+    let state = sketch_state(&mut memo, rows, SketchAlgorithm::KMV, Reduction::by(vec![]));
     let distinct = estimate(&mut memo, state, SketchStatistic::Cardinality);
     memo.add_query(MemoQuery {
         root: QueryRoot::Operator(distinct),
@@ -399,7 +399,7 @@ fn with_series_over_jobs(series: u64, jobs: u64) -> DataWorkload {
 #[test]
 fn a_per_value_target_without_a_reduction_keeps_the_whole_failure_probability() {
     let mut memo = Memo::new(&with_series("m", 8));
-    let (_, _, readout) = quantile_over_time(&mut memo, SketchAlgorithm::Kll, 0.99, 300);
+    let (_, _, readout) = quantile_over_time(&mut memo, SketchAlgorithm::KLL, 0.99, 300);
     let target = AccuracyTarget::max_error(0.0025)
         .failure_probability(0.01)
         .accuracy_metric(AccuracyMetric::Rank)
@@ -413,7 +413,7 @@ fn a_per_value_target_without_a_reduction_keeps_the_whole_failure_probability() 
 #[test]
 fn a_whole_result_target_without_a_reduction_splits_over_the_values_returned() {
     let mut memo = Memo::new(&with_series("m", 8));
-    let (_, _, readout) = quantile_over_time(&mut memo, SketchAlgorithm::Kll, 0.99, 300);
+    let (_, _, readout) = quantile_over_time(&mut memo, SketchAlgorithm::KLL, 0.99, 300);
     let target = AccuracyTarget::max_error(0.0025)
         .failure_probability(0.01)
         .accuracy_metric(AccuracyMetric::Rank);
@@ -697,7 +697,7 @@ fn a_topk_readout_splits_over_every_value_it_ranks() {
     let state = sketch_state(
         &mut memo,
         window,
-        SketchAlgorithm::CmsWithHeap,
+        SketchAlgorithm::CountMinSketchWithHeap,
         Reduction::PerEntity,
     );
     let topk = estimate(&mut memo, state, SketchStatistic::TopK { k: 10 });
@@ -772,7 +772,7 @@ fn a_level_met_by_the_same_builds_as_a_stricter_one_is_dropped() {
 #[test]
 fn levels_met_by_different_builds_are_both_kept() {
     let mut memo = Memo::new(&with_series("m", 8));
-    let (_, _, readout) = quantile_over_time(&mut memo, SketchAlgorithm::Kll, 0.99, 300);
+    let (_, _, readout) = quantile_over_time(&mut memo, SketchAlgorithm::KLL, 0.99, 300);
     let rank = |scope| {
         AccuracyTarget::max_error(0.0025)
             .failure_probability(0.01)

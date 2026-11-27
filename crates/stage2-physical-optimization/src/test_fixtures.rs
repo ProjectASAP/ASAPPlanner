@@ -137,25 +137,25 @@ pub fn example_read_by(root: impl FnOnce(MemoGroupId) -> QueryRoot<MemoGroupId>)
     let last_minute = group(&mut memo, range(60_000, scan));
     let build_state = sketch_group(
         &mut memo,
-        state(FieldDataType::Sketch(SketchAlgorithm::Kll), last_minute),
-        SketchAlgorithm::Kll,
+        state(FieldDataType::Sketch(SketchAlgorithm::KLL), last_minute),
+        SketchAlgorithm::KLL,
         1,
     );
     let chain = sketch_group(
         &mut memo,
         Operator::ASAP(ASAPOp::SummaryTumblingWindowChain {
             child: scan,
-            summary_type: FieldDataType::Sketch(SketchAlgorithm::Kll),
+            summary_type: FieldDataType::Sketch(SketchAlgorithm::KLL),
             input: SummaryUpdate::column(ColumnRef::SampleValue),
             reduction: Reduction::PerEntity,
             filter: None,
             tumbling_window_width_ms: 60_000,
         }),
-        SketchAlgorithm::Kll,
+        SketchAlgorithm::KLL,
         1,
     );
     // The windows and the merge carry the chain build's θ.
-    let windows = sketch_group(&mut memo, range(60_000, chain), SketchAlgorithm::Kll, 1);
+    let windows = sketch_group(&mut memo, range(60_000, chain), SketchAlgorithm::KLL, 1);
     let merge = candidate(
         &mut memo,
         build_state,
@@ -163,7 +163,7 @@ pub fn example_read_by(root: impl FnOnce(MemoGroupId) -> QueryRoot<MemoGroupId>)
             children: vec![windows],
             group_by: None,
         }),
-        Some(parameter_list(SketchAlgorithm::Kll)[0].clone()),
+        Some(parameter_list(SketchAlgorithm::KLL)[0].clone()),
     );
     let readout = group(
         &mut memo,
