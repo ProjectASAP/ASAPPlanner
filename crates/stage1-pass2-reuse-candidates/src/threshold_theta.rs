@@ -15,7 +15,7 @@
 //! cut with [`RootPruneReason::AboveReaderThreshold`], and dead-candidate
 //! elimination removes the candidates left without a consumer.
 //!
-//! Example: `topk(5, sum by (host) (m))` reads a `CmsWithHeap` state listed
+//! Example: `topk(5, sum by (host) (m))` reads a `CountMinSketchWithHeap` state listed
 //! at 240 θs (width × depth × heap size). Every θ that a smaller θ meeting
 //! the same readers matches in every place is left out.
 //!

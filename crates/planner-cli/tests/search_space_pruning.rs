@@ -318,7 +318,7 @@ fn rule1_two_readers_of_one_chain_keep_the_optimum() {
 
 /// Three top-k readers of one `sum by (host)` with different k and errors
 /// (k = 5 at 0.05, k = 10 at 0.01, k = 20 at 0.02), 1,000 series: a
-/// `CmsWithHeap` state all three share needs a θ at least each one's in
+/// `CountMinSketchWithHeap` state all three share needs a θ at least each one's in
 /// every field (width, depth, heap), which may be no reader's threshold.
 #[test]
 fn rule1_three_readers_of_one_multi_parameter_state_keep_the_optimum() {
