@@ -26,7 +26,8 @@ Only the plan, which must not change between runs:
 - `selected`: the selected plan's `dag` (Stage 3's `PhysicalASAPDAG`, with
   the retention and lifetime of its nodes), its `cost` (`cost_per_second`,
   `usage`, `per_node`) and `accepted` accuracy per query;
-- `materialized_views` and any `warnings`;
+- `materialized_views` and any `warnings`, `materialized_views_error` and
+  `planner_executor_error`;
 - for a query that does not plan, `selected: null` and the `error`.
 
 Floats are rounded to 12 significant digits. Everything about the search is
@@ -41,7 +42,7 @@ The corpus queries carry no accuracy target, so their plans are exact.
 that select sketches: `manifest.json` lists each workload (a workload file, its deployment
 capabilities and cost inputs files, and whether accuracy guarantees are
 enforced), and `<id>.json` is its snapshot, holding the same fields as a
-corpus snapshot plus every query's text. The test,
+corpus snapshot, with `queries` (every query's text) in place of `query`. The test,
 `sketch_plans_match_snapshots`, is in the same `corpus_snapshots` binary and
 runs nightly with it; the two tests never run at once. Regenerate with:
 
@@ -68,9 +69,9 @@ the PR description.
 
 ## Strict and local runs
 
-The nightly workflow sets `STRICT_SNAPSHOTS=1`: any difference from a
-committed snapshot fails, including a different plan of the same cost (a
-different KLL `k`, lifetime or sharing, say). Several plans can tie on cost,
+The nightly workflow sets `STRICT_SNAPSHOTS` (to `1`; any value turns it
+on): any difference from a committed snapshot fails, including a different
+plan of the same cost (a different KLL `k`, lifetime or sharing, say). Several plans can tie on cost,
 and a change to the planner can move which one the selection returns; the
 PR that moves it then updates the snapshots, instead of the next PR that
 regenerates them picking up the change unexplained.
@@ -84,7 +85,9 @@ Run with `STRICT_SNAPSHOTS=1` to check what the nightly run will.
 
 The test also fails, instead of recording a snapshot, in these cases:
 
-- A snapshot file has no matching checked query in `corpus.json`.
+- A snapshot file has no matching checked query in `corpus.json`, or no
+  matching workload in `manifest.json`.
+- A sketch plan workload has no snapshot file.
 - `asap_planner` failed.
 
 ## Adding queries

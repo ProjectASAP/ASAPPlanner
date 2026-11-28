@@ -20,7 +20,7 @@
 //! search over every legal tumbling-window width, with no time limit.
 //!
 //! A snapshot holds only the plan, never the search that found it: Stage
-//! 3's plan (its `PhysicalASAPDAG`, retention on its nodes), its cost and
+//! 3's plan (its `PhysicalASAPDAG`, with the retention and lifetime of its nodes), its cost and
 //! accepted accuracy per query, and the materialized views; for a query
 //! that does not plan, the error. The selection MILP's size and timings,
 //! the Stage 1 and Stage 2 candidate lists and the memo are left out. Floats are as
