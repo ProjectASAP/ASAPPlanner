@@ -27,7 +27,7 @@ use std::ops::Range;
 use asap_types::deployment_capabilities::DeploymentExclusion;
 use asap_types::stages::{
     CandidateForMemoGroupId, LogicalASAPMemoCandidates, MemoGroupId, PhysicalASAPMemoCandidates,
-    PhysicalCandidate, PhysicalCandidateId, PhysicalEdge, PrunedCandidate,
+    PhysicalCandidate, PhysicalCandidateId, PhysicalEdge, PrunedCandidate, SearchSpacePruning,
 };
 use asap_types::workload::DataWorkload;
 
@@ -43,16 +43,20 @@ use candidate::{offered_physical_properties, OfferedPhysicalProperties};
 /// decision-tree prune rule removes ([`candidate`]; among them those one of
 /// the deployment's `exclusions` matches, `DeploymentCapabilities::exclusions`
 /// as the facade expanded them, e.g. every query-time scan when raw data is
-/// not retained), then those
-/// that cannot be built or that no query output can read ([`pruning`]). A value
-/// outside a dimension's declared value set (`AcrossEvaluations` on a
-/// candidate of a time-dependent group with no known grid) is not offered
-/// and not recorded. Costs nothing, and cannot fail; alignment with each
-/// execution context is Stage 3's check (`PhysicalASAPMemoCandidates::delivers_on`).
+/// not retained), then those that cannot be built or that no query output
+/// can read ([`pruning`]). Not offered and not recorded: a value outside a
+/// dimension's declared value set (`AcrossEvaluations` on a candidate of a
+/// time-dependent group with no known grid), and, under
+/// `search_space_pruning`'s `one_evaluation_by_readers` (rule 5),
+/// `OneEvaluation` on a candidate at most one reader reads in an
+/// evaluation. Costs nothing, and cannot fail; alignment with each
+/// execution context is Stage 3's check
+/// (`PhysicalASAPMemoCandidates::delivers_on`).
 pub fn generate_physical_asap_memo_candidates(
     logical: &LogicalASAPMemoCandidates,
     data: &DataWorkload,
     exclusions: &[DeploymentExclusion],
+    search_space_pruning: SearchSpacePruning,
 ) -> PhysicalASAPMemoCandidates {
     let memo = &logical.memo;
     let eliminated: HashSet<CandidateForMemoGroupId> = logical
@@ -60,6 +64,10 @@ pub fn generate_physical_asap_memo_candidates(
         .iter()
         .map(|pruned| pruned.candidate)
         .collect();
+    // Rule 5: the candidates two readers may read in one evaluation.
+    let one_evaluation_offered = search_space_pruning
+        .one_evaluation_by_readers
+        .then(|| group::one_evaluation_offered_per_candidate(logical));
     let ingestion_time_offered = group::ingestion_time_offered_per_group(logical, &eliminated);
     let across_evaluations_offered =
         group::across_evaluations_offered_per_group(logical, &eliminated);
@@ -87,6 +95,9 @@ pub fn generate_physical_asap_memo_candidates(
                 logical_candidate_id,
                 ingestion_time_offered[group_index],
                 across_evaluations_offered[group_index],
+                one_evaluation_offered
+                    .as_ref()
+                    .is_none_or(|offered| offered.contains(&logical_candidate_id)),
                 data,
                 exclusions,
             ) {

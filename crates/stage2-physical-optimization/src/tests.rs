@@ -10,7 +10,7 @@ use asap_types::deployment_capabilities::DeploymentCapabilities;
 use asap_types::ir::properties::ExecutionTiming;
 use asap_types::stages::{
     CandidateForMemoGroupId, Lifetime, LogicalASAPMemoCandidates, PhysicalASAPMemoCandidates,
-    PhysicalCandidateId, PhysicalProperties, PruneReason,
+    PhysicalCandidateId, PhysicalProperties, PruneReason, SearchSpacePruning,
 };
 use asap_types::workload::DataWorkload;
 
@@ -24,8 +24,17 @@ fn generate(
     data: &DataWorkload,
     capabilities: &DeploymentCapabilities,
 ) -> PhysicalASAPMemoCandidates {
-    let physical =
-        generate_physical_asap_memo_candidates(logical, data, &capabilities.exclusions());
+    // The unit tests check every offered (τ, ℓ): rule 5 off.
+    let every_alternative = SearchSpacePruning {
+        one_evaluation_by_readers: false,
+        ..SearchSpacePruning::default()
+    };
+    let physical = generate_physical_asap_memo_candidates(
+        logical,
+        data,
+        &capabilities.exclusions(),
+        every_alternative,
+    );
     let count = physical.physical_candidates.len();
     let mut consumer_inputs = Vec::new();
     for (_, edge) in physical.edges() {

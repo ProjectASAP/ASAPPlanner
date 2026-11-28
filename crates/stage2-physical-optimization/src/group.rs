@@ -1,9 +1,12 @@
 //! Per-group facts the decision tree's levels 3 and 4 read: whether a
 //! group's candidates are offered `IngestionTime`, and whether they are
 //! offered `AcrossEvaluations`. Each is computed once per group, over the
-//! candidates Pass 2 kept (an eliminated candidate reads nothing).
+//! candidates Pass 2 kept (an eliminated candidate reads nothing). Also,
+//! per candidate, whether it is offered `OneEvaluation` under search-space
+//! pruning rule 5, which counts every satisfied logical edge (an
+//! over-count, which only keeps more twins).
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use asap_types::ir::operator::arguments::{AtModifier, TimeShift};
 use asap_types::ir::{ASAPOp, NonASAPOp, Operator};
@@ -140,4 +143,56 @@ fn read_at_absolute_time_per_group(
         }
     }
     read
+}
+
+/// Rule 5 (`SearchSpacePruning::one_evaluation_by_readers`): the logical
+/// candidates more than one reader may read in one evaluation context,
+/// the only ones offered `OneEvaluation`. Readers, an upper bound: each
+/// satisfied logical edge into a consumer input (two candidates of one
+/// consumer group count twice, as readout copies may both be selected; an
+/// edge into a consumer anchored with `@ end()` or `@ start()` counts
+/// twice, as Stage 3 runs that consumer's inputs in one request context
+/// for every query grid it serves), plus each query whose output the
+/// candidate's group is. Edges are counted per logical consumer: an
+/// optimal plan never selects two lifetimes of one consumer in one
+/// context, as its `OneEvaluation` form serves both readers at no more
+/// cost.
+///
+/// Example: in `sum(rate(m[5m])) / count(rate(m[5m]))` the one `rate`
+/// candidate has two readers, the `sum` and the `count`.
+pub(super) fn one_evaluation_offered_per_candidate(
+    logical: &LogicalASAPMemoCandidates,
+) -> HashSet<CandidateForMemoGroupId> {
+    let memo = &logical.memo;
+    let mut readers: HashMap<CandidateForMemoGroupId, usize> = HashMap::new();
+    for edge in &logical.edges {
+        if edge.satisfies_logical_requirement {
+            let anchored = memo
+                .candidate(edge.consumer_candidate_id)
+                .expression
+                .operator
+                .request_anchor()
+                .is_some();
+            *readers.entry(edge.producer_candidate_id).or_default() += if anchored { 2 } else { 1 };
+        }
+    }
+    let mut queries_per_group: HashMap<MemoGroupId, usize> = HashMap::new();
+    for (_, group) in memo.output_groups() {
+        *queries_per_group.entry(group).or_default() += 1;
+    }
+    for (group, queries) in queries_per_group {
+        for index_in_group in 0..memo.groups()[group.0 as usize].candidates.len() {
+            *readers
+                .entry(CandidateForMemoGroupId {
+                    group,
+                    index_in_group,
+                })
+                .or_default() += queries;
+        }
+    }
+    readers
+        .into_iter()
+        .filter(|&(_, count)| count > 1)
+        .map(|(candidate, _)| candidate)
+        .collect()
 }

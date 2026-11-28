@@ -172,6 +172,15 @@ fn physical_candidates(document: &Value) -> &Vec<Value> {
         .unwrap()
 }
 
+/// A physical candidate's lifetime name (`None`, `OneEvaluation`,
+/// `AcrossEvaluations`).
+fn lifetime(physical: &Value) -> &str {
+    let lifetime = &physical["properties"]["lifetime"];
+    lifetime
+        .as_str()
+        .unwrap_or_else(|| lifetime.as_object().unwrap().keys().next().unwrap())
+}
+
 // The switches.
 
 /// `all=off` is accepted; a default run's document has no
@@ -346,6 +355,150 @@ fn rule1_two_ranges_sharing_windows_keep_the_optimum() {
         1_000,
         1_000,
     ));
+}
+
+// Rule 5: `OneEvaluation` only for a result two readers may read in one
+// evaluation (Stage 2).
+
+/// The live candidates at most one reader can read: one live consumer
+/// candidate's input over a satisfied edge, or one query output. Two
+/// candidates of one consumer group count twice (readout copies of one
+/// group may both be selected in one evaluation).
+fn candidates_read_at_most_once(document: &Value) -> BTreeSet<CandidateKey> {
+    let live = live_candidates(document);
+    let mut reads: BTreeMap<CandidateKey, usize> = live.keys().map(|&key| (key, 0)).collect();
+    for candidate in live.values() {
+        for input in candidate["inputs"].as_array().into_iter().flatten() {
+            let group = input["group"].as_u64().unwrap();
+            for edge in input["edges"].as_array().unwrap() {
+                let producer = (group, edge["producer"].as_u64().unwrap());
+                if edge["satisfies_logical_requirement"] == json!(true) {
+                    if let Some(count) = reads.get_mut(&producer) {
+                        *count += 1;
+                    }
+                }
+            }
+        }
+    }
+    for group in pass2_groups(document) {
+        let outputs = group["roots_of"].as_array().map_or(0, Vec::len);
+        let id = group["id"].as_u64().unwrap();
+        for (key, count) in reads.iter_mut() {
+            if key.0 == id {
+                *count += outputs;
+            }
+        }
+    }
+    reads
+        .into_iter()
+        .filter(|&(_, count)| count <= 1)
+        .map(|(key, _)| key)
+        .collect()
+}
+
+/// The physical candidate's logical candidate.
+fn logical_key(physical: &Value) -> CandidateKey {
+    (
+        physical["group"].as_u64().unwrap(),
+        physical["index_in_group"].as_u64().unwrap(),
+    )
+}
+
+/// A single quantile: a candidate one reader reads gets no
+/// `OneEvaluation` twin, there are fewer twins than with the rule off, and
+/// the plan costs the same.
+#[test]
+fn rule5_a_result_read_once_per_evaluation_gets_no_one_evaluation_twin() {
+    let workload = promql(
+        vec![repeating(
+            "quantile_over_time(0.99, m[5m])",
+            60_000,
+            0,
+            0.05,
+        )],
+        100,
+        1_000,
+    );
+    let pruned = plan(&workload, &raw_retained(), &[]);
+    let once = candidates_read_at_most_once(&pruned);
+    assert!(!once.is_empty(), "some candidate is read once");
+    let twins: Vec<&Value> = physical_candidates(&pruned)
+        .iter()
+        .filter(|physical| {
+            lifetime(physical) == "OneEvaluation" && once.contains(&logical_key(physical))
+        })
+        .collect();
+    assert_eq!(twins, Vec::<&Value>::new());
+    let unpruned = plan(&workload, &raw_retained(), &["one_evaluation_by_readers"]);
+    let one_evaluation_count = |document: &Value| {
+        physical_candidates(document)
+            .iter()
+            .filter(|physical| lifetime(physical) == "OneEvaluation")
+            .count()
+    };
+    assert!(one_evaluation_count(&pruned) < one_evaluation_count(&unpruned));
+    assert_same_cost(&pruned, &unpruned, "one_evaluation_by_readers");
+}
+
+/// `sum(rate(m[5m])) / count(rate(m[5m]))`: one `rate` group is read by
+/// both aggregates in each evaluation, so its query-time candidates keep
+/// their `OneEvaluation` twins (computed once, read twice).
+#[test]
+fn rule5_a_result_two_consumers_read_keeps_its_one_evaluation_twin() {
+    let workload = promql(
+        vec![repeating(
+            "sum(rate(m[5m])) / count(rate(m[5m]))",
+            60_000,
+            0,
+            0.05,
+        )],
+        100,
+        1_000,
+    );
+    let pruned = plan(&workload, &raw_retained(), &[]);
+    let once = candidates_read_at_most_once(&pruned);
+    let shared_twins = physical_candidates(&pruned)
+        .iter()
+        .filter(|physical| {
+            lifetime(physical) == "OneEvaluation" && !once.contains(&logical_key(physical))
+        })
+        .count();
+    assert!(
+        shared_twins > 0,
+        "a group read twice keeps its OneEvaluation twins"
+    );
+    let unpruned = plan(&workload, &raw_retained(), &["one_evaluation_by_readers"]);
+    assert_same_cost(&pruned, &unpruned, "one_evaluation_by_readers");
+}
+
+/// `sum(sum_over_time(m[5m] @ end()))` as a 10 min range request every
+/// 60 s at phases 0 and 30 s: Stage 3 runs the `@ end()` shift's input in
+/// one request context for both grids, so the input is read twice there
+/// and keeps its `OneEvaluation` twin, although one consumer edge reads it
+/// ([`candidates_read_at_most_once`] does not count the anchor twice); the
+/// plan costs what it costs with every twin.
+#[test]
+fn rule5_an_anchored_consumer_on_two_grids_keeps_the_optimum() {
+    let ranged = |phase_ms: u64| {
+        let mut entry = repeating("sum(sum_over_time(m[5m] @ end()))", 60_000, phase_ms, 0.05);
+        entry["range_evaluation"] = json!({"step_ms": 15_000, "span_ms": 600_000});
+        entry
+    };
+    let workload = promql(vec![ranged(0), ranged(30_000)], 100, 1_000);
+    let pruned = plan(&workload, &raw_retained(), &[]);
+    let once = candidates_read_at_most_once(&pruned);
+    let anchored_twins = physical_candidates(&pruned)
+        .iter()
+        .filter(|physical| {
+            lifetime(physical) == "OneEvaluation" && once.contains(&logical_key(physical))
+        })
+        .count();
+    assert!(
+        anchored_twins > 0,
+        "the anchored consumer's input keeps its OneEvaluation twin"
+    );
+    let unpruned = plan(&workload, &raw_retained(), &["one_evaluation_by_readers"]);
+    assert_same_cost(&pruned, &unpruned, "one_evaluation_by_readers");
 }
 
 // Rule 8a: identical candidates (fixed on main; a regression guard).

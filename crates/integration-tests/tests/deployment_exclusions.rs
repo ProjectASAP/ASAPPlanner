@@ -12,7 +12,7 @@ use asap_planner::{
     ExclusionSource, OperatorKind, PlanningModels, PlanningRun, RejectionCause, Selection,
     SelectionError, SketchAlgorithm, SketchParameterRange, SketchParams, SummaryFamily,
 };
-use asap_planner_cli::planning_stages::{lower_promql_roots, run_planning_stages_over};
+use asap_planner_cli::planning_stages::{lower_promql_roots, run_stages_until, RunUntil};
 use asap_types::deployment_capabilities::CandidateDescription;
 use asap_types::ir::flat::NodeId;
 use asap_types::ir::operator::arguments::Reduction;
@@ -21,7 +21,7 @@ use asap_types::ir::properties::ExecutionTiming::{self, IngestionTime, QueryTime
 use asap_types::ir::schema::FieldDataType;
 use asap_types::ir::{ASAPOp, NonASAPOp, Operator};
 use asap_types::plan::physical_asap_dag::{PhysicalASAPDAG, PhysicalASAPDAGNode};
-use asap_types::stages::{PhysicalProperties, PruneReason};
+use asap_types::stages::{PhysicalProperties, PruneReason, SearchSpacePruning};
 use asap_types::summary_type::ExactKind;
 use asap_types::workload::PlanningWorkload;
 
@@ -116,9 +116,22 @@ fn planned(workload: &PlanningWorkload, capabilities: &DeploymentCapabilities) -
     let models = PlanningModels::builtin()
         .with_cost_inputs(&cost_inputs)
         .with_deployment_capabilities(capabilities);
-    run_planning_stages_over(roots, &entries, &data, models)
-        .unwrap()
-        .run
+    // Every lifetime offered (rule 5 off): these tests count the
+    // alternatives each exclusion prunes.
+    let every_alternative = SearchSpacePruning {
+        one_evaluation_by_readers: false,
+        ..SearchSpacePruning::default()
+    };
+    run_stages_until(
+        roots,
+        &entries,
+        &data,
+        models,
+        every_alternative,
+        RunUntil::Stage3,
+    )
+    .unwrap()
+    .run
 }
 
 /// The capabilities of the default deployment plus the caller's
