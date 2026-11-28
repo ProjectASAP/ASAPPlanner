@@ -40,7 +40,7 @@ ahash = { version = "0.8", default-features = false, features = ["std", "runtime
 # `planner-pin/main-a05b35c-shrink-to-fit-dd-bounds` adds #273 (a DDSketch
 # computes its indexable bounds once, not on every add). Moves to main once
 # they merge.
-asap_sketchlib = { git = "https://github.com/ProjectASAP/asap_sketchlib", rev = "d050037bb127d425cb4160ea9b5960856ef3188c" }
+asap_sketchlib = { git = "https://github.com/ProjectASAP/asap_sketchlib", rev = "c5f786637766461532d5ee310436cae8bb61d152" }
 
 [profile.dev]
 # Backtraces and profilers keep file:line; full variable info is opt-in via
