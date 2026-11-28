@@ -1032,16 +1032,15 @@ pub(crate) fn node_usage_and_cost_terms<'a>(
             value_magnitude_range,
             distinct_values: folded_distinct_values(update),
         };
-        let state_bytes = measured_state_bytes.unwrap_or(summary_state_bytes(
-            family,
-            node.parameters.as_ref(),
-            input_rows,
-        )?);
-        let open_state_bytes = measured_state_bytes.unwrap_or(open_summary_state_bytes(
-            family,
-            node.parameters.as_ref(),
-            input_rows,
-        )?);
+        // A measured size replaces both, and the formulas (for a KLL, a
+        // run of its compaction schedule) are then not evaluated.
+        let (state_bytes, open_state_bytes) = match measured_state_bytes {
+            Some(bytes) => (bytes, bytes),
+            None => (
+                summary_state_bytes(family, node.parameters.as_ref(), input_rows)?,
+                open_summary_state_bytes(family, node.parameters.as_ref(), input_rows)?,
+            ),
+        };
         let update_terms_per_row = update_terms_per_row(
             family,
             node.parameters.as_ref(),

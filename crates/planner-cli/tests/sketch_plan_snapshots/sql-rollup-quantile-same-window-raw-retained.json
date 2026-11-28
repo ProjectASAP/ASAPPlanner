@@ -55,8 +55,8 @@
       }
     ],
     "cost": {
-      "cost_per_second": 1.61340004536e-8,
-      "cpu_core_seconds_per_second": 0.0013658013,
+      "cost_per_second": 1.61335171422e-8,
+      "cpu_core_seconds_per_second": 0.00136579923333,
       "per_node": {
         "0": {
           "cost_per_second": 4.9275745993e-10,
@@ -143,10 +143,10 @@
           "timing": "ingestion_time"
         },
         "5": {
-          "cost_per_second": 1.24019928275e-9,
+          "cost_per_second": 1.23973920939e-9,
           "cost_source": "analytical",
           "cpu_core_seconds_per_second": 0.0000659526666667,
-          "detail": "build KLL in tumbling windows of 60000 ms for 10 groups: 667 rows x 84 ops, 1 group visits, 0.2 states emitted; x 1.0000/s; keeps 433520 bytes",
+          "detail": "build KLL in tumbling windows of 60000 ms for 10 groups: 667 rows x 84 ops, 1 group visits, 0.2 states emitted; x 1.0000/s; keeps 433120 bytes",
           "ingest_cpu_core_seconds_per_second": 0.000065536,
           "multiplier": 1,
           "operator": "SummaryTumblingWindowChain",
@@ -157,10 +157,10 @@
           "timing": "ingestion_time"
         },
         "6": {
-          "cost_per_second": 1.03070066339e-13,
+          "cost_per_second": 1.03070066254e-13,
           "cost_source": "analytical",
           "cpu_core_seconds_per_second": 9.16666666667e-9,
-          "detail": "time range 300s: 5 tumbling windows of states; x 0.0167/s; holds 6292 bytes for 0.001 ms",
+          "detail": "time range 300s: 5 tumbling windows of states; x 0.0167/s; holds 6284 bytes for 0.001 ms",
           "ingest_cpu_core_seconds_per_second": 0.0,
           "multiplier": 1,
           "operator": "TimeRange",
@@ -171,15 +171,15 @@
           "timing": "query_time"
         },
         "7": {
-          "cost_per_second": 1.46929093285e-10,
+          "cost_per_second": 1.46905855211e-10,
           "cost_source": "analytical",
-          "cpu_core_seconds_per_second": 0.0000130670666667,
+          "cpu_core_seconds_per_second": 0.000013065,
           "detail": "merge 50 states into 10; x 0.0167/s; holds 199320 bytes for 0.784 ms",
           "ingest_cpu_core_seconds_per_second": 0.0,
           "multiplier": 1,
           "operator": "SummaryMerge",
           "priced_outside_measured_scale": false,
-          "query_ms_per_step": 0.784024,
+          "query_ms_per_step": 0.7839,
           "refresh_cpu_ms_per_window": 0.0,
           "refresh_wall_ms_per_window": 0.0,
           "timing": "query_time"
@@ -215,17 +215,17 @@
       },
       "source": "analytical-cost-v2 (illustrative statistics)",
       "usage": {
-        "average_memory_bytes": 436067.140613,
-        "cpu_ops_per_second": 1346599.7,
+        "average_memory_bytes": 435667.140201,
+        "cpu_ops_per_second": 1346597.63333,
         "disk_bytes": 9600000,
         "latency_per_query": [
           {
             "allowed_lateness_ms": 0.0,
             "evaluations_per_second": 0.0166666666667,
-            "latency_ms": 1.013802,
+            "latency_ms": 1.013678,
             "precompute_execution_ms": 0.025,
             "precompute_queueing_ms": 0.0,
-            "query_execution_ms": 0.988802
+            "query_execution_ms": 0.988678
           },
           {
             "allowed_lateness_ms": 0.0,
@@ -237,7 +237,7 @@
           }
         ],
         "peak_cpu_cores": 3,
-        "peak_memory_bytes": 2719364,
+        "peak_memory_bytes": 2718956,
         "precompute_load": 4.16666666667e-7,
         "recommended_configuration": {
           "ingest": {
@@ -249,7 +249,7 @@
             "recommended_threads": 1
           },
           "query": {
-            "predicted_busy_thread_seconds_per_second": 0.00129598003333,
+            "predicted_busy_thread_seconds_per_second": 0.00129597796667,
             "recommended_threads": 1
           }
         },

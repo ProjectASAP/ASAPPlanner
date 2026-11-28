@@ -26,8 +26,7 @@
 //! fewer requirements. Sketches that keep up to `k` items (KLL, KMV, Hydra
 //! over KLL) are left as they are: once `k` reaches the values a state
 //! holds they keep every value and stop compacting, so a larger `k` can
-//! cost less (a stored KLL window at k = 1,404 costs less than one at
-//! k = 547 in the `deployment_exclusions` example). A set one of whose θs a
+//! cost less. A set one of whose θs a
 //! deployment exclusion's θ range matches is left as it is too: Stage 2 may
 //! prune the smaller θ. Places are compared by (group, operator) only, not
 //! by the edges inside the set: an edge between two θ candidates never

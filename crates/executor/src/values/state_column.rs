@@ -288,11 +288,20 @@ impl StateColumn {
     /// them: a family with a view layout (DDSketch, KLL, Count-Min) in that
     /// layout ([`Self::from_sealed_views`]), the layout the cost model
     /// prices a sealed state at; any other family as owned sketches, the
-    /// form it is priced at. A chain's own windows, a query-time build and
-    /// a level merged from narrower windows all seal here.
-    pub(crate) fn sealed(family: FieldDataType, states: Vec<Arc<dyn AggregateCore>>) -> Self {
-        Self::from_sealed_views(family.clone(), states.iter().cloned())
-            .unwrap_or_else(|| Self::from_objects(family, states))
+    /// form it is priced at, shrunk (no update or merge follows, so each
+    /// state held only here drops the room they grow). A view holds only
+    /// what a state retains, so a state copied into one is not shrunk. A
+    /// chain's own windows, a query-time build and a level merged from
+    /// narrower windows all seal here.
+    pub(crate) fn sealed(family: FieldDataType, mut states: Vec<Arc<dyn AggregateCore>>) -> Self {
+        Self::from_sealed_views(family.clone(), states.iter().cloned()).unwrap_or_else(|| {
+            for state in &mut states {
+                if let Some(owned) = Arc::get_mut(state) {
+                    owned.shrink_to_fit();
+                }
+            }
+            Self::from_objects(family, states)
+        })
     }
 
     /// The sealed sketch `states` of `family`, stored in their view layout

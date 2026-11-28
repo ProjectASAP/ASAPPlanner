@@ -1371,11 +1371,12 @@ async fn merge_summary_streaming(
                 .collect(),
         )
     } else if shape.seal {
-        // A stored level's windows, sealed as a chain seals its own.
+        // A stored level's windows, sealed as a chain seals its own (which
+        // shrinks only states it keeps as objects).
         let merged: Vec<_> = objects
-            .finish()
+            .finish_partial()
             .into_iter()
-            .map(|(state, _)| state)
+            .map(|state| state.expect("every group has a row").0)
             .collect();
         StateColumn::sealed(family.clone(), merged)
     } else {

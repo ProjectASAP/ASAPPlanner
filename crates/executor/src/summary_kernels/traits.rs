@@ -40,8 +40,9 @@ pub trait AggregateCore: Send + Sync {
     fn approx_memory_bytes(&self) -> usize;
 
     /// Free what the state holds only for later updates and merges, once
-    /// no more come (a sealed window, a finished merge). Answers, merges
-    /// and encodings are unchanged; a state that holds no such room keeps
+    /// no more come (a sealed window kept as an object, a finished merge).
+    /// Answers and merges are unchanged; an encoding may be shorter but
+    /// decodes to the same answers. A state that holds no such room keeps
     /// the default, which does nothing.
     fn shrink_to_fit(&mut self) {}
 

@@ -295,11 +295,13 @@ fn kll_state_bytes_grow_with_the_samples_it_sees() {
         assert_eq!(sealed(Some(u64::from(n))), view_bytes(n, 1), "{n} samples");
         assert_eq!(open(Some(u64::from(n))), open_bytes(n, 1), "{n} samples");
     }
-    // Past `k`, the most the compaction schedule leaves over its seeds 1 to
-    // 16, the library's own coin: sealed, of the view's levels and items;
+    // Past `k`, the most the compaction schedule leaves over its seeds
+    // (`KLL_SIMULATED_SEEDS`), the library's own coin: sealed, of the view's levels and items;
     // open, of the buffer and of the compaction scratch.
     for n in [k + 1, 1_000, 5_000, 100_000] {
-        let most = |bytes: &dyn Fn(u32, u64) -> u64| (1..=16).map(|seed| bytes(n, seed)).max();
+        let most = |bytes: &dyn Fn(u32, u64) -> u64| {
+            kll::KLL_SIMULATED_SEEDS.map(|seed| bytes(n, seed)).max()
+        };
         assert_eq!(
             sealed(Some(u64::from(n))),
             most(&view_bytes).unwrap(),
@@ -523,10 +525,10 @@ fn state_bytes_bound_the_executors_charge() {
             // layout, any other sketch shrunk; a KLL or Count-Min
             // accumulator is the owned sketch before it is sealed into its
             // view, priced open, so a KLL stays unshrunk.
+            let mut state = updater.into_accumulator();
             if !matches!(algorithm, A::KLL) {
-                updater.shrink_to_fit();
+                state.shrink_to_fit();
             }
-            let state = updater.into_accumulator();
             let charged = match params {
                 SketchParams::DDSketch { alpha } => {
                     sealed_ddsketch_bytes(*alpha, &[fed]).round() as usize
@@ -551,7 +553,7 @@ fn state_bytes_bound_the_executors_charge() {
             match priced_as {
                 Priced::Exact => assert_eq!(charged, priced, "{context}"),
                 Priced::Kll { k } if n <= *k => assert_eq!(charged, priced, "{context}"),
-                // Past `k` rows, the open buffer and scratch over 16 seeds.
+                // Past `k` rows, the open buffer and scratch over the seeds.
                 Priced::Kll { .. } => assert!(
                     (0.95..=1.25).contains(&(priced as f64 / charged as f64)),
                     "{context}, {charged} charged"
@@ -804,10 +806,11 @@ fn priced_bytes_agree_with_the_executor() {
         // Count-Min accumulator is the owned sketch before it is sealed
         // into its view: priced open, so a KLL stays unshrunk (its buffer
         // and, past `k` rows, its compaction scratch).
+        let mut state = updater.into_accumulator();
         if !matches!(family, FieldDataType::Sketch(A::KLL)) {
-            updater.shrink_to_fit();
+            state.shrink_to_fit();
         }
-        let charged = updater.into_accumulator().approx_memory_bytes() as u64;
+        let charged = state.approx_memory_bytes() as u64;
         let price = match family {
             FieldDataType::Sketch(A::KLL | A::CountMinSketch) => open_summary_state_bytes,
             _ => summary_state_bytes,

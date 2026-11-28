@@ -24,11 +24,12 @@ const KLL_VIEW_HEADER_BYTES: u64 = 40;
 /// 2^20 rows run about 10^5 compactions per seed.
 const KLL_SIMULATED_ROWS_MAX: u64 = 1 << 20;
 
-/// Coin seeds [`kll_held_after`] runs the schedule with (1 to 16), taking
+/// Coin seeds [`kll_held_after`] runs the schedule with (1 to 4), taking
 /// the most any seed leaves: enough that it bounds the mean state of a column
 /// (at 1,100 rows and `k` = 200 a state retains 183 to 186 items; four
-/// seeds leave at most 185, sixteen 186).
-const KLL_SIMULATED_SEEDS: std::ops::RangeInclusive<u64> = 1..=16;
+/// seeds leave at most 185, sixteen 186). Each seed is one run of the
+/// schedule, so more seeds cost planning time for little change.
+pub(super) const KLL_SIMULATED_SEEDS: std::ops::RangeInclusive<u64> = 1..=4;
 
 /// Bytes a sealed KLL of `k` holds after folding `input_rows`, as the
 /// executor keeps it: in its view layout (`Kll::to_view_bytes`), a 40-byte
@@ -143,7 +144,7 @@ impl KllHeld {
 ///
 /// Results are cached by `(k, rows)`: planning prices the same states many
 /// times, and near [`KLL_SIMULATED_ROWS_MAX`] one run of all seeds takes
-/// about 30 ms.
+/// about 8 ms.
 fn kll_held_after(k: u64, rows: u64) -> KllHeld {
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
@@ -311,7 +312,7 @@ fn kll_max_capacity(k: u64) -> u64 {
 }
 
 /// Items of compaction scratch an open KLL of `k` holds at most, the bound
-/// `asap_sketchlib`'s `Kll::estimated_memory_bytes` takes: `2 (k - 1)` (a
+/// `asap_sketchlib`'s `Kll::theoretical_memory_bytes` takes: `2 (k - 1)` (a
 /// compaction copies at most `k` items, and the scratch grows to at most
 /// about twice that).
 fn kll_scratch_bound_items(k: u64) -> u64 {
