@@ -126,7 +126,7 @@ each root's batches
 | Type | What it holds | Where |
 |---|---|---|
 | `Memo` | The memo groups, each query's root over them (`MemoQuery`) and each group's candidates; one type for Stage 0 and Stage 1 | `types/src/stages/logical/memo/mod.rs` |
-| `MemoGroup` | One distinct logical sub-expression: its expression, the groups that read it, the queries that reach it and its candidates | `types/src/stages/logical/group/mod.rs` |
+| `MemoGroup` | One distinct logical sub-expression: its expression, its group properties, the groups that read it, the queries that reach it and its candidates | `types/src/stages/logical/group/mod.rs` |
 | `CandidateForMemoGroup` | One way to implement a group: `expression`, `logical_properties` (θ), `input_requirements`, `fused_groups`, `origin` (`OriginOfCandidateForMemoGroup`) | `types/src/stages/logical/candidate/mod.rs` |
 | `LogicalASAPMemoCandidates` | Pass 2's memo, its logical edges (`LogicalEdge`), the pruned logical candidates, each group's evaluation grid and, per query, the groups it may read only exactly | `types/src/stages/logical/memo_candidates.rs` |
 | `SearchSpacePruning` | Which exact search-space pruning rules run (today `threshold_theta`, read by Pass 2); set through `PlanSearchSettings::search_space_pruning`, default every rule | `types/src/stages/search_space_pruning.rs` |

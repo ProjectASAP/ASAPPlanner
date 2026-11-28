@@ -250,7 +250,7 @@ two readouts. It does not determine when KLL states are built or retained.
 
 **Stage 2 Materialization (#509)** will choose when states are built and how
 long they are retained, using workload demand, window/freshness requirements
-and supported physical implementations. The runtime's selection uses runtime
+and supported physical implementations. The runtime selects by
 feasibility and cost after physical compilation. Retained state includes
 maintained populations (for example, the current series of
 `topk by(job)(1, m)`), which keep the latest sample per series at ingestion and

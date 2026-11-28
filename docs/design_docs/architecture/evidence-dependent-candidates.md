@@ -126,13 +126,6 @@ target still excludes uncertified summaries. Supplying known-invalid Hydra
 evidence (for example a failure probability of `1.5`) instead produces a
 `RejectedCandidate` with a reason, not a selectable alternative.
 
-The corresponding reproducible checks are
-`cargo test -p asap-frontend-promql grouped_count_keeps_uncertified_hydra_candidates_for_backend_review`,
-`cargo test -p asap-frontend-promql uncalibrated_frequency_evaluations_do_not_bypass_accuracy_targets`,
-and `cargo test -p asap-integration-tests ddsketch_ratio_without_domain_proof_is_uncertified`.
-All three start from PromQL text and exercise frontend lowering and planning.
-None runs a deployed query.
-
 For a workload containing `quantile_over_time(0.9,data[5m]) /
 quantile_over_time(0.5,data[5m])`, search with no accuracy evidence and a root
 target may expose a direct DDSketch ratio candidate. Its missing domain proof
