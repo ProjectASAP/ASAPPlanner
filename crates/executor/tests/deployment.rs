@@ -1,4 +1,4 @@
-//! Exercise the public library without a backend server, store, or scheduler.
+//! Exercise the public library without a deployment runtime's server, store, or scheduler.
 use asap_executor::planner::ir::scalar::ColumnRef;
 use asap_executor::planner::ir::schema::FieldDataType;
 use asap_executor::planner::summary_type::{SketchAlgorithm, SketchParams, SummaryUpdate};
@@ -58,7 +58,7 @@ fn invalid_kll_parameters_are_rejected_at_binding() {
     assert!(result.is_err());
 }
 
-// Native CountSketch supports the confidence-sized depth used by the backend;
+// Native CountSketch supports the confidence-sized depth a runtime uses;
 // a packed-wire column-bit budget must not be imposed on this constructor.
 #[test]
 fn native_count_sketch_dimensions_are_not_packed_wire_dimensions() {

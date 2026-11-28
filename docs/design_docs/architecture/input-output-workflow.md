@@ -2,8 +2,8 @@
 
 ## Overview
 
-This document is for library integrators such as ASAPQuery-backend, not users
-submitting queries through a backend.
+This document is for library integrators, such as a deployment runtime, not
+users submitting queries through a runtime.
 
 ASAPPlanner is a **planning library**. Its input is a planning workload plus
 the deployment's inputs: its accuracy model, cost inputs (the
@@ -61,7 +61,7 @@ flowchart TD
     S1["Stage 1: exact accumulator or plain exact; tumbling windows"]
     S2["Stage 2: each summary build at query time or maintained at ingestion time"]
     S3["Stage 3: check and price every physical candidate; select one"]
-    B["Backend: compile, deploy and execute the selected plan"]
+    B["Deployment runtime: compile, deploy and execute the selected plan"]
     Q --> F
     D --> F
     F --> S1 --> S2 --> S3 --> B
@@ -271,7 +271,7 @@ quantile_over_time(0.5, data[5m])` does not tell Planner whether the windows
 are nonempty or their values strictly positive. Such domain facts help prove
 that the denominator is nonzero and derive an approximation error bound;
 they are not themselves the complete accuracy proof. A declared constraint or
-backend observation must cover the relevant data, not just an earlier window.
+runtime observation must cover the relevant data, not just an earlier window.
 
 Evidence is input; a derived guarantee or rejection reason is output. Missing
 facts do not establish either validity or invalidity: Planner cannot claim a
@@ -291,7 +291,7 @@ queries, in `QueryWorkload::entries()` order. Its cost is
 (`accepted_accuracy_per_query`, `pruned_candidates` and the selection MILP's
 size and times), is `run_planning`'s, beside the plan.
 
-Planner selects because it now has the inputs a backend used to own: the
+Planner selects because it now has the inputs a runtime used to own: the
 deployment declares its cost model, measurements and capabilities, and every
 alternative stays visible in `PlanningRun`.
 

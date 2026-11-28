@@ -15,9 +15,9 @@ execution remain downstream. The
 |---|---|---|
 | Logical candidate semantics | ASAPPlanner | Query rewrite; summary family and parameters; grouping; accuracy guarantees when established. |
 | Summary materialization and realization selection | ASAPPlanner Stage 2 materialization (#509) | a timing and a lifetime per sub-DAG (`None`, `OneEvaluation(medium)` or `AcrossEvaluations(medium)`), and how much a materialized output retains; direct build or incremental update; window implementations compared using provider evidence. |
-| Concrete implementation and deployment | ASAPQuery-backend and its workload optimizer | Library and data-structure implementation, exact tumbling-window layout, placement, sharding, storage, transmission, materialization IDs, executor configuration, and workload-wide assignment. |
+| Concrete implementation and deployment | The deployment runtime and its workload optimizer | Library and data-structure implementation, exact tumbling-window layout, placement, sharding, storage, transmission, materialization IDs, executor configuration, and workload-wide assignment. |
 
-ASAPCollector and the ASAPQuery data plane execute the compiled downstream
+The runtime's ingestion and query components execute the compiled downstream
 plans. They validate capabilities and plan identities, maintain or read the
 specified state, and report runtime observations. They do not silently choose
 a different summary, materialization, or realization framework.
@@ -31,16 +31,16 @@ planner-visible window realization—such as tumbling windows, sliding windows o
 exponential histogram—because those alternatives have different accuracy,
 CPU, memory, and I/O behavior.
 
-ASAPQuery-backend then implements the selected framework. For example, after
-Planner chooses a sliding-window realization, the backend chooses the concrete
+The runtime then implements the selected framework. For example, after
+Planner chooses a sliding-window realization, the runtime chooses the concrete
 tumbling window representation, runtime operator implementation, placement, sharding,
-watermark behavior, and materialization identifiers. ASAPCollector maintains
-the compiled tumbling windows and summary state.
+watermark behavior, and materialization identifiers. Its ingestion component
+maintains the compiled tumbling windows and summary state.
 
 Thus incremental update describes how state is maintained, while tumbling,
 sliding, and exponential-histogram describe realization algorithms. They are
 distinct axes, but both can participate in ASAPPlanner's candidate space. The
-backend still owns how the selected algorithms are physically realized.
+runtime still owns how the selected algorithms are physically realized.
 
 ## Summary-algorithm analogy
 
@@ -77,10 +77,10 @@ activation, and rollback are not an end-to-end Planner protocol.
    optimistic zeroes are not substitutes.
 5. ASAPPlanner outputs the selected Post-ASAP semantics, materialization choices,
    realization contract, and chosen provider identity.
-6. ASAPQuery-backend compiles that result into consistent `CollectorPlan`,
-   `BackendPlan`, and `QueryPlan` projections and performs deployment-level and
-   workload-wide optimization.
-7. ASAPCollector and the ASAPQuery data plane validate and execute those plan
+6. The runtime compiles that result into consistent ingestion, storage and
+   query projections and performs deployment-level and workload-wide
+   optimization.
+7. The runtime's ingestion and query components validate and execute those plan
    projections and return observations for future planning.
 
 The provider may run steps 2–4 repeatedly. For example, it can submit several
@@ -107,7 +107,7 @@ space without moving executor implementation into ASAPPlanner.
 
 Candidate comparison and workload-wide deployment optimization are different
 problems. When requested, ASAPPlanner selects among summary and realization alternatives;
-ASAPQuery-backend retains ownership of facility-location decisions: sharing a
+the runtime retains ownership of facility-location decisions: sharing a
 deployed configuration across atomic queries, assigning queries to deployments,
 choosing hosts, and satisfying cluster capacity.
 
@@ -138,7 +138,7 @@ in one cost formula.
 - Shared logical nodes remain shared across the planner-runtime contract; physical sharing
   additionally requires compatible filters, grouping, windows, parameters,
   materialization, and guarantees.
-- Collector, backend, and query plans are projections of one compiled decision
+- Ingestion, storage, and query plans are projections of one compiled decision
   and cannot be optimized independently into inconsistent semantics.
 
 ## Related documents
@@ -146,6 +146,5 @@ in one cost formula.
 - [Post-ASAP IR](../concepts/post-asap-ir.md)
 - [Physical plan integration](physical-plan-integration.md)
 - [Analytical resource cost](../proposals/asap-aware-mapping/analytical-resource-cost.md)
-- [ASAPCollector physical compilation](https://github.com/ProjectASAP/ASAPCollector/blob/87684f4b61514382d8b087724694f93187bfc19c/docs/design_docs/control-plane/post-asap-physical-compilation.md)
 - [ASAPQuery configuration formulation](https://github.com/ProjectASAP/ASAPQuery/blob/main/.design_docs/sketch-config-optimization-formulation.md)
 - [ASAPQuery optimizer MIP formulation](https://github.com/ProjectASAP/ASAPQuery/blob/main/.design_docs/optimizer-mip-formulation.md)

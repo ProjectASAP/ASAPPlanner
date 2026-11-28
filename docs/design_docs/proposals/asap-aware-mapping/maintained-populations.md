@@ -136,7 +136,7 @@ not automatically cheaper than independent or native execution.
 The executor owns record identity, input completeness, replacement/retraction,
 coverage, freshness, atomic publication and resource limits. Missing coverage,
 unsupported semantics or exhausted resources must not produce a partial result
-advertised as exact. The backend's current-series implementation rejects evaluations
+advertised as exact. A runtime's current-series implementation rejects evaluations
 older than retained state and falls back while coverage is insufficient.
 
 At the PR #404/#700 implementation boundary, current-series populations are deployable;
@@ -180,7 +180,7 @@ average; the outer sketch candidate remains available.
   scalar readouts, and the SQL table-row cases, are acceptance tests for its
   reimplementation. IR tests cover invalid value-column rejection and
   lookback agreement.
-- Backend admission rejects a table-row producer when only a current-series executor
+- Runtime admission rejects a table-row producer when only a current-series executor
   is available.
 - Process tests compare current-series replacements and expiry with Prometheus 3.5.
 - The UnivMon process test installs one compatible materialization for all three

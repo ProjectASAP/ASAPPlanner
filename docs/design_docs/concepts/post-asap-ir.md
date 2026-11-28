@@ -109,7 +109,7 @@ for the corresponding correctness and realization requirements.
 
 An operator defines what computation happens. The plan decides when it
 happens: **ingestion time** or **query time**. Operator identity must not imply
-one of these phases. Backend capability restrictions are implementation gaps,
+one of these phases. Runtime capability restrictions are implementation gaps,
 not definitions of the operator.
 
 Operator nodes carry no physical properties: the logical DAG has no timing
@@ -256,7 +256,7 @@ of the same computation, not separate summary semantics.
 
 This follows the evidence-dependent candidate contract from #455. Missing
 population or margin evidence is exported as symbolic unknown terms, rather than
-erasing a constructible summary. Backend/runtime/deployment inspects these
+erasing a constructible summary. The deployment runtime inspects these
 requirements and supplies applicable evidence before selection and installation.
 Re-running planning with that provider resolves guarantees and may resize the
 candidate. Known-invalid evidence or known bounds that already miss the target

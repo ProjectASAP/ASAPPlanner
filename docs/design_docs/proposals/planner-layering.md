@@ -1,7 +1,7 @@
 # ASAPPlanner Planning Stages Design
 
-Status: proposal. Audience: designers and developers of ASAPPlanner and of deployments such
-as ASAPQuery-backend.
+Status: proposal. Audience: designers and developers of ASAPPlanner and of the deployment
+runtimes that run its plans.
 
 Read Problem Definition for the motivation and requirements, ASAPPlanner Design
 for the design intuition, assumptions and stage overview, the stage sections for
@@ -277,10 +277,9 @@ lists each stage's input and output types.
 | Concrete summary-state group | a `MemoGroup` whose node is a `SummaryAgg` or a `SummaryTumblingWindowChain` | One summary state at one size, or one tumbling-window chain at one layout, that several readers may share. A choice several groups depend on, such as a shared size or a tumbling-window grid, is one concrete group per value, when two or more readers may read that value, and each of them gets a candidate reading that group: of two readers needing a KLL with `k ≥ 345` and `k ≥ 200`, both may read a group `KLL(345)`, and the second may also keep its own private `KLL(200)`. Choosing a value is choosing a group, so the memo has no separate type for such a choice. The other Pass 2 rules add groups too (below). |
 
 **Stage 0: hash-consing.** Hash-consing merges structurally equal nodes into
-one. It makes no implementation choice, so this section counts it as Stage 0
-(its output); the code runs it as Stage 1 starts, which is why
-[Stage inputs and outputs](#stage-inputs-and-outputs-whole-workload-candidates-and-memo)
-lists `memo_of_queries` with Pass 1. `memo_of_queries`
+one. It makes no implementation choice, so it is Stage 0's second step,
+after the frontends: Stage 0's output is the memo without candidates.
+`memo_of_queries`
 (`crates/stage0-memo/src/lib.rs`) visits the frontends' roots children first
 and finds or adds each node's group with `Memo::find_or_add_group`, whose
 expression equality is in `crates/types/src/stages/logical/memo/hash_consing/mod.rs`. Two structurally equal nodes
@@ -575,11 +574,11 @@ the memo path's entry points.
 
 | Stage | Whole-workload candidates: input → output | Memo: input → output | Entry point (memo path) |
 |---|---|---|---|
-| 0. Frontends | Query text, language → one logical root per query, carrying its accuracy target | Same: a `QueryRoot` per query | `lower_promql_query_workload`, `lower_sql_dialect` (`asap-frontend-*`); `plan_installable` (`asap_planner`) runs the frontends and Stages 1–3 on the user input |
-| 1, Pass 1 | Logical roots; the deployment's exclusions → the Pass 1 inventory, every computation's candidates (no longer in the code) | Logical roots → Stage 0's `Memo` (hash-consed `MemoGroup`s); with the Pass 1 inventory, less the summaries the deployment's exclusions rule out outright (an unsupported sketch algorithm, or the readout the measure needs) → the same `Memo` with each group's `CandidateForMemoGroup`s (a summary with one build per configuration of its `parameter_list`) | `memo_of_queries`, `pass1_memo` |
+| 0. Frontends and hash-consing | Query text, language → one logical root per query, carrying its accuracy target | Query text → a `QueryRoot` per query → `Memo` (hash-consed `MemoGroup`s, no candidates) | `lower_promql_query_workload`, `lower_sql_dialect` (`asap-frontend-*`), then `memo_of_queries` (`asap_stage0_memo`); `plan_installable` (`asap_planner`) runs Stages 0–3 on the user input |
+| 1, Pass 1 | Logical roots; the deployment's exclusions → the Pass 1 inventory, every computation's candidates (no longer in the code) | Stage 0's `Memo`; with the Pass 1 inventory, less the summaries the deployment's exclusions rule out outright (an unsupported sketch algorithm, or the readout the measure needs) → the same `Memo` with each group's `CandidateForMemoGroup`s (a summary with one build per configuration of its `parameter_list`) | `pass1_memo` |
 | 1, Pass 2 | One Pass 1 choice per computation → that choice rewritten by each sharing rule, every subset of sharing choices (no longer in the code) | `Memo`; the entries' recurrence and range steps → `LogicalASAPMemoCandidates`: the same memo with the rules' groups and candidates added (rollup, top-k reuse, chain groups), each readout's required accuracy, the logical edges between the surviving candidates, the pruned candidates and, per query, the groups it may read only exactly | `generate_logical_asap_memo_candidates` (`asap_stage1_pass2_reuse_candidates`) |
 | 2 | One whole-workload logical candidate; entries (recurrence, predictability), `DataWorkload`, the deployment's exclusions → its physical candidates, one per physical properties assignment | `LogicalASAPMemoCandidates` (with each group's evaluation grid); `DataWorkload` (arrival), the deployment's exclusions (`DeploymentCapabilities::exclusions`) → `PhysicalASAPMemoCandidates`: every logical candidate Pass 2 kept with each offered timing and lifetime (one physical candidate each, no copies), every logical edge expanded into physical edges with $\alpha^{\log}$ and $\alpha^{\mathrm{phys}}$, and the pruned alternatives (`PrunedCandidate<PhysicalCandidate>`) | `generate_physical_asap_memo_candidates` (`asap_stage2_physical_optimization`) |
-| 3 | Every physical candidate; accuracy targets, accuracy model and evidence, cost model → one plan | `PhysicalASAPMemoCandidates`; entries, `DataWorkload`, `AccuracyCheckInputs`, `CostInputs`, Stage 2's realizer → `Selection`: the selected plan (`selected_dag`, a `DagOfSelectedCandidates`: one node per run of a candidate, so a candidate recomputed by two readers or shared as two instances over different inputs is two nodes, with an edge per input), its cost, the accepted accuracy per query and the search report | `select_plan` (`asap_stage3_plan_selection`); the facade (`run_planning`, output `PlanningRun`) runs it once and builds the selected `PhysicalWorkloadPlan` with `AssignmentRealizer::realize`, one plan node per selected node |
+| 3 | Every physical candidate; accuracy targets, accuracy model and evidence, cost model → one plan | `PhysicalASAPMemoCandidates`; entries, `DataWorkload`, `CostInputs`, the deployment's final-results cache → the selected `PhysicalASAPDAG` and `Selection`: the accepted accuracy per query, the pruned candidates, the selected plan's cost and the search report | `select_plan` (`asap_stage3_plan_selection`), which builds the plan; the facade (`run_planning`, output `PlanningRun`) runs it once |
 | 4. Execution | The selected `PhysicalASAPDAG` → query results | Same: an `InstallablePlan` (`{dag, query_texts}`) → query results | The deployment runtime installs the `InstallablePlan` |
 
 What changed with the memo:
@@ -604,6 +603,10 @@ faithfully is rejected.
 
 The frontend preserves source-language behavior, including series identity,
 evaluation timing and missing-data semantics.
+
+Stage 0's second step, hash-consing (`memo_of_queries`), merges the frontends'
+roots into the memo groups ([Memo components](#memo-components)); Stage 0's
+output is the `Memo` without candidates.
 
 ### 1. Logical ASAP-aware optimization
 

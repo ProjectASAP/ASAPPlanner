@@ -1,23 +1,23 @@
 # Physical compile coverage for deployment computation
 
-Audience: developers moving computation from ASAPQuery-backend into
+Audience: developers moving computation from a deployment runtime into
 `asap_executor::physical_planner`.
 
 ## Contract
 
 Logical selection decides what to compute. A `PhysicalPropertiesAssignment` sets
 node timing (Stage 2 materialization chooses it per physical candidate). `physical_planner::compile` turns a timed `PhysicalASAPDAG` into physical
-operator DAGs. The backend owns ingestion, tumbling windows, storage, stored-state
+operator DAGs. The runtime owns ingestion, tumbling windows, storage, stored-state
 evaluation, external exact engines, pricing/selection, and execution scheduling.
 
-A backend lowering is *covered* when `compile` accepts the corresponding
-`PhysicalASAPDAG` node and produces operators with the same result. The backend
+A runtime lowering is *covered* when `compile` accepts the corresponding
+`PhysicalASAPDAG` node and produces operators with the same result. The runtime
 should then pass the timed DAG and its input slot nodes to `compile`. It should
 not rebuild operator choices from PromQL text or construct operators itself.
 
 ## Inventory
 
-Surveyed backend: `ASAPQuery-backend` branch `perf/788-startup-search`.
+Surveyed: a deployment runtime's PromQL query path.
 Planner base: `split/462-f-physical-planner` (#475).
 
 `Fallback` below names the legacy wrapper node of that base. #543 removed it:
@@ -29,9 +29,9 @@ Status values:
 - **Supported**: `compile` or `compile_node` already covers this computation.
 - **Partial**: some shapes are covered. The Notes column lists the gap.
 - **Missing**: `compile` rejects this computation.
-- **Backend**: not computation, or owned by the backend.
+- **Runtime**: not computation, or owned by the runtime.
 
-| # | Backend site | Computation | Planner node | Status at #475 | Notes |
+| # | Runtime site | Computation | Planner node | Status at #475 | Notes |
 |---|---|---|---|---|---|
 | 1 | `query_time.rs` `Lower::lower`, `compile_logical` | PromQL AST → `QueryTimeOperator` DAG for a native query | `Fallback { QueryExpr }` sub-DAGs plus value payloads | Missing | `compile` lowers `Fallback` only as a raw `Scan` source. |
 | 2 | `QueryTimeOperator::Aggregate` (sum/min/max/avg/count) | Grouped value aggregation | `Value::Exact(Aggregate)`; `SummaryAgg{ExactAggregate, Reduce}` over finalized values | Supported | Also `promql_values::compile_aggregate`. |
@@ -46,13 +46,13 @@ Status values:
 | 11 | `QueryTimeOperator::Temporal` (rate, increase, `*_over_time`) | Per-series window functions | `SummaryAgg{PerEntity}` over `TimeRange(Scan)` | Partial | Supported with closed series identity. Not supported over `Fallback` matrices (`compile_temporal` only). |
 | 12 | `logical_dag.rs` `Subquery`, `subquery_grid`, `expanded_inputs` | Re-evaluate the child on a step grid and assemble a matrix | `Fallback{PromqlSubquery}` | Missing | No Planner operator. |
 | 13 | `QueryPlanNode::Scalar`, `DAGCompiler::lower` scalar literal | Scalar constant | `Fallback{PromqlScalarBridge(Literal)}` | Missing | Only `promql_values::compile_scalar`. |
-| 14 | `DAGCompiler::lower` `ReduceSum`; `physical_values.rs` PerEntity projection | Sum over finalized values; per-entity identity | `SummaryAgg{ExactAggregate(Sum)}` | Supported | The backend builds an identity `Operator::project` itself for PerEntity. |
+| 14 | `DAGCompiler::lower` `ReduceSum`; `physical_values.rs` PerEntity projection | Sum over finalized values; per-entity identity | `SummaryAgg{ExactAggregate(Sum)}` | Supported | The runtime builds an identity `Operator::project` itself for PerEntity. |
 | 15 | `DAGCompiler::lower` `ExactReadout`; `post_asap_readout.rs` ExactReadout | Finalize exact state (sum/count/min/max/rate/increase) | `Value::FinalizeExactAccumulator` | Partial | Count yields Int64 against a declared Float64 PromQL value. `compile` rejects it. |
-| 16 | `post_asap_readout.rs` SummaryEstimate (`readout_bound`, `expand_item_rows`) | Sketch estimate per group; TopK item expansion | `SummaryEstimate` | Partial | The backend's label-map state layout and MetricsQL `__name__` rules have no Planner equivalent. `compile_exact_evaluation` has no sketch counterpart. |
+| 16 | `post_asap_readout.rs` SummaryEstimate (`readout_bound`, `expand_item_rows`) | Sketch estimate per group; TopK item expansion | `SummaryEstimate` | Partial | The runtime's label-map state layout and MetricsQL `__name__` rules have no Planner equivalent. `compile_exact_evaluation` has no sketch counterpart. |
 | 17 | `post_asap_readout.rs` SummaryMerge (`merge_bound_states`) | Merge states by group | `SummaryMerge` | Supported | Union plus `summary_merge`. |
 | 18 | `post_asap_readout.rs` counter range parameters | Counter lookback for rate/increase | `TimeRange` ancestor of finalization | Supported | Applied through `with_counter_lookback`. |
-| 19 | `post_asap_readout.rs` `execute_value_fragment` | Per-timestamp binding of a value fragment | n/a | Backend | Evaluation scheduling. |
-| 20 | `DAGCompiler::lower` SummaryJoin / Subtract / Delete | Summary algebra | `SummaryJoin`, `SummarySubtract`, `SummaryDelete` | Missing | The backend also rejects these (`ExactFallback`). |
+| 19 | `post_asap_readout.rs` `execute_value_fragment` | Per-timestamp binding of a value fragment | n/a | Runtime | Evaluation scheduling. |
+| 20 | `DAGCompiler::lower` SummaryJoin / Subtract / Delete | Summary algebra | `SummaryJoin`, `SummarySubtract`, `SummaryDelete` | Missing | The runtime also rejects these (`ExactFallback`). |
 | 21 | `current_series.rs` Snapshot + TopK | Current-series ranking | `EvaluatePopulation{TopK}` | Supported | |
 | 22 | `current_series.rs` Sum / Count / Average | Current-series aggregates | `EvaluatePopulation{Sum,Count,Average}` | Missing | `compile` accepts only TopK. |
 | 23 | `current_series.rs` Quantile | Current-series quantile | `EvaluatePopulation{Quantile}` | Missing | No exact quantile reduction. |
@@ -63,9 +63,9 @@ Status values:
 | 28 | `physical_values.rs` `compile`, `combine` | Translate `QueryTimeOperator` to `promql_values::*`; compose fragments | n/a | Supported | Exists only because of row 1. The Planner no longer composes fragments: `CompiledPhysicalDAG::compose` was removed, and a plan reads its inputs only at `Scan`s and materialized views. |
 | 29 | `query_plan.rs` `compile_native_fragment` (Semi join, Exact aggregate, Sort, Limit, Filter) | Relational value ops | `RelationalJoin`, `Value::*` | Supported | Already calls `compile`. |
 | 30 | `query_time.rs` `selected_query_time_nodes`, `selected_native_expression`, `selected_aggregate_operator` | Recover operator identity from original PromQL text | Payload variants (`ExactKind::Min`/`Max`, `AggIntent`) | Supported | Payloads already carry the identity. These witnesses are needed only while row 1 remains. |
-| 31 | Scan, ExactSubquery, CandidateExactSubquery, CurrentSeries ingest, ReadMaterialization, ExternalExact | Storage reads and external engines | Input slots | Backend | |
+| 31 | Scan, ExactSubquery, CandidateExactSubquery, CurrentSeries ingest, ReadMaterialization, ExternalExact | Storage reads and external engines | Input slots | Runtime | |
 
-Totals at #475: 11 Supported, 4 Partial, 14 Missing, 2 Backend.
+Totals at #475: 11 Supported, 4 Partial, 14 Missing, 2 Runtime.
 
 ## Covered after this change
 
@@ -76,7 +76,7 @@ Totals at #475: 11 Supported, 4 Partial, 14 Missing, 2 Backend.
 | 15 | Count finalization converts exactly to the declared Float64 value. |
 | 22, 23 | `EvaluatePopulation` Sum/Count/Average/Quantile compile to grouped aggregation. `Reduction::Quantile` implements PromQL interpolation. |
 
-Totals after this change: 17 Supported, 4 Partial, 8 Missing, 2 Backend.
+Totals after this change: 17 Supported, 4 Partial, 8 Missing, 2 Runtime.
 
 ## Covered by PromQL fallback compilation
 
@@ -107,7 +107,7 @@ and is not compiled as instant selection.
 | 11 | Range functions over the raw selector rows. |
 | 12 | `f(sel[R:S])` and `f(g(sel[r])[R:S])`, with subquery `offset`, evaluate on the aligned step grid. The frontend now retains subquery `offset`/`@` as a `TimeShift`; it previously dropped them. Now Partial. |
 
-Totals after this change: 19 Supported, 5 Partial, 5 Missing, 2 Backend.
+Totals after this change: 19 Supported, 5 Partial, 5 Missing, 2 Runtime.
 
 ## Covered by multi-selector fallback compilation
 
@@ -125,7 +125,7 @@ Vector matching rewrites the series identity, so its results already lack
 columns"; it is covered in the reduce aggregates section below.) Other results keep it; the query adapter still drops
 it. (Range functions drop it too since the comparison change below.)
 
-Totals are unchanged: 19 Supported, 5 Partial, 5 Missing, 2 Backend.
+Totals are unchanged: 19 Supported, 5 Partial, 5 Missing, 2 Runtime.
 
 ## Covered by per-series arithmetic
 
@@ -143,7 +143,7 @@ Stored exact `Sum` now retains a Kahan-Neumaier compensation term through
 updates, tumbling-window merges, and persistence. A truly overflowing sum remains infinite; the
 checked `avg_over_time` division still rejects that case.
 
-Totals after this change: 20 Supported, 4 Partial, 5 Missing, 2 Backend.
+Totals after this change: 20 Supported, 4 Partial, 5 Missing, 2 Runtime.
 
 ## Covered by comparisons and set operators
 
@@ -184,7 +184,7 @@ and `group_left`, including a right-side series identity when needed. Thus
 | 5 | Grouped `Binary` rows use the same operator instead of a relational join. A duplicate match group is now an error instead of a cross product. |
 | 7 | Fallback, grouped `Binary`, and per-series comparisons and sets. Temporal stored evaluations drop `__name__` before matching, including exact Count conversion, and reject duplicate output identities. |
 
-Totals after this change: 20 Supported, 5 Partial, 4 Missing, 2 Backend.
+Totals after this change: 20 Supported, 5 Partial, 4 Missing, 2 Runtime.
 
 ## Covered by classic histogram_quantile
 
@@ -204,7 +204,7 @@ series per φ, `{q="0.5"}` and `{q="0.9"}`. Nested aggregation, such as
 a value column named `value`, while the quantile's is named
 `histogram_quantile`. It is tracked in issue #911.
 
-Totals after this change: 21 Supported, 5 Partial, 3 Missing, 2 Backend.
+Totals after this change: 21 Supported, 5 Partial, 3 Missing, 2 Runtime.
 
 ## Covered by exact reduce aggregates
 
@@ -215,7 +215,7 @@ Totals after this change: 21 Supported, 5 Partial, 3 Missing, 2 Backend.
 | 3 | An exact `topk`, `Aggregate{Reduce, [TopK]}`, lowers to a `Sort` that keeps the first k rows per partition (value descending, NULLs and NaN last; `fetch: Some(k)`, a bounded heap of k rows per partition) and a `Project` of the ranked rows. The current-series top-k (row 21) lowers to the same sort. `topk(2, sum by (job) (rate(c[5m])))` answers the two largest job sums with their jobs; `topk by (job) (1, m)` keeps each series' full labels, `__name__` included. |
 | 29 | SQL `STDDEV`, `STDDEV_SAMP`, `STDDEV_POP`, `VAR_SAMP`, `VAR_POP` and `corr` over Float64 or Int64 columns: NULL for fewer than two values (sample forms) or none (population forms), `corr` NULL for a constant input. |
 
-Totals are unchanged: 21 Supported, 5 Partial, 3 Missing, 2 Backend.
+Totals are unchanged: 21 Supported, 5 Partial, 3 Missing, 2 Runtime.
 
 ## Covered by per-series time functions
 
@@ -228,7 +228,7 @@ carry no `@` anchor: `rate(x[5m] @ 300)` does not compile yet, since its
 window is not a fixed offset back from the evaluation time. Any other
 per-entity aggregate, such as `absent_over_time(x[5m])`, fails to compile.
 
-Totals are unchanged: 21 Supported, 5 Partial, 3 Missing, 2 Backend.
+Totals are unchanged: 21 Supported, 5 Partial, 3 Missing, 2 Runtime.
 
 ## Covered by relational operators, window functions, series operators and scalar reads
 
@@ -255,7 +255,7 @@ the info metric as an input.
 
 ## Remaining
 
-In order of backend usage:
+In order of runtime usage:
 
 1. Rows 1 and 12, the remaining PromQL shapes:
    - Other scalar functions as operands.
@@ -268,7 +268,7 @@ In order of backend usage:
      compiles to the executor's `Absent` operator, which emits one sample of
      value 1 with those labels when its input has no row and nothing
      otherwise.
-   After these shapes are covered, the backend can delete rows 28 and 30.
+   After these shapes are covered, the runtime can delete rows 28 and 30.
 2. Rows 25 and 27: constant weights and `EntityIdentity` items for precompute
    `SummaryAgg`.
 3. Row 16: a label-map sketch-state evaluation, the counterpart of
@@ -296,7 +296,7 @@ to own document versioning.
 expressions, capture expansion, non-match preservation, empty-label removal,
 and duplicate-label-set rejection. Multi-quantile branches use the same label
 rewrite for their constant quantile labels. These operators perform computation
-only; the backend still supplies raw selectors and stored inputs.
+only; the runtime still supplies raw selectors and stored inputs.
 
 `@ start()` and `@ end()` remain dynamic anchors in the compiled program,
 including selector offsets and subquery grids. The deployment supplies the

@@ -85,7 +85,7 @@ impl Operator {
         if range_ms <= 0 || steps.is_some_and(|s| s.range_ms <= 0 || s.step_ms <= 0) {
             return Err(invalid("series window ranges and steps must be positive"));
         }
-        // Bounds per-run work independently of the data, as the backend's grid does.
+        // Bounds per-run work independently of the data, as a runtime's evaluation grid does.
         if steps.is_some_and(|s| s.range_ms / s.step_ms > MAX_SUBQUERY_STEPS) {
             return Err(invalid("subquery exceeds 100000 steps"));
         }

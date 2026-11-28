@@ -26,7 +26,7 @@ One legal Post-ASAP alternative for answering an intent. Planner preserves alter
 
 ## Memo
 
-The memo groups (the distinct logical sub-expressions of the workload), each query's root over them, and each group's candidate implementations. Stage 1 builds it and Stage 2 implements it. Code: `Memo`, `MemoGroup`, `CandidateForMemoGroup` (`asap_types::stages`).
+The memo groups (the distinct logical sub-expressions of the workload), each query's root over them, and each group's candidate implementations. Stage 0 builds it without candidates (the frontends' roots hash-consed), Stage 1 adds the candidates and Stage 2 implements them. Code: `Memo`, `MemoGroup`, `CandidateForMemoGroup` (`asap_types::stages`).
 
 ## Summary
 

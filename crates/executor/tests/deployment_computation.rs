@@ -208,7 +208,7 @@ fn reference(pairs: &[(&str, f64)]) -> BTreeMap<String, f64> {
 }
 
 // Current-series aggregates read the latest member values, matching the
-// backend CurrentSeriesStore formulas (PromQL quantile interpolation).
+// a runtime's current-series store formulas (PromQL quantile interpolation).
 #[test]
 fn population_aggregates_match_current_series_reference() {
     // Latest values: api = {a: 1, b: 7, c: 2}; db = {d: 5}.

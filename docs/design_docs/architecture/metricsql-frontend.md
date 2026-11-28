@@ -40,7 +40,7 @@ existing ASAP-aware mapping and physical Summary DAG
 | `WITH` | Expanded by the native parser; the expanded expression lowers when every resulting node is supported. |
 
 Unsupported MetricsQL extensions return a typed error. The VictoriaMetrics
-query boundary is responsible for routing that error to its exact backend.
+query boundary is responsible for routing that error to its exact query engine.
 Silently dropping `keep_metric_names` or inventing a fixed implicit rollup
 window would change query results, so neither approximation is permitted.
 
