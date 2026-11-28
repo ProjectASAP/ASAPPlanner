@@ -676,9 +676,7 @@
         },
         {
           "id": 3,
-          "lifetime": {
-            "OneEvaluation": "Memory"
-          },
+          "lifetime": "None",
           "output_schema": {
             "closed": true,
             "fields": [
@@ -773,9 +771,7 @@
         },
         {
           "id": 5,
-          "lifetime": {
-            "OneEvaluation": "Memory"
-          },
+          "lifetime": "None",
           "output_schema": {
             "closed": true,
             "fields": [
@@ -815,7 +811,7 @@
           },
           "parameters": {
             "Kmv": {
-              "k": 106263
+              "k": 26656
             }
           },
           "payload": {

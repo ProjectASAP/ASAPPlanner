@@ -14,7 +14,7 @@
         "materialized_views": []
       },
       "node_id": 1,
-      "plan_id": "f7dc3dbf9f6c995d655257d30264a96a",
+      "plan_id": "d450d834c14314b5c09c5e8227e7e200",
       "refresh": "at_ingestion",
       "retention_ms": 300000,
       "view_state_key": {
@@ -48,7 +48,7 @@
         ]
       },
       "node_id": 2,
-      "plan_id": "f7dc3dbf9f6c995d655257d30264a96a",
+      "plan_id": "d450d834c14314b5c09c5e8227e7e200",
       "refresh": "at_ingestion",
       "retention_ms": 300000,
       "view_state_key": {
@@ -976,9 +976,7 @@
         },
         {
           "id": 4,
-          "lifetime": {
-            "OneEvaluation": "Memory"
-          },
+          "lifetime": "None",
           "output_schema": {
             "closed": true,
             "fields": [
@@ -1181,9 +1179,7 @@
         },
         {
           "id": 7,
-          "lifetime": {
-            "OneEvaluation": "Memory"
-          },
+          "lifetime": "None",
           "output_schema": {
             "closed": true,
             "fields": [

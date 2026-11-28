@@ -33,7 +33,7 @@
         "materialized_views": []
       },
       "node_id": 1,
-      "plan_id": "16936ea2ddee5a4d02b813c938c1d581",
+      "plan_id": "b021aeef71f8556e964bbbe14ab99cd4",
       "refresh": "at_ingestion",
       "retention_ms": 7500000,
       "view_state_key": {
@@ -94,7 +94,7 @@
           "cost_per_second": 0.0,
           "cost_source": "analytical",
           "cpu_core_seconds_per_second": 0.0,
-          "detail": "time shift: pass 1000 rows, free; x 1.0167/s; holds 61000 bytes for 0.000 ms",
+          "detail": "time shift: pass 1000 rows, free; x 1.0167/s",
           "ingest_cpu_core_seconds_per_second": 0.0,
           "multiplier": 1,
           "operator": "TimeShift",
@@ -177,7 +177,7 @@
           }
         ],
         "peak_cpu_cores": 2,
-        "peak_memory_bytes": 7808133,
+        "peak_memory_bytes": 7747133,
         "precompute_load": 0.000025,
         "recommended_configuration": {
           "ingest": {
@@ -742,9 +742,7 @@
         },
         {
           "id": 2,
-          "lifetime": {
-            "OneEvaluation": "Memory"
-          },
+          "lifetime": "None",
           "output_schema": {
             "closed": true,
             "fields": [
@@ -871,9 +869,7 @@
         },
         {
           "id": 4,
-          "lifetime": {
-            "OneEvaluation": "Memory"
-          },
+          "lifetime": "None",
           "output_schema": {
             "closed": true,
             "fields": [
@@ -989,9 +985,7 @@
         },
         {
           "id": 6,
-          "lifetime": {
-            "OneEvaluation": "Memory"
-          },
+          "lifetime": "None",
           "output_schema": {
             "closed": true,
             "fields": [

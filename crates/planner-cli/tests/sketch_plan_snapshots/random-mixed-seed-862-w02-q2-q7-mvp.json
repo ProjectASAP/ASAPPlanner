@@ -14,7 +14,7 @@
         "materialized_views": []
       },
       "node_id": 1,
-      "plan_id": "c045967dec81e9d78136e1163a395e6f",
+      "plan_id": "af3320477653d0707d18063100dbf68f",
       "refresh": "at_ingestion",
       "retention_ms": 100000,
       "view_state_key": {
@@ -46,7 +46,7 @@
         "materialized_views": []
       },
       "node_id": 8,
-      "plan_id": "c045967dec81e9d78136e1163a395e6f",
+      "plan_id": "af3320477653d0707d18063100dbf68f",
       "refresh": "at_ingestion",
       "retention_ms": 300000,
       "view_state_key": {
@@ -76,7 +76,7 @@
         ]
       },
       "node_id": 9,
-      "plan_id": "c045967dec81e9d78136e1163a395e6f",
+      "plan_id": "af3320477653d0707d18063100dbf68f",
       "refresh": "at_ingestion",
       "retention_ms": 300000,
       "view_state_key": {
@@ -1295,9 +1295,7 @@
         },
         {
           "id": 3,
-          "lifetime": {
-            "OneEvaluation": "Memory"
-          },
+          "lifetime": "None",
           "output_schema": {
             "closed": true,
             "fields": [
@@ -1500,9 +1498,7 @@
         },
         {
           "id": 6,
-          "lifetime": {
-            "OneEvaluation": "Memory"
-          },
+          "lifetime": "None",
           "output_schema": {
             "closed": true,
             "fields": [
@@ -1880,9 +1876,7 @@
         },
         {
           "id": 11,
-          "lifetime": {
-            "OneEvaluation": "Memory"
-          },
+          "lifetime": "None",
           "output_schema": {
             "closed": true,
             "fields": [
@@ -1998,9 +1992,7 @@
         },
         {
           "id": 13,
-          "lifetime": {
-            "OneEvaluation": "Memory"
-          },
+          "lifetime": "None",
           "output_schema": {
             "closed": true,
             "fields": [

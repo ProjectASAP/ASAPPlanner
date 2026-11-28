@@ -33,7 +33,7 @@
         "materialized_views": []
       },
       "node_id": 1,
-      "plan_id": "4f1e762604bbf979289dc017b44a331c",
+      "plan_id": "3394a2342f7a5ee1ed2ec5c318e6d047",
       "refresh": "at_ingestion",
       "retention_ms": 28800000,
       "view_state_key": {
@@ -82,7 +82,7 @@
         ]
       },
       "node_id": 2,
-      "plan_id": "4f1e762604bbf979289dc017b44a331c",
+      "plan_id": "3394a2342f7a5ee1ed2ec5c318e6d047",
       "refresh": "at_ingestion",
       "retention_ms": 28800000,
       "view_state_key": {
@@ -131,7 +131,7 @@
         ]
       },
       "node_id": 3,
-      "plan_id": "4f1e762604bbf979289dc017b44a331c",
+      "plan_id": "3394a2342f7a5ee1ed2ec5c318e6d047",
       "refresh": "at_ingestion",
       "retention_ms": 28800000,
       "view_state_key": {
@@ -178,7 +178,7 @@
         "materialized_views": []
       },
       "node_id": 9,
-      "plan_id": "4f1e762604bbf979289dc017b44a331c",
+      "plan_id": "3394a2342f7a5ee1ed2ec5c318e6d047",
       "refresh": "at_ingestion",
       "retention_ms": 28800000,
       "view_state_key": {
@@ -227,7 +227,7 @@
         ]
       },
       "node_id": 10,
-      "plan_id": "4f1e762604bbf979289dc017b44a331c",
+      "plan_id": "3394a2342f7a5ee1ed2ec5c318e6d047",
       "refresh": "at_ingestion",
       "retention_ms": 28800000,
       "view_state_key": {
@@ -276,7 +276,7 @@
         ]
       },
       "node_id": 11,
-      "plan_id": "4f1e762604bbf979289dc017b44a331c",
+      "plan_id": "3394a2342f7a5ee1ed2ec5c318e6d047",
       "refresh": "at_ingestion",
       "retention_ms": 28800000,
       "view_state_key": {
@@ -2203,9 +2203,7 @@
         },
         {
           "id": 5,
-          "lifetime": {
-            "OneEvaluation": "Memory"
-          },
+          "lifetime": "None",
           "output_schema": {
             "closed": true,
             "fields": [
@@ -2335,9 +2333,7 @@
         },
         {
           "id": 7,
-          "lifetime": {
-            "OneEvaluation": "Memory"
-          },
+          "lifetime": "None",
           "output_schema": {
             "closed": true,
             "fields": [
@@ -2847,9 +2843,7 @@
         },
         {
           "id": 13,
-          "lifetime": {
-            "OneEvaluation": "Memory"
-          },
+          "lifetime": "None",
           "output_schema": {
             "closed": true,
             "fields": [
@@ -2965,9 +2959,7 @@
         },
         {
           "id": 15,
-          "lifetime": {
-            "OneEvaluation": "Memory"
-          },
+          "lifetime": "None",
           "output_schema": {
             "closed": true,
             "fields": [
@@ -3010,9 +3002,7 @@
         },
         {
           "id": 16,
-          "lifetime": {
-            "OneEvaluation": "Memory"
-          },
+          "lifetime": "None",
           "output_schema": {
             "closed": true,
             "fields": [

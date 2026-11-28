@@ -30,8 +30,12 @@ jobs:
     # Caches the registry and compiled dependencies, keyed per job.
     - uses: Swatinem/rust-cache@v2
 
+    # Strict: a plan that changes at the committed plan's cost fails too
+    # (#1541), so the PR that moves a tie updates the snapshot.
     - name: Check planner snapshots
       run: cargo test --release --locked -p asap-planner-cli --test corpus_snapshots -- --include-ignored
+      env:
+        STRICT_SNAPSHOTS: 1
 
     - name: Upload regenerated snapshots
       if: failure()

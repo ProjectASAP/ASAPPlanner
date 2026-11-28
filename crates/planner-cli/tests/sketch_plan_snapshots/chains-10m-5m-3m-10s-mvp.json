@@ -14,7 +14,7 @@
         "materialized_views": []
       },
       "node_id": 1,
-      "plan_id": "1dbad9b63b6c632668a1db7298a6197f",
+      "plan_id": "e6bedd5222006e3a9fa505a075df6470",
       "refresh": "at_ingestion",
       "retention_ms": 600000,
       "view_state_key": {
@@ -22,7 +22,7 @@
         "logical_properties": {
           "parameters": {
             "Kll": {
-              "k": 1404
+              "k": 2863
             }
           }
         },
@@ -46,7 +46,7 @@
         "materialized_views": []
       },
       "node_id": 10,
-      "plan_id": "1dbad9b63b6c632668a1db7298a6197f",
+      "plan_id": "e6bedd5222006e3a9fa505a075df6470",
       "refresh": "at_ingestion",
       "retention_ms": 180000,
       "view_state_key": {
@@ -80,7 +80,7 @@
         ]
       },
       "node_id": 11,
-      "plan_id": "1dbad9b63b6c632668a1db7298a6197f",
+      "plan_id": "e6bedd5222006e3a9fa505a075df6470",
       "refresh": "at_ingestion",
       "retention_ms": 180000,
       "view_state_key": {
@@ -1247,7 +1247,7 @@
           },
           "parameters": {
             "Kll": {
-              "k": 1404
+              "k": 2863
             }
           },
           "payload": {
@@ -1321,7 +1321,7 @@
           },
           "parameters": {
             "Kll": {
-              "k": 1404
+              "k": 2863
             }
           },
           "payload": {
@@ -1339,9 +1339,7 @@
         },
         {
           "id": 3,
-          "lifetime": {
-            "OneEvaluation": "Memory"
-          },
+          "lifetime": "None",
           "output_schema": {
             "closed": true,
             "fields": [
@@ -1381,7 +1379,7 @@
           },
           "parameters": {
             "Kll": {
-              "k": 1404
+              "k": 2863
             }
           },
           "payload": {
@@ -1557,7 +1555,7 @@
           },
           "parameters": {
             "Kll": {
-              "k": 1404
+              "k": 2863
             }
           },
           "payload": {
@@ -1575,9 +1573,7 @@
         },
         {
           "id": 7,
-          "lifetime": {
-            "OneEvaluation": "Memory"
-          },
+          "lifetime": "None",
           "output_schema": {
             "closed": true,
             "fields": [
@@ -1617,7 +1613,7 @@
           },
           "parameters": {
             "Kll": {
-              "k": 1404
+              "k": 2863
             }
           },
           "payload": {
@@ -1954,9 +1950,7 @@
         },
         {
           "id": 13,
-          "lifetime": {
-            "OneEvaluation": "Memory"
-          },
+          "lifetime": "None",
           "output_schema": {
             "closed": true,
             "fields": [
