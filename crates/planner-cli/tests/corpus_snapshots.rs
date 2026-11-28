@@ -3,10 +3,13 @@
 //! The planner has no reference answer, so these tests pin its output
 //! instead: each corpus query's selected plan (default search) is compared
 //! with the committed one, and any change fails until the snapshot is
-//! regenerated and the change explained in the PR. A changed plan whose
-//! cost equals the committed plan's (relative difference at most 1e-9),
-//! with the same accuracy, warnings and errors, passes: the selection may return any of several equal-cost plans, and
-//! which one can differ between machines.
+//! regenerated and the change explained in the PR. That includes a plan
+//! that changes at the committed plan's cost (#1541): the nightly workflow
+//! sets `STRICT_SNAPSHOTS=1`, and any difference fails. Without it, as on a
+//! local run, a changed plan whose cost equals the committed plan's
+//! (relative difference at most 1e-9), with the same accuracy, warnings and
+//! errors, passes with a note on stderr: the selection may return any of
+//! several equal-cost plans, and which one could differ between machines.
 //!
 //! Each `tests/corpus_snapshots/<corpus>/corpus.json` declares the shared
 //! planning inputs and the queries by stable id; `<id>.json` beside it is
@@ -17,7 +20,7 @@
 //! search over every legal tumbling-window width, with no time limit.
 //!
 //! A snapshot holds only the plan, never the search that found it: Stage
-//! 3's plan (its `PhysicalASAPDAG`, retention on its nodes), its cost and
+//! 3's plan (its `PhysicalASAPDAG`, with the retention and lifetime of its nodes), its cost and
 //! accepted accuracy per query, and the materialized views; for a query
 //! that does not plan, the error. The selection MILP's size and timings,
 //! the Stage 1 and Stage 2 candidate lists and the memo are left out. Floats are as
@@ -150,6 +153,19 @@ fn plan_snapshot(document: &Value) -> Map<String, Value> {
 /// the selection may return either, depending on the machine.
 const EQUAL_COST_RELATIVE_TOLERANCE: f64 = 1e-9;
 
+/// Whether equal-cost plan changes fail: `STRICT_SNAPSHOTS` is set, as the
+/// nightly workflow sets it.
+fn strict_snapshots() -> bool {
+    std::env::var_os("STRICT_SNAPSHOTS").is_some()
+}
+
+/// Whether a snapshot whose text changed from `expected` to `actual` still
+/// passes: never when `strict`; otherwise when both select plans of the
+/// same cost ([`equal_cost_plan`]).
+fn changed_snapshot_passes(expected: &str, actual: &str, strict: bool) -> bool {
+    !strict && equal_cost_plan(expected, actual)
+}
+
 /// Whether the snapshot texts `expected` and `actual` select plans of the
 /// same cost ([`same_selected_cost`]).
 fn equal_cost_plan(expected: &str, actual: &str) -> bool {
@@ -249,6 +265,7 @@ fn corpus_plans_match_snapshots() {
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let update = std::env::var_os("UPDATE_SNAPSHOTS").is_some();
+    let strict = strict_snapshots();
     // Regenerated snapshots of failing queries, with their full
     // `asap_planner` documents for the DAG viewer, for CI to upload.
     // Each corpus clears only its own directory: the sketch plan test writes
@@ -305,8 +322,11 @@ fn corpus_plans_match_snapshots() {
                 continue;
             }
             let expected = std::fs::read_to_string(&path).unwrap_or_default();
-            if expected != actual && equal_cost_plan(&expected, &actual) {
-                eprintln!("{name}/{id}: plan changed at the committed plan's cost; passes");
+            if expected != actual && changed_snapshot_passes(&expected, &actual, strict) {
+                eprintln!(
+                    "{name}/{id}: plan changed at the committed plan's cost; \
+                     passes (fails with STRICT_SNAPSHOTS=1)"
+                );
             } else if expected != actual {
                 let out = regenerated.join(&name);
                 std::fs::create_dir_all(&out).unwrap();
@@ -411,9 +431,10 @@ fn first_difference_names_the_line() {
     );
 }
 
-/// A changed plan with the committed plan's cost passes: the planner may
-/// pick any of several equal-cost plans, and which one depends on the
-/// machine. A dearer or cheaper plan, or one that no longer plans, fails.
+/// Outside strict mode, a changed plan with the committed plan's cost
+/// passes: the planner may pick any of several equal-cost plans, and which
+/// one could depend on the machine. A dearer or cheaper plan, or one that
+/// no longer plans, fails.
 #[test]
 fn equal_cost_plans_pass() {
     let plan = |cost: f64| json!({"selected": {"cost": {"cost_per_second": cost}, "dag": {}}});
@@ -456,4 +477,20 @@ fn equal_cost_plans_pass() {
         &committed,
         &with(json!({"k": 1404}), json!([0.01]), json!(["w"]))
     ));
+}
+
+/// In strict mode (the nightly workflow) any changed snapshot fails, even
+/// one selecting a different plan at the committed plan's cost (#1541):
+/// committed `k = 1404`, selected `k = 2863` at the same cost.
+#[test]
+fn equal_cost_plan_changes_fail_when_strict() {
+    let snapshot = |k: u64| {
+        serde_json::to_string_pretty(&json!({
+            "selected": {"cost": {"cost_per_second": 1.0e-6}, "dag": {"k": k}, "accepted": []},
+        }))
+        .unwrap()
+    };
+    let (committed, regenerated) = (snapshot(1404), snapshot(2863));
+    assert!(changed_snapshot_passes(&committed, &regenerated, false));
+    assert!(!changed_snapshot_passes(&committed, &regenerated, true));
 }

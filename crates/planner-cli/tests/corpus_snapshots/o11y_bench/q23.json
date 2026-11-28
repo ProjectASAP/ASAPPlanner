@@ -14,7 +14,7 @@
         "materialized_views": []
       },
       "node_id": 1,
-      "plan_id": "caf2808753629aef042a4137c52532cf",
+      "plan_id": "f5ee1f67bd76919207ede61619d4fdcf",
       "refresh": "at_ingestion",
       "retention_ms": 3900000,
       "view_state_key": {
@@ -699,9 +699,7 @@
         },
         {
           "id": 3,
-          "lifetime": {
-            "OneEvaluation": "Memory"
-          },
+          "lifetime": "None",
           "output_schema": {
             "closed": true,
             "fields": [
@@ -817,9 +815,7 @@
         },
         {
           "id": 5,
-          "lifetime": {
-            "OneEvaluation": "Memory"
-          },
+          "lifetime": "None",
           "output_schema": {
             "closed": true,
             "fields": [

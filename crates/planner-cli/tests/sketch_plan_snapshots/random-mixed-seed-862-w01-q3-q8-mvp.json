@@ -14,7 +14,7 @@
         "materialized_views": []
       },
       "node_id": 1,
-      "plan_id": "8c2bbba375df73032544bda8ce858852",
+      "plan_id": "8ab01697d15c320e173f86169de75bce",
       "refresh": "at_ingestion",
       "retention_ms": 100000,
       "view_state_key": {
@@ -46,7 +46,7 @@
         "materialized_views": []
       },
       "node_id": 8,
-      "plan_id": "8c2bbba375df73032544bda8ce858852",
+      "plan_id": "8ab01697d15c320e173f86169de75bce",
       "refresh": "at_ingestion",
       "retention_ms": 1200000,
       "view_state_key": {
@@ -76,7 +76,7 @@
         ]
       },
       "node_id": 9,
-      "plan_id": "8c2bbba375df73032544bda8ce858852",
+      "plan_id": "8ab01697d15c320e173f86169de75bce",
       "refresh": "at_ingestion",
       "retention_ms": 1200000,
       "view_state_key": {
@@ -106,7 +106,7 @@
         ]
       },
       "node_id": 10,
-      "plan_id": "8c2bbba375df73032544bda8ce858852",
+      "plan_id": "8ab01697d15c320e173f86169de75bce",
       "refresh": "at_ingestion",
       "retention_ms": 1200000,
       "view_state_key": {
@@ -1449,9 +1449,7 @@
         },
         {
           "id": 3,
-          "lifetime": {
-            "OneEvaluation": "Memory"
-          },
+          "lifetime": "None",
           "output_schema": {
             "closed": true,
             "fields": [
@@ -1654,9 +1652,7 @@
         },
         {
           "id": 6,
-          "lifetime": {
-            "OneEvaluation": "Memory"
-          },
+          "lifetime": "None",
           "output_schema": {
             "closed": true,
             "fields": [
@@ -2106,9 +2102,7 @@
         },
         {
           "id": 12,
-          "lifetime": {
-            "OneEvaluation": "Memory"
-          },
+          "lifetime": "None",
           "output_schema": {
             "closed": true,
             "fields": [
@@ -2224,9 +2218,7 @@
         },
         {
           "id": 14,
-          "lifetime": {
-            "OneEvaluation": "Memory"
-          },
+          "lifetime": "None",
           "output_schema": {
             "closed": true,
             "fields": [

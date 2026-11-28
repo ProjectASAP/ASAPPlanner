@@ -5,10 +5,11 @@
 //! sketches (KLL, DDSketch, a CMS heap), share a sketch tumbling-window chain between
 //! queries or nested windows, answer a ratio of two quantiles from one tumbling window
 //! chain, and materialize tumbling windows, under the MVP deployment (raw data not
-//! retained) and raw data retained. A change to cost, accuracy, warnings
-//! or errors fails. A change to sketch kinds, parameters, sizes, sharing,
-//! timing or lifetime alone, at the committed plan's cost, passes (see the
-//! corpus snapshot module docs).
+//! retained) and raw data retained. Any change fails under
+//! `STRICT_SNAPSHOTS=1` (the nightly workflow). Without it, a change to
+//! cost, accuracy, warnings or errors fails, and a change to sketch kinds,
+//! parameters, sizes, sharing, timing or lifetime alone, at the committed
+//! plan's cost, passes (see the corpus snapshot module docs).
 //!
 //! Small multi-query workloads (#1278) each exercise one planner behavior:
 //! rollup across label sets, top-k reuse, chain widths and sharing, avg as
@@ -33,7 +34,10 @@ use std::path::PathBuf;
 
 use serde_json::{json, Value};
 
-use super::{asap_planner, equal_cost_plan, first_difference, first_differing_path, plan_snapshot};
+use super::{
+    asap_planner, changed_snapshot_passes, first_difference, first_differing_path, plan_snapshot,
+    strict_snapshots,
+};
 
 fn repository_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
@@ -95,6 +99,7 @@ fn sketch_plans_match_snapshots() {
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let update = std::env::var_os("UPDATE_SNAPSHOTS").is_some();
+    let strict = strict_snapshots();
     // Beside the corpus snapshots' regenerated files, which CI uploads.
     let regenerated = PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
         .join("corpus_snapshots")
@@ -134,8 +139,11 @@ fn sketch_plans_match_snapshots() {
         let difference = match std::fs::read_to_string(&path) {
             Err(_) => Some("no snapshot".to_owned()),
             Ok(expected) if expected == actual_text => None,
-            Ok(expected) if equal_cost_plan(&expected, &actual_text) => {
-                eprintln!("{id}: plan changed at the committed plan's cost; passes");
+            Ok(expected) if changed_snapshot_passes(&expected, &actual_text, strict) => {
+                eprintln!(
+                    "{id}: plan changed at the committed plan's cost; \
+                     passes (fails with STRICT_SNAPSHOTS=1)"
+                );
                 None
             }
             Ok(expected) => Some(

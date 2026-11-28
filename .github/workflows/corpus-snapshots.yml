@@ -16,8 +16,8 @@ jobs:
   # change can be committed without a local rerun.
   corpus-snapshots:
     runs-on: ubuntu-latest
-    # Planning takes 2-6 min (6 min on one core) plus the release build; each
-    # query stops at 240 s.
+    # Planning takes a few minutes plus the release build; planning has no
+    # time limit.
     timeout-minutes: 45
     steps:
     - uses: actions/checkout@v4
@@ -30,8 +30,19 @@ jobs:
     # Caches the registry and compiled dependencies, keyed per job.
     - uses: Swatinem/rust-cache@v2
 
+    # For tracing a strict failure that main did not cause to the runner's
+    # hardware or toolchain.
+    - name: Show runner CPU and toolchain
+      run: |
+        lscpu | grep 'Model name' || true
+        rustc --version
+
+    # Strict: a plan that changes at the committed plan's cost fails too
+    # (#1541), so the PR that moves a tie updates the snapshot.
     - name: Check planner snapshots
       run: cargo test --release --locked -p asap-planner-cli --test corpus_snapshots -- --include-ignored
+      env:
+        STRICT_SNAPSHOTS: 1
 
     - name: Upload regenerated snapshots
       if: failure()
