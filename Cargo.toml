@@ -28,19 +28,14 @@ resolver = "2"
 arrow = { version = "58.4", default-features = false }
 # The hasher Arrow already uses, for the executor's hot interning maps.
 ahash = { version = "0.8", default-features = false, features = ["std", "runtime-rng"] }
-# main at a05b35c (through #262: sketch analytics; #260 renamed the
-# `SketchAlgorithm` variants to full names with upper-case acronyms; #252,
-# #256, #257, #258 and #259 dropped exact side fields from the DDSketch,
-# Bloom, Space-Saving and HLL-HIP states and moved them to new ASAPv1 kinds),
-# plus three open PRs the executor needs, merged onto that main on branch
-# `planner-pin/main-a05b35c-shrink-to-fit`: `Kll::shrink_to_fit` (#267),
-# `DdSketch::shrink_to_fit` (#270), and the zero-copy sketch views of #271
-# (head 355093f, ported to main's DDSketch without sum/min/max), which the
-# executor's mapped state columns read; branch
-# `planner-pin/main-a05b35c-shrink-to-fit-dd-bounds` adds #273 (a DDSketch
-# computes its indexable bounds once, not on every add). Moves to main once
-# they merge.
-asap_sketchlib = { git = "https://github.com/ProjectASAP/asap_sketchlib", rev = "d050037bb127d425cb4160ea9b5960856ef3188c" }
+# main at c5f7866 (through #272): sketch analytics (#262), the full-name
+# `SketchAlgorithm` variants (#260), the DDSketch, Bloom, Space-Saving and
+# HLL-HIP states without exact side fields (#252, #256-#259), and what the
+# executor needs: `Kll::shrink_to_fit` (#267), `DdSketch::shrink_to_fit`
+# (#270), the zero-copy sketch views its mapped state columns read (#271),
+# DDSketch indexable bounds computed once (#273), and sealed DDSketch stores
+# with `u32` counts (#272).
+asap_sketchlib = { git = "https://github.com/ProjectASAP/asap_sketchlib", rev = "c5f786637766461532d5ee310436cae8bb61d152" }
 
 [profile.dev]
 # Backtraces and profilers keep file:line; full variable info is opt-in via
