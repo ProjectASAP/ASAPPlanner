@@ -347,7 +347,11 @@ async fn planned_views_of_one_coverage_get_distinct_view_state_keys() {
 
 /// The key of the planned 5-minute chain, written out as its JSON: what a
 /// durable store recovers states by, so a change to it is a change to what
-/// a deployment has stored. The JSON reads back as the same key.
+/// a deployment has stored. The JSON reads back as the same key. The
+/// chain's KLL is k = 1,404 or k = 2,863: its states, and the merges that
+/// read them, hold fewer rows than either `k`, so both cost the same and
+/// which one is selected depends on the machine (#1541). The key pins the
+/// selected one.
 #[tokio::test]
 async fn the_view_state_key_of_a_planned_chain_is_pinned_and_round_trips_through_json() {
     let plan = chains_plan().await;
@@ -368,12 +372,22 @@ async fn the_view_state_key_of_a_planned_chain_is_pinned_and_round_trips_through
         })
         .expect("a 5-minute chain view");
     let key = five_minute_chain.view_state_key();
+    let chain = plan
+        .dag
+        .nodes
+        .iter()
+        .find(|node| node.id == five_minute_chain.node_id)
+        .expect("the chain's node");
+    let Some(SketchParams::Kll { k }) = chain.parameters else {
+        panic!("a KLL chain, got {:?}", chain.parameters)
+    };
+    assert!([1404, 2863].contains(&k), "k = {k}");
     assert_eq!(
         serde_json::to_value(key).unwrap(),
         serde_json::json!({
             "definition_id": "2d963bc6757b98ad80934456821cc040",
             "window": {"tumbling": {"width_ms": 300000}},
-            "logical_properties": {"parameters": {"Kll": {"k": 1404}}}
+            "logical_properties": {"parameters": {"Kll": {"k": k}}}
         })
     );
     let json = serde_json::to_string(key).unwrap();
