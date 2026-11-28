@@ -40,9 +40,9 @@ window, parameter identity and state schema
 sharing can therefore intern their state producer while preserving distinct
 readout nodes. Sharing is only legal within the same execution/data scope.
 Precompute placement, SummaryCatalog installation, retention, and runtime
-payload ownership remain backend responsibilities.
+payload ownership remain runtime responsibilities.
 
-The backend must canonicalize numeric keys consistently with exact distinct
+The runtime must canonicalize numeric keys consistently with exact distinct
 semantics (including equal positive and negative zero), omit stale/NaN
 samples according to the query language, and preserve empty-window behavior.
 Neither parser acceptance nor a structural sharing test demonstrates runtime

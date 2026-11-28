@@ -411,7 +411,7 @@ have a finite average even though their sum overflows. Planner therefore emits
 a read-time `BinaryOperator` with `checked_finite_division=true` and never exports
 this temporal transformation as an unconditional pre-ASAP rewrite.
 
-The backend lowers the guard to `FiniteDiv`: operands and quotient must be finite,
+The runtime lowers the guard to `FiniteDiv`: operands and quotient must be finite,
 and the divisor must be nonzero. Failure executes the original average query.
 Zero and subnormal averages remain valid accelerated results. This guard is
 distinct from `checked_relative_division`, whose relative-error certificate also

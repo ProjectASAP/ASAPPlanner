@@ -1,8 +1,8 @@
 # ASAP executor
 
 An independent Rust physical operator DAG runtime shared by ingestion time and
-query time execution. The library requires neither backend engine, a server,
-a storage implementation nor DataFusion. Batches are Arrow columns
+query time execution. The library requires no deployment runtime, server,
+storage implementation or DataFusion. Batches are Arrow columns
 (`values::Batch`); DataFusion informed the design, it is not the execution
 framework.
 
@@ -107,7 +107,7 @@ Existing accumulator algorithms are reused as kernels behind these operators.
 This crate is owned by ASAPPlanner. Its `planner-types` dependency is the local
 IR crate, so a contract change and its execution tests belong in the same PR.
 Deployments supply storage/ingestion sources and adapt output protocols. The
-library has no ASAPQuery-backend dependency. Backend raw Scan remains a separate
+library depends on no deployment runtime. A runtime's raw `Scan` remains a separate
 deployment capability.
 
 See [the design](../../docs/design_docs/physical-planning-and-deployment.md).

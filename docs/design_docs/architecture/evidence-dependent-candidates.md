@@ -9,7 +9,7 @@
 > relative bound in closed form (see
 > [accuracy models](../concepts/accuracy-models.md)).
 
-Audience: ASAPPlanner library integrators, especially ASAPQuery-backend.
+Audience: ASAPPlanner library integrators, such as a deployment runtime.
 
 `CandidateLogicalASAPDAGs` is a space of constructible logical alternatives, not a list of
 certified deployment choices. Missing external evidence must not erase a
@@ -23,12 +23,12 @@ Here, **certified for a target** means Planner has a fully known
 target's (`asap_accuracy::within_limit`). **Uncertified** means Planner cannot make that claim:
 the guarantee is absent, contains unknown terms, or is known not to meet the
 target. An uncertified summary may still be a well-formed logical candidate;
-this label says nothing about whether the backend can physically execute it.
+this label says nothing about whether a deployment runtime can physically execute it.
 The exact path (the pre-ASAP sub-DAG kept by `retain_exact`) has an exact guarantee.
 
 | State | Planner representation | Consequence / next step |
 |---|---|---|
-| Known guarantee | `AccuracyGuarantee` with evaluable bound and failure probability | Planner checks whether the guarantee satisfies the query's accuracy target. If this candidate is selected, the backend checks whether its implementation can realize the selected summary; it does not re-decide the accuracy target. |
+| Known guarantee | `AccuracyGuarantee` with evaluable bound and failure probability | Planner checks whether the guarantee satisfies the query's accuracy target. If this candidate is selected, the runtime checks whether its implementation can realize the selected summary; it does not re-decide the accuracy target. |
 | Missing accuracy/domain evidence | An unknown `ProbabilityExpr::Unknown`, or `guarantee: None` on a constructible summary | Inspect `ReplacementSubDAG::has_missing_accuracy_evidence()`, obtain applicable evidence or apply explicit policy; do not claim certification. |
 | Missing cost | `CostModel::candidate_cost()` returns `None` for a `ReplacementSubDAG` (including a non-finite or negative legacy estimate) | Keep that logical summary/rewrite candidate in `CandidateLogicalASAPDAGs` for inspection; provide a comparable cost before selecting it by cost. This does not make it a deployable physical plan. |
 | Unknown runtime support | `ReplacementSubDAG::runtime_support_evidence(model)` returns `None` | Candidate remains visible; bind a concrete implementation and confirm support before deployment. |
@@ -70,7 +70,7 @@ not emit a `RejectedCandidate` for that case.
 | Cost/rate/physical evidence | `None` cost or missing workload rate; candidate remains in `CandidateLogicalASAPDAGs` | Physical evaluation reports unavailable or rejected evidence. |
 | Mixed exact/summary operator | Unknown runtime support; candidate remains in `CandidateLogicalASAPDAGs` | `Some(false)` prevents construction. |
 
-The backend must still check summary family, window, and state-operation
+The runtime must still check summary family, window, and state-operation
 capabilities before deployment.
 
 - Accuracy/domain: `AccuracyEvidence` supplies measured guarantees; the data workload supplies quantile domains and
@@ -89,29 +89,29 @@ capabilities before deployment.
   permissive default is not proof; `value_operation_support_evidence` returns
   `None` until a model explicitly confirms support with `Some(true)`.
   `global_selection()` skips unknown or denied compositions. Other summary,
-  maintenance, and window implementations still require backend validation.
+  maintenance, and window implementations still require runtime validation.
 
 The default `global_selection()` skips summaries that
 `has_missing_accuracy_evidence()` identifies as uncertified. Its
 `GlobalSelection::assemble_selected_dag()` result is a selected logical plan,
 not an instruction to deploy every candidate in `CandidateLogicalASAPDAGs`. If no alternative
 is chosen at a site, DAG assembly retains the exact pre-ASAP sub-DAG. The
-backend can inspect alternatives, apply its own evidence and policy, then choose a
+runtime can inspect alternatives, apply its own evidence and policy, then choose a
 physically supported one; it must not equate candidate presence with approval.
 Models may explicitly opt into qualitative candidate ranking when no
 comparable numeric cost exists by returning `true` from
 `allow_uncosted_legacy_selection()`; the default is `false`. Such ranking is
 a logical preference, not a finite cost claim.
 
-## Backend-facing workflow
+## Runtime-facing workflow
 
 ### Before and after: query text to candidate space
 
 These examples use PromQL lowering, the built-in strategies and cost model,
 an approximate accuracy target, and **no external accuracy evidence**. “Before”
 means `main` immediately before this PR (which already includes #449); “after”
-means this PR. They describe logical planning, not a query executed by the
-backend.
+means this PR. They describe logical planning, not a query executed by a
+runtime.
 
 | PromQL input | Before this PR | After this PR |
 |---|---|---|
@@ -120,7 +120,7 @@ backend.
 | `quantile_over_time(0.9,data[5m]) / quantile_over_time(0.5,data[5m])` with an ε target | The uncertified direct DDSketch ratio is **already** visible because of #449. | Still visible with `guarantee: None`, and still skipped by default selection. This is a regression/control example, not a new candidate introduced by this PR. |
 
 For the first two rows, the observable change is the alternative set delivered
-to an integrating backend. It may inspect or reject those alternatives; no
+to an integrating runtime. It may inspect or reject those alternatives; no
 newly visible unknown candidate becomes the automatic selected plan. An exact
 target still excludes uncertified summaries. Supplying known-invalid Hydra
 evidence (for example a failure probability of `1.5`) instead produces a
@@ -136,7 +136,7 @@ None runs a deployed query.
 For a workload containing `quantile_over_time(0.9,data[5m]) /
 quantile_over_time(0.5,data[5m])`, search with no accuracy evidence and a root
 target may expose a direct DDSketch ratio candidate. Its missing domain proof
-is visible through `has_missing_accuracy_evidence()`. The backend examines the
+is visible through `has_missing_accuracy_evidence()`. The runtime examines the
 operand windows and its own data-domain facts, checks whether the denominator
 can be zero, and checks that its executor supports the chosen DDSketch
 parameters. It may reject that candidate and keep exact execution. It must
@@ -145,8 +145,6 @@ not publish an accuracy guarantee merely because the candidate exists.
 The same loop applies to grouped Count with Hydra and to Count-ranked TopK:
 their symbolic guarantees keep them visible until shared-grid or interval
 evidence is available. Re-run planning with a provider when a certified
-Planner selection is needed; supplying evidence to the backend alone does
+Planner selection is needed; supplying evidence to the runtime alone does
 not retroactively change the guarantees stored in the existing `CandidateLogicalASAPDAGs`.
 
-Backend integration work is tracked in
-[ASAPQuery-backend#752](https://github.com/ProjectASAP/ASAPQuery-backend/issues/752).

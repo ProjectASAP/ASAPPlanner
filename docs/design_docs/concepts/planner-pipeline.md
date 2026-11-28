@@ -6,9 +6,9 @@ produces one selected physical plan for the whole workload. The
 stage.
 
     SQL / PromQL / MetricsQL queries + data workload
-            | Stage 0: query-language frontends
+            | Stage 0: query-language frontends, then hash-consing
             v
-    Logical DAG (Pre-ASAP IR): exact, language-independent query intent
+    Memo of the logical DAG (Pre-ASAP IR): exact, language-independent query intent
             | Stage 1: logical ASAP-aware optimization
             |   Pass 1: exact or a summary per computation
             |   Pass 2: share, split into tumbling windows, or reuse across computations

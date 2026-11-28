@@ -121,7 +121,7 @@ At query time, these are the only computed nodes that can have more than one con
   - A window that ends at or before the watermark is saved.
   - A newer window is computed for this batch only and not saved, so a later batch recomputes it.
   - Saved windows never change (D4), so saving a window that is still missing samples would make the answer wrong for as long as it is kept.
-  - ASAPQuery-backend used the same rule.
+  - The earlier deployment runtime used the same rule.
   - With the Prometheus stopgap reader (D4) there is no ingest engine, so the wrapper uses "now minus a configured lag".
 - **If two batches compute the same window concurrently, the first save wins.** The store ignores the second write. That is safe because the contents of a finished window are fixed. The cost is one duplicate computation.
   - Making the second batch wait for the first is a later optimization, if measurements show it matters.

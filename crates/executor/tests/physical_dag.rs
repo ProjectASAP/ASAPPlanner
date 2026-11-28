@@ -1,4 +1,4 @@
-//! Acceptance tests use the library directly, without either backend engine.
+//! Acceptance tests use the library directly, without a deployment runtime.
 use asap_executor::sources::InMemoryDataStore;
 use asap_executor::{
     operators::{Expression, Operator, Reduction, SortKey},

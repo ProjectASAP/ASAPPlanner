@@ -289,7 +289,7 @@ fn promql_binary_arithmetic_preserves_nested_structure_and_vector_matching() {
 }
 
 /// Execute the ungrouped temporal TopK subset with exact state. This tests
-/// the emitted update contract, not sketch approximation or backend execution.
+/// the emitted update contract, not sketch approximation or runtime execution.
 fn execute_topk_reference(plan: &OperatorNode) -> Vec<(String, f64)> {
     use std::collections::BTreeMap;
     let Some(ASAPOp::SummaryEstimate {

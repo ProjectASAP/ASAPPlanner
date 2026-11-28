@@ -12,7 +12,7 @@
 > now those of the DDSketch estimator contract, not checked per ratio (see
 > [accuracy models](../../concepts/accuracy-models.md)).
 
-Planner uses `asap_sketchlib` commit `da3635a80f8f854d47b772d49d5a9e5fb6927d8e` from [sketchlib PR #141](https://github.com/ProjectASAP/asap_sketchlib/pull/141) for mapping bounds and numerical integration tests. This pin does not update Collector or backend deployments.
+Planner uses `asap_sketchlib` commit `da3635a80f8f854d47b772d49d5a9e5fb6927d8e` from [sketchlib PR #141](https://github.com/ProjectASAP/asap_sketchlib/pull/141) for mapping bounds and numerical integration tests. This pin does not update any deployment runtime.
 
 For valid relative-value operand bounds a and b, with b < 1 and a nonzero true denominator, the ratio bound is `(a+b)/(1-b)`. No independence assumption is needed. Sizing both DDSketch operands to `epsilon/(2+epsilon)` meets the ratio target, and compatible readouts can share one producer.
 
@@ -34,6 +34,6 @@ rule or remain exact.
 
 Callers that require a certified end-to-end accuracy target must use evidence
 or select another candidate. Planner's automatic whole-plan selection skips
-uncertified ratios while retaining them in `CandidateLogicalASAPDAGs`; a backend can inspect
+uncertified ratios while retaining them in `CandidateLogicalASAPDAGs`; a runtime can inspect
 the candidate and make its own evidence-based selection. Runtime or statically
 enforced domain contracts remain future work driven by observed v1 correctness needs.

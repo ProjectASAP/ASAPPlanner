@@ -165,8 +165,8 @@ example, see `lineitem_catalog` in [the planner's end-to-end tests](../../crates
 
 ## Plan a workload through the stages
 
-`asap_planner::e2e_plan` runs the whole planner: the query-language frontends
-(Stage 0), then the default optimization pass `Stage1ToStage3Pass`, which runs
+`asap_planner::e2e_plan` runs the whole planner: Stage 0 (the query-language
+frontends, then hash-consing into the memo), then the default optimization pass `Stage1ToStage3Pass`, which runs
 logical ASAP-aware optimization (Stage 1), physical ASAP-aware optimization
 (Stage 2) and plan selection (Stage 3), each once, with no time limit.
 

@@ -60,7 +60,7 @@ decided by a `PhysicalPropertiesAssignment`, as the layer contract below states.
    view's refresh is one compiled DAG (the precompute DAG) and the query run
    another, joined by the views. It does not see raw ingestion, tumbling windows,
    storage or stored-state readout.
-4. **Backend** executes the compiled DAGs, serving raw data and stored views
+4. **The deployment runtime** executes the compiled DAGs, serving raw data and stored views
    through its `DataStore`. A query-time summary requires the deployment to
    serve the state's raw input to the query run.
 
@@ -75,14 +75,14 @@ Logical candidates are an internal search stage, not the deployment handoff.
 Query semantics + accuracy and freshness requirements
                     ↓ Planner
 Supported Physical DAG candidates + typed inputs/outputs + requirements
-                    ↓ backend
+                    ↓ runtime
 Feasibility + runtime statistics + resource limits + ERP
-                    ↓ backend deployment
+                    ↓ runtime deployment
 Selected plan: view refresh DAGs + query DAGs + MaterializedViews
 ```
 
 Planner owns operators, dependencies, sharing, and each candidate's
-materialization frontier. The backend rejects candidates it cannot realize and
+materialization frontier. The runtime rejects candidates it cannot realize and
 costs feasible candidates over a comparable workload and time horizon. It runs
 the selected candidate; it does not lower the logical computation again, exchange
 operators, or move an operator across the selected frontier. A missing quote is
@@ -115,7 +115,7 @@ candidates, unranked. Precompute or query-time placement of Rate and grouped Sum
 is not a separate Planner candidate: the physical properties assignment sets
 each node's timing, and the physical compiler reads it.
 
-This is the target ownership contract. A backend path that still reconstructs
+This is the target ownership contract. A runtime path that still reconstructs
 operators from logical candidates has not completed this integration.
 
 ### Input semantics and summary semantics
@@ -250,7 +250,7 @@ two readouts. It does not determine when KLL states are built or retained.
 
 **Stage 2 Materialization (#509)** will choose when states are built and how
 long they are retained, using workload demand, window/freshness requirements
-and supported physical implementations. Backend selection uses runtime
+and supported physical implementations. The runtime's selection uses runtime
 feasibility and cost after physical compilation. Retained state includes
 maintained populations (for example, the current series of
 `topk by(job)(1, m)`), which keep the latest sample per series at ingestion and

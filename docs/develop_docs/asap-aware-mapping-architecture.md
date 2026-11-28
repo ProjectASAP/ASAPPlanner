@@ -65,8 +65,10 @@ PhysicalASAPMemoCandidates (operator nodes per timing/materialization + pruned_c
 pruned_candidates and the selection MILP's size and time
 ```
 
-`asap_planner::run_planning` runs all of it over lowered roots: Pass 1, then
-Pass 2, Stage 2 and Stage 3, which builds the selected plan.
+`asap_planner::run_planning` runs all of it over lowered roots: Stage 0's
+hash-consing, Pass 1, Pass 2, Stage 2 and Stage 3, which builds the selected
+plan. The [design overview](../design_docs/architecture/README.md#key-types-through-the-stages)
+continues the chain to `installable_plan_of` and the executor.
 It returns every stage's output (`PlanningRun`); `Stage1ToStage3Pass` is the
 same pipeline behind the `OptimizationPass` trait.
 

@@ -38,8 +38,8 @@ sketch-bench parameter/distribution sweep
     -> flat MergedRecord rows
     -> `approxbench erp`
     -> versioned ERP artifact
-    -> backend observes an empirical shape without assuming one true family
-    -> backend fits several known families and retains every plausible fit
+    -> the runtime observes an empirical shape without assuming one true family
+    -> the runtime fits several known families and retains every plausible fit
     -> deployment supplies an exact or bounded multi-fit selection request
     -> ASAPPlanner filters applicable and accurate records
     -> least estimated workload cost
@@ -111,7 +111,7 @@ For an external/custom dataset, an exact immutable dataset fingerprint is the
 highest-confidence match when sketch-bench measured that same dataset. The
 target policy may next try its bounded known-family fits when no exact record
 exists. If neither path has sufficient evidence, selection fails closed. The
-current backend adapter remains exact-only for custom datasets; it must not
+current runtime adapter remains exact-only for custom datasets; it must not
 claim this second step until it invokes the multi-fit selector explicitly.
 
 ## Selection
@@ -286,7 +286,7 @@ selection, but must identify that as capability beyond query-local sizing.
 
 The shared planner contract represents multiple fits and enforces confidence,
 goodness-of-fit, ambiguity, distance, and evidence gates. Distribution fitting
-and calibration belong to the observer/backend; ERP measurements belong to
+and calibration belong to the observer or runtime; ERP measurements belong to
 sketch-bench. A production deployment must not claim runtime-observed matching
 until that observer publishes these records on the planning feedback path.
 
