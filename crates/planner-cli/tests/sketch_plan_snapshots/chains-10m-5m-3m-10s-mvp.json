@@ -14,7 +14,7 @@
         "materialized_views": []
       },
       "node_id": 1,
-      "plan_id": "0d803bcba0819ca0aa4d8407f9c79197",
+      "plan_id": "1dbad9b63b6c632668a1db7298a6197f",
       "refresh": "at_ingestion",
       "retention_ms": 600000,
       "view_state_key": {
@@ -22,7 +22,7 @@
         "logical_properties": {
           "parameters": {
             "Kll": {
-              "k": 2863
+              "k": 1404
             }
           }
         },
@@ -46,7 +46,7 @@
         "materialized_views": []
       },
       "node_id": 10,
-      "plan_id": "0d803bcba0819ca0aa4d8407f9c79197",
+      "plan_id": "1dbad9b63b6c632668a1db7298a6197f",
       "refresh": "at_ingestion",
       "retention_ms": 180000,
       "view_state_key": {
@@ -80,7 +80,7 @@
         ]
       },
       "node_id": 11,
-      "plan_id": "0d803bcba0819ca0aa4d8407f9c79197",
+      "plan_id": "1dbad9b63b6c632668a1db7298a6197f",
       "refresh": "at_ingestion",
       "retention_ms": 180000,
       "view_state_key": {
@@ -130,8 +130,8 @@
       }
     ],
     "cost": {
-      "cost_per_second": 4.46815116789e-7,
-      "cpu_core_seconds_per_second": 0.03171701986,
+      "cost_per_second": 4.53575659399e-7,
+      "cpu_core_seconds_per_second": 0.0323180756333,
       "per_node": {
         "0": {
           "cost_per_second": 3.14989416e-11,
@@ -176,17 +176,17 @@
           "timing": "ingestion_time"
         },
         "11": {
-          "cost_per_second": 2.44560430165e-8,
+          "cost_per_second": 2.52314292565e-8,
           "cost_source": "analytical",
-          "cpu_core_seconds_per_second": 0.000931146666667,
+          "cpu_core_seconds_per_second": 0.00100010666667,
           "detail": "merge tumbling windows of 10000 ms into 60000 ms for 10000 groups: 1000.0 states merged, 166.7 states emitted; x 1.0000/s; keeps 12160000 bytes",
           "ingest_cpu_core_seconds_per_second": 0.0,
           "multiplier": 1,
           "operator": "SummaryMergeWindows",
           "priced_outside_measured_scale": false,
           "query_ms_per_step": 0.0,
-          "refresh_cpu_ms_per_window": 55.8688,
-          "refresh_wall_ms_per_window": 55.8688,
+          "refresh_cpu_ms_per_window": 60.0064,
+          "refresh_wall_ms_per_window": 60.0064,
           "timing": "ingestion_time"
         },
         "12": {
@@ -204,15 +204,15 @@
           "timing": "query_time"
         },
         "13": {
-          "cost_per_second": 2.6984605527e-7,
+          "cost_per_second": 2.75746905576e-7,
           "cost_source": "analytical",
-          "cpu_core_seconds_per_second": 0.02399008476,
-          "detail": "merge 71667 states into 10000; x 0.1000/s; holds 3680000 bytes for 239.901 ms",
+          "cpu_core_seconds_per_second": 0.0245146872,
+          "detail": "merge 71667 states into 10000; x 0.1000/s; holds 3680000 bytes for 245.147 ms",
           "ingest_cpu_core_seconds_per_second": 0.0,
           "multiplier": 1,
           "operator": "SummaryMerge",
           "priced_outside_measured_scale": false,
-          "query_ms_per_step": 239.9008476,
+          "query_ms_per_step": 245.146872,
           "refresh_cpu_ms_per_window": 0.0,
           "refresh_wall_ms_per_window": 0.0,
           "timing": "query_time"
@@ -316,15 +316,15 @@
           "timing": "query_time"
         },
         "7": {
-          "cost_per_second": 8.0282173376e-9,
+          "cost_per_second": 8.11252340035e-9,
           "cost_source": "analytical",
-          "cpu_core_seconds_per_second": 0.000713568,
-          "detail": "merge 20000 states into 10000; x 0.0033/s; holds 5920000 bytes for 214.070 ms",
+          "cpu_core_seconds_per_second": 0.000721061333333,
+          "detail": "merge 20000 states into 10000; x 0.0033/s; holds 5920000 bytes for 216.318 ms",
           "ingest_cpu_core_seconds_per_second": 0.0,
           "multiplier": 1,
           "operator": "SummaryMerge",
           "priced_outside_measured_scale": false,
-          "query_ms_per_step": 214.0704,
+          "query_ms_per_step": 216.3184,
           "refresh_cpu_ms_per_window": 0.0,
           "refresh_wall_ms_per_window": 0.0,
           "timing": "query_time"
@@ -360,49 +360,49 @@
       },
       "source": "analytical-cost-v2 (illustrative statistics)",
       "usage": {
-        "average_memory_bytes": 78412666.2577,
-        "cpu_ops_per_second": 31714885.46,
+        "average_memory_bytes": 78414641.1552,
+        "cpu_ops_per_second": 32315941.2333,
         "disk_bytes": 0,
         "latency_per_query": [
           {
             "allowed_lateness_ms": 0.0,
             "evaluations_per_second": 0.00333333333333,
-            "latency_ms": 350.4252,
+            "latency_ms": 356.8108,
             "precompute_execution_ms": 25.0,
-            "precompute_queueing_ms": 80.8688,
-            "query_execution_ms": 244.5564
+            "precompute_queueing_ms": 85.0064,
+            "query_execution_ms": 246.8044
           },
           {
             "allowed_lateness_ms": 0.0,
             "evaluations_per_second": 0.00333333333333,
-            "latency_ms": 145.8048,
+            "latency_ms": 149.9424,
             "precompute_execution_ms": 25.0,
-            "precompute_queueing_ms": 80.8688,
+            "precompute_queueing_ms": 85.0064,
             "query_execution_ms": 39.936
           },
           {
             "allowed_lateness_ms": 0.0,
             "evaluations_per_second": 0.1,
-            "latency_ms": 374.8079846,
+            "latency_ms": 384.191609,
             "precompute_execution_ms": 25.0,
-            "precompute_queueing_ms": 80.8688,
-            "query_execution_ms": 268.9391846
+            "precompute_queueing_ms": 85.0064,
+            "query_execution_ms": 274.185209
           }
         ],
         "peak_cpu_cores": 4,
         "peak_memory_bytes": 92241280,
-        "precompute_load": 0.00351448,
+        "precompute_load": 0.00358344,
         "recommended_configuration": {
           "ingest": {
             "predicted_busy_thread_seconds_per_second": 0.0003603134,
             "recommended_threads": 1
           },
           "precompute": {
-            "predicted_busy_thread_seconds_per_second": 0.00351448,
+            "predicted_busy_thread_seconds_per_second": 0.00358344,
             "recommended_threads": 1
           },
           "query": {
-            "predicted_busy_thread_seconds_per_second": 0.02784222646,
+            "predicted_busy_thread_seconds_per_second": 0.0283743222333,
             "recommended_threads": 1
           }
         },
@@ -1247,7 +1247,7 @@
           },
           "parameters": {
             "Kll": {
-              "k": 2863
+              "k": 1404
             }
           },
           "payload": {
@@ -1321,7 +1321,7 @@
           },
           "parameters": {
             "Kll": {
-              "k": 2863
+              "k": 1404
             }
           },
           "payload": {
@@ -1381,7 +1381,7 @@
           },
           "parameters": {
             "Kll": {
-              "k": 2863
+              "k": 1404
             }
           },
           "payload": {
@@ -1557,7 +1557,7 @@
           },
           "parameters": {
             "Kll": {
-              "k": 2863
+              "k": 1404
             }
           },
           "payload": {
@@ -1617,7 +1617,7 @@
           },
           "parameters": {
             "Kll": {
-              "k": 2863
+              "k": 1404
             }
           },
           "payload": {

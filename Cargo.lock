@@ -604,7 +604,7 @@ dependencies = [
 [[package]]
 name = "asap_sketchlib"
 version = "0.4.0"
-source = "git+https://github.com/ProjectASAP/asap_sketchlib?rev=01f3333cbdc7c55a36642e0938aa7f0040f2cfa8#01f3333cbdc7c55a36642e0938aa7f0040f2cfa8"
+source = "git+https://github.com/ProjectASAP/asap_sketchlib?rev=d050037bb127d425cb4160ea9b5960856ef3188c#d050037bb127d425cb4160ea9b5960856ef3188c"
 dependencies = [
  "rand 0.9.5",
  "rmp-serde",

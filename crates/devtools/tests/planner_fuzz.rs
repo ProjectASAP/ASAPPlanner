@@ -225,10 +225,12 @@ fn witness_of(relation: Relation, workload: FuzzWorkload) -> Witness {
 /// latest samples (a 15 s range), too few rows for a sketch, and plans an
 /// exact quantile. p90 per (city, host) over 1 h at 100,000 rows/s
 /// (4 cities x 5 hosts, ε 0.05, δ 0.01) reads a KLL tumbling-window
-/// chain, and p90 per city rolls up from it.
+/// chain, and p90 per city rolls up from it. The deployment builds only
+/// KLL: a DDSketch, which costs less, would be selected otherwise.
 #[test]
 fn sketch_rollup_witness_costs_for_a_grouped_quantile() {
     use asap_types::accuracy::AccuracyTarget;
+    use asap_types::summary_type::SketchAlgorithm;
     let mut workload = seed("issue902.json");
     let per_city_and_host = SqlSpec {
         table: "metrics".into(),
@@ -248,6 +250,7 @@ fn sketch_rollup_witness_costs_for_a_grouped_quantile() {
         }},
     }))
     .expect("the data facts deserialize");
+    workload.sketch_families = Some(vec![SketchAlgorithm::KLL]);
     match check(Relation::CoarserGrouping, workload, 0) {
         Outcome::Holds(m) | Outcome::Violated(m) => {
             assert!(m.base_plan.contains("KLL"), "{}", m.base_plan);

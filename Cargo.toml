@@ -36,8 +36,11 @@ ahash = { version = "0.8", default-features = false, features = ["std", "runtime
 # `planner-pin/main-a05b35c-shrink-to-fit`: `Kll::shrink_to_fit` (#267),
 # `DdSketch::shrink_to_fit` (#270), and the zero-copy sketch views of #271
 # (head 355093f, ported to main's DDSketch without sum/min/max), which the
-# executor's mapped state columns read. Moves to main once they merge.
-asap_sketchlib = { git = "https://github.com/ProjectASAP/asap_sketchlib", rev = "01f3333cbdc7c55a36642e0938aa7f0040f2cfa8" }
+# executor's mapped state columns read; branch
+# `planner-pin/main-a05b35c-shrink-to-fit-dd-bounds` adds #273 (a DDSketch
+# computes its indexable bounds once, not on every add). Moves to main once
+# they merge.
+asap_sketchlib = { git = "https://github.com/ProjectASAP/asap_sketchlib", rev = "d050037bb127d425cb4160ea9b5960856ef3188c" }
 
 [profile.dev]
 # Backtraces and profilers keep file:line; full variable info is opt-in via

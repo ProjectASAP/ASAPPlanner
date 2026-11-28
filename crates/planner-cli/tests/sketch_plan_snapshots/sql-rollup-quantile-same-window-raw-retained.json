@@ -14,7 +14,7 @@
         "materialized_views": []
       },
       "node_id": 5,
-      "plan_id": "a59c94b8de3148ac0060db8d65c29b7b",
+      "plan_id": "18b38ce3ccdf7dac542a187187f7b3c2",
       "refresh": "at_ingestion",
       "retention_ms": 300000,
       "view_state_key": {
@@ -55,8 +55,8 @@
       }
     ],
     "cost": {
-      "cost_per_second": 1.67482660912e-8,
-      "cpu_core_seconds_per_second": 0.0013631887,
+      "cost_per_second": 1.67869925827e-8,
+      "cpu_core_seconds_per_second": 0.00136663283333,
       "per_node": {
         "0": {
           "cost_per_second": 4.9275745993e-10,
@@ -171,15 +171,15 @@
           "timing": "query_time"
         },
         "7": {
-          "cost_per_second": 1.23219087472e-10,
+          "cost_per_second": 1.61945578994e-10,
           "cost_source": "analytical",
-          "cpu_core_seconds_per_second": 0.0000109584666667,
-          "detail": "merge 50 states into 10; x 0.0167/s; holds 165680 bytes for 0.658 ms",
+          "cpu_core_seconds_per_second": 0.0000144026,
+          "detail": "merge 50 states into 10; x 0.0167/s; holds 165680 bytes for 0.864 ms",
           "ingest_cpu_core_seconds_per_second": 0.0,
           "multiplier": 1,
           "operator": "SummaryMerge",
           "priced_outside_measured_scale": false,
-          "query_ms_per_step": 0.657508,
+          "query_ms_per_step": 0.864156,
           "refresh_cpu_ms_per_window": 0.0,
           "refresh_wall_ms_per_window": 0.0,
           "timing": "query_time"
@@ -199,10 +199,10 @@
           "timing": "query_time"
         },
         "9": {
-          "cost_per_second": 1.87400004601e-15,
+          "cost_per_second": 1.8740000046e-15,
           "cost_source": "analytical",
           "cpu_core_seconds_per_second": 1.66666666667e-10,
-          "detail": "operator: pass 10 rows; x 0.0167/s; holds 240 bytes for 0.000 ms",
+          "detail": "operator: pass 10 rows; x 0.0167/s; holds 24 bytes for 0.000 ms",
           "ingest_cpu_core_seconds_per_second": 0.0,
           "multiplier": 1,
           "operator": "Project",
@@ -215,17 +215,17 @@
       },
       "source": "analytical-cost-v2 (illustrative statistics)",
       "usage": {
-        "average_memory_bytes": 995666.351779,
-        "cpu_ops_per_second": 1343987.1,
+        "average_memory_bytes": 995666.922403,
+        "cpu_ops_per_second": 1347431.23333,
         "disk_bytes": 9600000,
         "latency_per_query": [
           {
             "allowed_lateness_ms": 0.0,
             "evaluations_per_second": 0.0166666666667,
-            "latency_ms": 0.857046,
+            "latency_ms": 1.063694,
             "precompute_execution_ms": 0.025,
             "precompute_queueing_ms": 0.0,
-            "query_execution_ms": 0.832046
+            "query_execution_ms": 1.038694
           },
           {
             "allowed_lateness_ms": 0.0,
@@ -237,7 +237,7 @@
           }
         ],
         "peak_cpu_cores": 3,
-        "peak_memory_bytes": 3255800,
+        "peak_memory_bytes": 3255584,
         "precompute_load": 4.16666666667e-7,
         "recommended_configuration": {
           "ingest": {
@@ -249,7 +249,7 @@
             "recommended_threads": 1
           },
           "query": {
-            "predicted_busy_thread_seconds_per_second": 0.00129336743333,
+            "predicted_busy_thread_seconds_per_second": 0.00129681156667,
             "recommended_threads": 1
           }
         },
@@ -1246,9 +1246,7 @@
         },
         {
           "id": 9,
-          "lifetime": {
-            "OneEvaluation": "Memory"
-          },
+          "lifetime": "None",
           "output_schema": {
             "closed": true,
             "fields": [

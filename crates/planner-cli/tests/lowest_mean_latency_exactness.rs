@@ -224,7 +224,7 @@ fn the_measured_workloads_keep_their_optimum_in_a_bounded_model() {
             "tools/dag-viewer/workloads/random-mixed-seed-862/workload-01.json".to_string(),
             "mvp",
             false,
-            1990.46913043,
+            709.836719368,
             SEED_VARIABLES,
             SEED_ROWS,
         ),

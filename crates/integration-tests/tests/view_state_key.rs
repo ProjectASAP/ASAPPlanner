@@ -373,7 +373,7 @@ async fn the_view_state_key_of_a_planned_chain_is_pinned_and_round_trips_through
         serde_json::json!({
             "definition_id": "2d963bc6757b98ad80934456821cc040",
             "window": {"tumbling": {"width_ms": 300000}},
-            "logical_properties": {"parameters": {"Kll": {"k": 2863}}}
+            "logical_properties": {"parameters": {"Kll": {"k": 1404}}}
         })
     );
     let json = serde_json::to_string(key).unwrap();
