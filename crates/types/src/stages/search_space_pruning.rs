@@ -8,13 +8,27 @@
 //! (`all=off` every rule). Each stage reads the rules it owns.
 
 /// Which pruning rules the planner applies; [`Default`]: every rule.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct SearchSpacePruning {}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SearchSpacePruning {
+    /// Rule 1, Stage 1 Pass 2: a θ another θ of its set does as well is
+    /// left out (same readers, same places, no larger in every size field).
+    /// Exact while a larger θ never costs less, which a measured
+    /// operation-cost table must also respect.
+    pub threshold_theta: bool,
+}
+
+impl Default for SearchSpacePruning {
+    fn default() -> Self {
+        Self {
+            threshold_theta: true,
+        }
+    }
+}
 
 impl SearchSpacePruning {
     /// Each rule's name and switch, in pipeline order.
     fn switches(&mut self) -> Vec<(&'static str, &mut bool)> {
-        Vec::new()
+        vec![("threshold_theta", &mut self.threshold_theta)]
     }
 
     /// Switches rule `rule` (a rule's name, or `all` for every rule) on or
@@ -67,6 +81,9 @@ mod tests {
     fn all_is_a_rule_and_an_unknown_rule_is_refused() {
         let mut pruning = SearchSpacePruning::default();
         assert_eq!(pruning.set("all", false), Ok(()));
+        assert_eq!(pruning.rules_off(), vec!["threshold_theta"]);
+        assert_eq!(pruning.set("threshold_theta", true), Ok(()));
+        assert!(pruning.rules_off().is_empty());
         let error = pruning.set("no_such_rule", false).unwrap_err();
         assert!(
             error.contains("unknown search-space pruning rule no_such_rule"),

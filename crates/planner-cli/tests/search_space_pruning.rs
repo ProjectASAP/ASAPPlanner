@@ -157,6 +157,14 @@ fn live_candidates(document: &Value) -> BTreeMap<CandidateKey, &Value> {
         .collect()
 }
 
+/// The number of live θ candidates.
+fn live_theta_count(document: &Value) -> usize {
+    live_candidates(document)
+        .values()
+        .filter(|candidate| !candidate["parameters"].is_null())
+        .count()
+}
+
 /// Stage 2's physical candidates.
 fn physical_candidates(document: &Value) -> &Vec<Value> {
     document["stage2_physical_asap_optimization"]["physical_candidates"]
@@ -258,6 +266,86 @@ fn stage3_reports_the_greedy_and_lp_bounds() {
         "lower {lower:e} > optimum {optimum:e}"
     );
     assert_same_cost(&plain, &reported, "bounds");
+}
+
+// Rule 1: threshold θ only (Pass 2).
+
+/// Plans `workload` with rule 1 on and off: the rule leaves out θ
+/// candidates, and the plans cost the same.
+fn assert_rule1_keeps_the_optimum(workload: &Value) {
+    let pruned = plan(workload, &raw_retained(), &[]);
+    let unpruned = plan(workload, &raw_retained(), &["threshold_theta"]);
+    assert!(
+        live_theta_count(&pruned) < live_theta_count(&unpruned),
+        "the rule leaves θ candidates out: {} with it, {} without",
+        live_theta_count(&pruned),
+        live_theta_count(&unpruned)
+    );
+    assert_same_cost(&pruned, &unpruned, "threshold_theta");
+}
+
+/// `quantile_over_time(0.99, m[5m])` every 60 s at relative 0.05 over 100
+/// series: the DDSketch θs a larger α meets as well are left out (KLL keeps
+/// every k: a larger k can cost less), at the same cost.
+#[test]
+fn rule1_one_quantile_keeps_the_optimum() {
+    assert_rule1_keeps_the_optimum(&promql(
+        vec![repeating(
+            "quantile_over_time(0.99, m[5m])",
+            60_000,
+            0,
+            0.05,
+        )],
+        100,
+        1_000,
+    ));
+}
+
+/// A strict/loose pair: `quantile_over_time(0.99, m[1h])` at
+/// relative 0.05 every 15 s and at 0.005 every 60 s, 10,000 series sampled
+/// every 100 ms: the two readers share chains whose θ must meet both.
+#[test]
+fn rule1_two_readers_of_one_chain_keep_the_optimum() {
+    assert_rule1_keeps_the_optimum(&promql(
+        vec![
+            repeating("quantile_over_time(0.99, m[1h])", 15_000, 0, 0.05),
+            repeating("quantile_over_time(0.99, m[1h])", 60_000, 0, 0.005),
+        ],
+        10_000,
+        100,
+    ));
+}
+
+/// Three top-k readers of one `sum by (host)` with different k and errors
+/// (k = 5 at 0.05, k = 10 at 0.01, k = 20 at 0.02), 1,000 series: a
+/// `CountMinSketchWithHeap` state all three share needs a θ at least each one's in
+/// every field (width, depth, heap), which may be no reader's threshold.
+#[test]
+fn rule1_three_readers_of_one_multi_parameter_state_keep_the_optimum() {
+    assert_rule1_keeps_the_optimum(&promql(
+        vec![
+            repeating("topk(5, sum by (host) (m))", 60_000, 0, 0.05),
+            repeating("topk(10, sum by (host) (m))", 60_000, 0, 0.01),
+            repeating("topk(20, sum by (host) (m))", 60_000, 0, 0.02),
+        ],
+        1_000,
+        1_000,
+    ));
+}
+
+/// Two quantiles over different ranges and errors of one metric
+/// (`[5m]` at 0.05, `[1h]` at 0.01, every 60 s): their states are built
+/// from shared chain windows, so a θ set spans several groups.
+#[test]
+fn rule1_two_ranges_sharing_windows_keep_the_optimum() {
+    assert_rule1_keeps_the_optimum(&promql(
+        vec![
+            repeating("quantile_over_time(0.99, m[5m])", 60_000, 0, 0.05),
+            repeating("quantile_over_time(0.9, m[1h])", 60_000, 0, 0.01),
+        ],
+        1_000,
+        1_000,
+    ));
 }
 
 // Rule 8a: identical candidates (fixed on main; a regression guard).

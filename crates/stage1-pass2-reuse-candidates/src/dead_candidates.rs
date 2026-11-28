@@ -20,6 +20,32 @@ pub(crate) fn eliminate_dead_candidates(
     edges: &[CandidateEdge],
 ) -> Vec<PrunedLogicalCandidate> {
     let graph = EdgeGraph::new(edges);
+    let dead = dead_candidates(memo, &graph);
+    dead.keys()
+        .map(|&candidate| PrunedLogicalCandidate {
+            candidate,
+            causes: graph.causes(candidate, &dead),
+        })
+        .collect()
+}
+
+/// The dead candidates of `memo`, whose possible edges are `edges`,
+/// without their causes (cheaper than [`eliminate_dead_candidates`]).
+pub(crate) fn dead_candidate_set(
+    memo: &Memo,
+    edges: &[CandidateEdge],
+) -> BTreeSet<CandidateForMemoGroupId> {
+    dead_candidates(memo, &EdgeGraph::new(edges))
+        .into_keys()
+        .collect()
+}
+
+/// Per dead candidate, why, judged against those dead before it: cut off
+/// from an input (`Some(input)`), or without a live consumer.
+fn dead_candidates(
+    memo: &Memo,
+    graph: &EdgeGraph<'_>,
+) -> BTreeMap<CandidateForMemoGroupId, Option<usize>> {
     let outputs = memo.root_groups();
     let all: Vec<CandidateForMemoGroupId> = memo
         .groups()
@@ -32,8 +58,6 @@ pub(crate) fn eliminate_dead_candidates(
             })
         })
         .collect();
-    // Per dead candidate, why, judged against those dead before it: cut
-    // off from an input (`Some(input)`), or without a live consumer.
     let mut dead: BTreeMap<CandidateForMemoGroupId, Option<usize>> = BTreeMap::new();
     loop {
         let newly_dead: Vec<(CandidateForMemoGroupId, Option<usize>)> = all
@@ -57,12 +81,7 @@ pub(crate) fn eliminate_dead_candidates(
         }
         dead.extend(newly_dead);
     }
-    dead.keys()
-        .map(|&candidate| PrunedLogicalCandidate {
-            candidate,
-            causes: graph.causes(candidate, &dead),
-        })
-        .collect()
+    dead
 }
 
 /// `edges` by producer and by (consumer, input).
