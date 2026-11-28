@@ -42,9 +42,9 @@ fn build_parameters(dag: &PhysicalASAPDAG) -> Vec<Option<SketchParams>> {
 }
 
 /// Excluding KLL at k ≤ 2,862 moves the installable plan's KLL from
-/// stored windows at k = 1,404 to a query-time build at k = 2,863, and
+/// stored windows at k = 547 to a query-time build at k = 2,863, and
 /// `e2e_plan` with the same models selects the same; without the exclusion
-/// it stays at k = 1,404.
+/// it stays at k = 547.
 #[tokio::test]
 async fn exclusions_reach_stage2_through_plan_installable() {
     let workload = kll_workload();
@@ -84,6 +84,6 @@ async fn exclusions_reach_stage2_through_plan_installable() {
     .expect("plans");
     assert_eq!(
         build_parameters(&unrestricted.dag),
-        vec![Some(SketchParams::Kll { k: 1404 })]
+        vec![Some(SketchParams::Kll { k: 547 })]
     );
 }

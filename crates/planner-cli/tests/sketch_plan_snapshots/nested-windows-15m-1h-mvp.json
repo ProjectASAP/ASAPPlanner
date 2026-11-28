@@ -56,7 +56,7 @@
       }
     ],
     "cost": {
-      "cost_per_second": 2.70845207823e-6,
+      "cost_per_second": 2.70569163812e-6,
       "cpu_core_seconds_per_second": 0.207407833333,
       "per_node": {
         "0": {
@@ -74,10 +74,10 @@
           "timing": "ingestion_time"
         },
         "1": {
-          "cost_per_second": 2.49653243781e-6,
+          "cost_per_second": 2.4937719977e-6,
           "cost_source": "analytical",
           "cpu_core_seconds_per_second": 0.188586666667,
-          "detail": "build DDSketch in tumbling windows of 60000 ms for 10000 groups: 2000000 rows x 80 ops, 1000 group visits, 166.7 states emitted; x 1.0000/s; keeps 326960000 bytes",
+          "detail": "build DDSketch in tumbling windows of 60000 ms for 10000 groups: 2000000 rows x 80 ops, 1000 group visits, 166.7 states emitted; x 1.0000/s; keeps 324560000 bytes",
           "ingest_cpu_core_seconds_per_second": 0.18817,
           "multiplier": 1,
           "operator": "SummaryTumblingWindowChain",
@@ -88,10 +88,10 @@
           "timing": "ingestion_time"
         },
         "2": {
-          "cost_per_second": 1.23684006326e-9,
+          "cost_per_second": 1.23684006275e-9,
           "cost_source": "analytical",
           "cpu_core_seconds_per_second": 0.00011,
-          "detail": "time range 3600s: 60 tumbling windows of states; x 0.0167/s; holds 500 bytes for 6.600 ms",
+          "detail": "time range 3600s: 60 tumbling windows of states; x 0.0167/s; holds 496 bytes for 6.600 ms",
           "ingest_cpu_core_seconds_per_second": 0.0,
           "multiplier": 1,
           "operator": "TimeRange",
@@ -144,10 +144,10 @@
           "timing": "query_time"
         },
         "6": {
-          "cost_per_second": 3.09210015815e-10,
+          "cost_per_second": 3.09210015689e-10,
           "cost_source": "analytical",
           "cpu_core_seconds_per_second": 0.0000275,
-          "detail": "time range 900s: 15 tumbling windows of states; x 0.0167/s; holds 500 bytes for 1.650 ms",
+          "detail": "time range 900s: 15 tumbling windows of states; x 0.0167/s; holds 496 bytes for 1.650 ms",
           "ingest_cpu_core_seconds_per_second": 0.0,
           "multiplier": 1,
           "operator": "TimeRange",
@@ -202,7 +202,7 @@
       },
       "source": "analytical-cost-v2 (illustrative statistics)",
       "usage": {
-        "average_memory_bytes": 327215996.069,
+        "average_memory_bytes": 324815996.068,
         "cpu_ops_per_second": 201007833.333,
         "disk_bytes": 0,
         "latency_per_query": [
@@ -224,7 +224,7 @@
           }
         ],
         "peak_cpu_cores": 3,
-        "peak_memory_bytes": 383121096,
+        "peak_memory_bytes": 380721088,
         "precompute_load": 0.000416666666667,
         "recommended_configuration": {
           "ingest": {

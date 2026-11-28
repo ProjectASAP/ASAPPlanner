@@ -1249,11 +1249,19 @@ impl ObjectMerger {
     }
 
     /// Each group's merged state, with whether something outside the run
-    /// holds it.
+    /// holds it. A state the merge built (held by it alone) is shrunk: no
+    /// further state merges into it, so it drops the room merges grew
+    /// (a KLL's doubled item buffer and level slots).
     fn finish(self) -> Vec<(Arc<dyn crate::AggregateCore>, bool)> {
         self.merged
             .into_iter()
-            .map(|state| state.expect("every group has a row"))
+            .map(|state| {
+                let (mut state, held_outside_run) = state.expect("every group has a row");
+                if let Some(owned) = Arc::get_mut(&mut state) {
+                    owned.shrink_to_fit();
+                }
+                (state, held_outside_run)
+            })
             .collect()
     }
 }
@@ -1363,14 +1371,14 @@ async fn merge_summary_streaming(
                 .collect(),
         )
     } else if shape.seal {
-        // A stored level's windows, sealed as a chain seals its own.
+        // A stored level's windows, sealed as a chain seals its own (which
+        // shrinks only states it keeps as objects).
         let merged: Vec<_> = objects
-            .finish()
+            .finish_partial()
             .into_iter()
-            .map(|(state, _)| state)
+            .map(|state| state.expect("every group has a row").0)
             .collect();
-        StateColumn::from_sealed_views(family.clone(), merged.iter().cloned())
-            .unwrap_or_else(|| StateColumn::from_objects(family.clone(), merged))
+        StateColumn::sealed(family.clone(), merged)
     } else {
         StateColumn::from_objects_of(family.clone(), objects.finish())
     };
@@ -1480,37 +1488,27 @@ fn evaluate_states(
                     .ok_or_else(|| invalid("exact evaluation requires an unkeyed state"))?;
                 exact_value(record, evaluation)?
             }
-            // A mapped DDSketch's quantile, read on its view: no owned
-            // sketch is built.
-            (
-                SummaryEvaluation::Sketch(planner_types::summary_type::SketchStatistic::Quantile {
-                    q,
-                }),
-                StateStorage::Mapped(mapped),
-            ) if !integral && mapped.kernel() == crate::values::MappedSketchKernel::DDSketch => {
-                match mapped
-                    .ddsketch_quantile(index, *q)
-                    .map_err(Error::Operator)?
-                {
-                    Some(value) => Some(Value::Float64(value)),
-                    // A filtered or NULL-only group's quantile is SQL NULL.
-                    None if nullable => None,
-                    None => {
-                        return Err(Error::Operator(
-                            "DDSketch quantile of an empty population".into(),
-                        ))
+            (SummaryEvaluation::Sketch(query), storage) => {
+                // A state in its view layout is read on its view: no owned
+                // sketch is built. `None`: an empty state's quantile.
+                let value = match storage {
+                    StateStorage::Mapped(mapped) => {
+                        mapped.estimate(index, query).map_err(Error::Operator)?
                     }
-                }
-            }
-            (SummaryEvaluation::Sketch(query), _) => {
-                let summary = states.state(index);
+                    _ => {
+                        let summary = states.state(index);
+                        match nullable && summary.is_empty() {
+                            true => None,
+                            false => Some(
+                                summary
+                                    .estimate(query)
+                                    .map_err(|e| Error::Operator(e.to_string()))?,
+                            ),
+                        }
+                    }
+                };
                 // A filtered or NULL-only group's quantile is SQL NULL.
-                if nullable && summary.is_empty() {
-                    None
-                } else {
-                    let value = summary
-                        .estimate(query)
-                        .map_err(|e| Error::Operator(e.to_string()))?;
+                if let Some(value) = value {
                     if integral
                         && *query == planner_types::summary_type::SketchStatistic::Cardinality
                     {
@@ -1535,6 +1533,16 @@ fn evaluate_states(
                     } else {
                         Some(Value::Float64(value))
                     }
+                } else if nullable {
+                    None
+                } else {
+                    let family = match states.family() {
+                        SummaryFamilyType::Sketch(algorithm) => format!("{algorithm:?}"),
+                        other => format!("{other:?}"),
+                    };
+                    return Err(Error::Operator(format!(
+                        "{family} quantile of an empty population"
+                    )));
                 }
             }
         });

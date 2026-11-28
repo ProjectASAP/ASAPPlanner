@@ -118,8 +118,9 @@ fn labels(i: u32) -> [String; 3] {
 
 /// The bytes the executor holds per sealed DDSketch state of relative
 /// accuracy `alpha`, one state per entry of `series`: a column of them
-/// sealed (in the view layout), less the column's one offset beyond one
-/// per state, over the states.
+/// sealed (in the view layout), less its 4-byte offsets (one per state
+/// and one more; a state's offset is a byte of its row, not of its
+/// state), over the states.
 fn sealed_ddsketch_bytes(alpha: f64, series: &[Vec<f64>]) -> f64 {
     let family = FieldDataType::Sketch(SketchAlgorithm::DDSketch);
     let mut column =
@@ -131,7 +132,8 @@ fn sealed_ddsketch_bytes(alpha: f64, series: &[Vec<f64>]) -> f64 {
             column.update(group as u32, value, 0).unwrap();
         }
     }
-    (column.seal().state_memory_bytes() - 4) as f64 / series.len() as f64
+    let offsets = 4 * (series.len() + 1);
+    (column.seal().state_memory_bytes() - offsets) as f64 / series.len() as f64
 }
 
 /// A uniform draw in [0, 1) from a fixed hash of `x`.
@@ -248,59 +250,78 @@ fn the_assumed_ddsketch_range_is_named_only_when_the_bytes_use_it() {
     );
 }
 
-/// A KLL state is charged what a sealed `asap_sketchlib` sketch holds for
-/// the samples it saw (the executor shrinks each sketch when it seals a
-/// window): the struct, the boundaries of the levels in use and the
-/// retained items. E.g. a 10 s tumbling window of a series sampled every
-/// 15 s sees one sample: 248 + 16 + 8 = 272 bytes, where an open sketch
-/// holds 872.
+/// A sealed KLL state is charged its view, as the executor seals it
+/// (`Kll::to_view_bytes`): the header, the boundaries of the levels in use
+/// and the retained items. E.g. a 10 s tumbling window of a series sampled
+/// every 15 s sees one sample: 40 + 8 + 8 = 56 bytes, where an owned shrunk
+/// sketch holds 272. A state still receiving values is charged as the open
+/// (unshrunk) owned sketch: 248 + 8 · 62 + 8 · 16 = 872 bytes for that one
+/// sample.
 #[test]
 fn kll_state_bytes_grow_with_the_samples_it_sees() {
     let k = 269;
-    // The library's bytes after `n` samples, shrunk as sealed.
-    let library_bytes = |n: u32| {
-        let mut sketch = asap_sketchlib::Kll::<f64>::with_k(k as i32);
+    // The library's sketch of coin `seed` after `n` samples.
+    let library = |n: u32, seed: u64| {
+        let mut sketch = asap_sketchlib::Kll::<f64>::with_seed(k as usize, 8, seed);
         for i in 0..n {
             sketch.update(&f64::from(i));
         }
+        sketch
+    };
+    let rows = |rows_per_state: Option<u64>| StateInputRows {
+        folded_rows_per_state: rows_per_state.map(|rows: u64| rows as f64),
+        non_negative: true,
+        value_magnitude_range: None,
+        distinct_values: None,
+    };
+    let sealed =
+        |rows_per_state| sketch_state_bytes(&SketchParams::Kll { k }, rows(rows_per_state));
+    let open =
+        |rows_per_state| open_sketch_state_bytes(&SketchParams::Kll { k }, rows(rows_per_state));
+    let view_bytes = |n: u32, seed: u64| library(n, seed).to_view_bytes().len() as u64;
+    let open_bytes = |n: u32, seed: u64| library(n, seed).memory_bytes() as u64;
+    let shrunk_bytes = |n: u32| {
+        let mut sketch = library(n, 1);
         sketch.shrink_to_fit();
         sketch.memory_bytes() as u64
     };
-    let model_bytes = |rows_per_state: Option<u64>| {
-        sketch_state_bytes(
-            &SketchParams::Kll { k },
-            StateInputRows {
-                folded_rows_per_state: rows_per_state.map(|rows: u64| rows as f64),
-                non_negative: true,
-                value_magnitude_range: None,
-                distinct_values: None,
-            },
-        )
-    };
-    assert_eq!(library_bytes(1), 272);
-    // Up to `k` samples nothing compacts, so the sealed sketch holds
-    // exactly the struct, two level boundaries and the samples.
+    assert_eq!(view_bytes(1, 1), 56);
+    assert_eq!(shrunk_bytes(1), 272);
+    assert_eq!(open_bytes(1, 1), 872);
+    // Up to `k` samples nothing compacts: sealed, the view holds every
+    // sample; open, the unshrunk sketch its struct, 62 level slots and a
+    // buffer doubling from 16 items.
     for n in [1, 4, 16, 17, 100, k] {
-        assert_eq!(
-            model_bytes(Some(u64::from(n))),
-            library_bytes(n),
-            "{n} samples"
-        );
+        assert_eq!(sealed(Some(u64::from(n))), view_bytes(n, 1), "{n} samples");
+        assert_eq!(open(Some(u64::from(n))), open_bytes(n, 1), "{n} samples");
     }
-    // Past `k`, the open sketch's grown buffer: at least what the sealed
-    // sketch retains.
+    // Past `k`, the most the compaction schedule leaves over its seeds
+    // (`KLL_SIMULATED_SEEDS`), the library's own coin: sealed, of the
+    // view's levels and items; open, of the buffer and of the compaction
+    // scratch.
     for n in [k + 1, 1_000, 5_000, 100_000] {
-        assert!(
-            library_bytes(n) <= model_bytes(Some(u64::from(n))),
+        let most = |bytes: &dyn Fn(u32, u64) -> u64| {
+            kll::KLL_SIMULATED_SEEDS.map(|seed| bytes(n, seed)).max()
+        };
+        assert_eq!(
+            sealed(Some(u64::from(n))),
+            most(&view_bytes).unwrap(),
             "{n} samples"
         );
+        // The buffer's and the scratch's most can come from two seeds:
+        // at least the most any one seed holds, within 1%.
+        let (open, most_open) = (open(Some(u64::from(n))), most(&open_bytes).unwrap());
+        assert!(
+            most_open <= open && open as f64 <= 1.01 * most_open as f64,
+            "{n} samples: {open} priced, {most_open} held"
+        );
     }
-    // 5,000 rows fill 6 levels: 7 boundaries.
-    assert_eq!(model_bytes(Some(5_000)), 248 + 8 * 7 + 8 * 1_206);
     // A state assumed to see no sample holds at least one; unknown
-    // samples fill every level to its capacity.
-    assert_eq!(model_bytes(Some(0)), 272);
-    assert_eq!(model_bytes(None), 248 + 8 * 62 + 8 * 1_206);
+    // samples fill every level to its capacity, and open, the buffer of
+    // all of them (1,206 items) and the scratch bound `2 (k - 1)`.
+    assert_eq!(sealed(Some(0)), 56);
+    assert_eq!(sealed(None), 40 + 4 * 62 + 8 * 1_206);
+    assert_eq!(open(None), 248 + 8 * 62 + 8 * (1_206 + 2 * 268));
 }
 
 /// Plan selection prices each state the executor builds per group at
@@ -314,13 +335,14 @@ fn kll_state_bytes_grow_with_the_samples_it_sees() {
 /// the sketch's bytes plus the accumulator's own fields, named per
 /// family. It equals the priced bytes where `asap_sketchlib`'s estimate
 /// is exact (Count-Min, Count Sketch, HLL, KMV at `n` distinct items) and
-/// for KLL up to `k` rows. DDSketch is priced at what it is expected to
-/// hold, within 1.5 times either way. For the heap sketches and UnivMon
+/// for KLL up to `k` rows (priced open, unshrunk). DDSketch is priced at
+/// what it is expected to hold, within 1.5 times either way. For the heap sketches and UnivMon
 /// the price bounds it, by at most [`BYTES_AGREEMENT_FACTOR`] times once
 /// the state is full;
 /// UnivMon's price also bounds the bytes its sketch holds.
-/// KLL past `k` rows is priced at an open sketch's grown buffer, at least
-/// what the sealed (shrunk) sketch holds.
+/// KLL past `k` rows is priced at the most an open sketch's buffer and
+/// scratch grow to over 16 coin seeds; the executor's coin is unseeded, so
+/// priced ÷ held is within 0.95 to 1.25.
 ///
 /// HydraCms is left out: plan selection prices an independent Count-Min
 /// per group, the executor one shared grid, so the two agree only at
@@ -337,8 +359,8 @@ fn state_bytes_bound_the_executors_charge() {
     /// How the priced bytes relate to the sketch's.
     enum Priced {
         Exact,
-        /// Exact up to `k` rows (sealed); past them at most the price
-        /// (an open sketch's grown buffer).
+        /// Exact up to `k` rows (open); past them within 0.95 to 1.25
+        /// times the price (the coin is unseeded).
         Kll {
             k: u32,
         },
@@ -501,17 +523,25 @@ fn state_bytes_bound_the_executors_charge() {
                 }
             }
             // As the executor seals a window: a DDSketch into its view
-            // layout, any other sketch shrunk.
-            updater.shrink_to_fit();
-            let state = updater.into_accumulator();
+            // layout, any other sketch shrunk; a KLL or Count-Min
+            // accumulator is the owned sketch before it is sealed into its
+            // view, priced open, so a KLL stays unshrunk.
+            let mut state = updater.into_accumulator();
+            if !matches!(algorithm, A::KLL) {
+                state.shrink_to_fit();
+            }
             let charged = match params {
                 SketchParams::DDSketch { alpha } => {
                     sealed_ddsketch_bytes(*alpha, &[fed]).round() as usize
                 }
                 _ => state.approx_memory_bytes(),
             };
+            let price = match params {
+                SketchParams::Kll { .. } | SketchParams::Cms { .. } => open_sketch_state_bytes,
+                _ => sketch_state_bytes,
+            };
             let priced = fields
-                + sketch_state_bytes(
+                + price(
                     params,
                     StateInputRows {
                         folded_rows_per_state: Some((u64::from(n)) as f64),
@@ -524,8 +554,11 @@ fn state_bytes_bound_the_executors_charge() {
             match priced_as {
                 Priced::Exact => assert_eq!(charged, priced, "{context}"),
                 Priced::Kll { k } if n <= *k => assert_eq!(charged, priced, "{context}"),
-                // Past `k` rows, the open buffer: at least the sealed sketch.
-                Priced::Kll { .. } => assert!(charged <= priced, "{context}, {charged} charged"),
+                // Past `k` rows, the open buffer and scratch over the seeds.
+                Priced::Kll { .. } => assert!(
+                    (0.95..=1.25).contains(&(priced as f64 / charged as f64)),
+                    "{context}, {charged} charged"
+                ),
                 // One value can be a zero, which no store holds.
                 Priced::WideMargin if n == 1 => assert!(charged <= priced, "{context}"),
                 Priced::WideMargin => assert!(
@@ -770,14 +803,20 @@ fn priced_bytes_agree_with_the_executor() {
                 Rows::Keyed => updater.update_keyed(&labels(key), 1.0, 0).unwrap(),
             }
         }
-        // As the executor seals a window, except a KLL past `k` rows,
-        // which is priced as the open sketch a query-time merge holds
-        // (`kll_sealed_bytes`).
+        // As the executor seals a window, except a KLL. A KLL or
+        // Count-Min accumulator is the owned sketch before it is sealed
+        // into its view: priced open, so a KLL stays unshrunk (its buffer
+        // and, past `k` rows, its compaction scratch).
+        let mut state = updater.into_accumulator();
         if !matches!(family, FieldDataType::Sketch(A::KLL)) {
-            updater.shrink_to_fit();
+            state.shrink_to_fit();
         }
-        let charged = updater.into_accumulator().approx_memory_bytes() as u64;
-        let priced = summary_state_bytes(&family, params.as_ref(), input_rows(rows_fed)).unwrap();
+        let charged = state.approx_memory_bytes() as u64;
+        let price = match family {
+            FieldDataType::Sketch(A::KLL | A::CountMinSketch) => open_summary_state_bytes,
+            _ => summary_state_bytes,
+        };
+        let priced = price(&family, params.as_ref(), input_rows(rows_fed)).unwrap();
         measured.push((family, priced, charged, known_gap));
     }
     // DDSketch, with no declared range, is priced dense over the assumed
@@ -786,8 +825,8 @@ fn priced_bytes_agree_with_the_executor() {
     // three decades of `Rows::Values`, whose counts fit a byte, the sealed
     // column holds less, within these bands.
     for (rows, band) in [
-        (Rows::LatencyLike, 3.328..=3.678),
-        (Rows::Values, 4.647..=5.137),
+        (Rows::LatencyLike, 3.441..=3.803),
+        (Rows::Values, 4.896..=5.412),
     ] {
         let family = sketch(A::DDSketch);
         let params = SketchParams::DDSketch { alpha: 0.01 };
@@ -948,7 +987,7 @@ fn counter_near_a_million(series: u64, n: u32) -> Vec<f64> {
 /// up to about 2x (latency-like values in the generator's declared range
 /// 4.9x at 600 rows); narrow values without a declared range (a gauge, a
 /// counter's readings, per-series levels) are over-charged by the
-/// wide-spread margin's span, up to 28x.
+/// wide-spread margin's span, up to 30x.
 #[test]
 fn ddsketch_state_bytes_by_value_shape_lie_within_their_bands() {
     let alpha = 0.01;
@@ -967,7 +1006,7 @@ fn ddsketch_state_bytes_by_value_shape_lie_within_their_bands() {
             range(2.687e-8, 1_104.2),
             0.95..=5.0,
         ),
-        ("lognormal sigma 1", lognormal, None, 0.95..=5.65),
+        ("lognormal sigma 1", lognormal, None, 0.95..=5.75),
         ("lognormal sigma 2", lognormal_sigma_2, None, 0.95..=3.2),
         (
             "log-uniform 7 decades",
@@ -988,20 +1027,20 @@ fn ddsketch_state_bytes_by_value_shape_lie_within_their_bands() {
             range(1.0, 1e6),
             0.95..=2.0,
         ),
-        ("narrow gauge", narrow_gauge, None, 1.3..=26.0),
+        ("narrow gauge", narrow_gauge, None, 1.3..=27.0),
         (
             "narrow gauge, declared",
             narrow_gauge,
             range(90.0, 110.0),
             0.95..=1.15,
         ),
-        ("counter near 1e6", counter_near_a_million, None, 1.4..=28.7),
-        ("per-series levels", per_series_levels, None, 1.3..=26.0),
+        ("counter near 1e6", counter_near_a_million, None, 1.4..=30.0),
+        ("per-series levels", per_series_levels, None, 1.3..=27.0),
         (
             "per-series levels, column range declared",
             per_series_levels,
             range(1.0, 1e5),
-            1.3..=14.9,
+            1.3..=15.5,
         ),
     ];
     for (name, values, value_magnitude_range, band) in shapes {
@@ -1026,15 +1065,15 @@ fn ddsketch_state_bytes_by_value_shape_lie_within_their_bands() {
 }
 
 /// The view header the price charges is the library's: a one-value
-/// DDSketch's view bytes (header and one 1-byte count padded to 8), plus
-/// the state's 4-byte offset in its column, are what a one-row state is
-/// priced at.
+/// DDSketch's view bytes (header and one 1-byte count padded to 8) are
+/// what a one-row state is priced at; its 4-byte offset in the column is a
+/// byte of its row beside the state.
 #[test]
 fn stored_ddsketch_header_is_the_librarys_view_header() {
     let alpha = 0.01;
     let mut sketch = asap_sketchlib::DdSketch::new(alpha);
     sketch.add(&42.0);
-    let held = sketch.to_view_bytes().len() as u64 + 4;
+    let held = sketch.to_view_bytes().len() as u64;
     let priced = sketch_state_bytes(
         &SketchParams::DDSketch { alpha },
         StateInputRows {
@@ -1047,8 +1086,8 @@ fn stored_ddsketch_header_is_the_librarys_view_header() {
     assert_eq!(priced, held, "priced {priced} B, view layout {held} B");
 }
 
-/// A stored DDSketch is priced at its view layout and its offset in the
-/// column (the library's 64-byte header + 4 bytes), then the occupied buckets dense over the
+/// A stored DDSketch is priced at its view layout, the library's 64-byte
+/// header (its 4-byte offset in the column is a byte of its row), then the occupied buckets dense over the
 /// column's range (declared, or the assumed nine decades; plus one bucket
 /// for an unaligned start) or sparse at one bucket per row (4-byte index
 /// and count each), whichever is smaller, at the narrowest count width the
@@ -1056,9 +1095,8 @@ fn stored_ddsketch_header_is_the_librarys_view_header() {
 #[test]
 fn stored_ddsketch_states_are_priced_at_their_view_layout() {
     let alpha = 0.01;
-    // The library's view header (an empty sketch's view holds only it) and
-    // the state's 4-byte offset in its column.
-    let fixed = asap_sketchlib::DdSketch::new(alpha).to_view_bytes().len() as u64 + 4;
+    // The library's view header: an empty sketch's view holds only it.
+    let fixed = asap_sketchlib::DdSketch::new(alpha).to_view_bytes().len() as u64;
     let priced = |rows_per_state: Option<u64>, non_negative, value_magnitude_range| {
         sketch_state_bytes(
             &SketchParams::DDSketch { alpha },
@@ -1101,8 +1139,11 @@ fn stored_ddsketch_states_are_priced_at_their_view_layout() {
 /// A DDSketch still receiving values (a chain's current window, a
 /// query-time build, a merge target) is priced open, as the owned sketch
 /// it is: its struct, and per store one 128-slot first block (1 KiB) plus
-/// an 8-byte count per bucket beyond the first, above the stored layout;
-/// every other family is priced the same open or stored.
+/// an 8-byte count per bucket beyond the first, above the stored layout.
+/// A KLL and a Count-Min are also priced open as owned sketches, above
+/// their views (100 rows of KLL k = 200: 248 + 8 · 62 + 8 · 128 = 1,768
+/// bytes open, 40 + 8 + 800 = 848 as a view); every family with no view layout
+/// is priced the same open or stored.
 #[test]
 fn open_ddsketch_states_hold_their_first_blocks() {
     let rows = |non_negative| StateInputRows {
@@ -1119,9 +1160,18 @@ fn open_ddsketch_states_hold_their_first_blocks() {
         assert_eq!((open - struct_bytes) % 8, 0);
     }
     let kll = SketchParams::Kll { k: 200 };
+    assert_eq!(open_sketch_state_bytes(&kll, rows(true)), 1_768);
+    assert_eq!(sketch_state_bytes(&kll, rows(true)), 848);
+    let cms = SketchParams::Cms {
+        width: 64,
+        depth: 3,
+    };
+    assert!(open_sketch_state_bytes(&cms, rows(true)) > sketch_state_bytes(&cms, rows(true)));
+    assert_eq!(sketch_state_bytes(&cms, rows(true)), 32 + 8 * 192);
+    let hll = SketchParams::Hll { precision: 10 };
     assert_eq!(
-        open_sketch_state_bytes(&kll, rows(true)),
-        sketch_state_bytes(&kll, rows(true))
+        open_sketch_state_bytes(&hll, rows(true)),
+        sketch_state_bytes(&hll, rows(true))
     );
 }
 

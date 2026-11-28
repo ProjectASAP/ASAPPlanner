@@ -6,9 +6,11 @@ use crate::node::operator_statistics::EdgeStatistics;
 use crate::DataPlaneExecution;
 use asap_types::ir::operator::AggIntent;
 use asap_types::ir::schema::{DataType, Field, FieldDataType, Schema, PROMQL_SERIES_IDENTITY};
-use asap_types::summary_type::SketchParams;
-use asap_types::summary_type::KLL_MAX_K;
+use asap_types::summary_type::{SketchAlgorithm, SketchParams};
 use asap_types::workload::ValueMagnitudeRange;
+
+mod kll;
+use kll::{kll_open_bytes, kll_view_bytes};
 
 /// Bytes of one output row: each column at [`column_bytes`].
 pub fn row_bytes(schema: &Schema) -> u64 {
@@ -35,10 +37,12 @@ fn column_bytes(field: &Field) -> u64 {
 /// kept once per series per file and its window time once per window, not
 /// per row. A plain column beside them other than the 8-byte window time
 /// (a value) is counted at [`column_bytes`]. Any other row holds its
-/// window's time and its group keys, each at [`column_bytes`]. Example, at
-/// the defaults: a per-series Sum carrying `job` holds 4 + 2 × 4 = 12
-/// bytes beside its 24-byte sealed state, 36 in all; a Sum grouped by
-/// `job` holds 8 + 16 = 24.
+/// window's time and its group keys, each at [`column_bytes`], and, for a
+/// state sealed into a view layout (DDSketch, KLL, Count-Min), its offset
+/// in its column. Example, at the defaults: a per-series Sum carrying `job`
+/// holds 4 + 2 × 4 = 12 bytes beside its 24-byte sealed state, 36 in all;
+/// a Sum grouped by `job` holds 8 + 16 = 24, a KLL grouped by `job`
+/// 8 + 16 + 4 = 28.
 pub(crate) fn state_row_bytes_beside_state(schema: &Schema, execution: &DataPlaneExecution) -> u64 {
     let not_state = || {
         schema.fields.iter().filter(|field| {
@@ -49,7 +53,20 @@ pub(crate) fn state_row_bytes_beside_state(schema: &Schema, execution: &DataPlan
         })
     };
     if !not_state().any(|field| field.name == PROMQL_SERIES_IDENTITY) {
-        return not_state().map(column_bytes).sum();
+        let view_offset_bytes = match schema.fields.iter().any(|field| {
+            matches!(
+                field.dtype,
+                FieldDataType::Sketch(
+                    SketchAlgorithm::DDSketch
+                        | SketchAlgorithm::KLL
+                        | SketchAlgorithm::CountMinSketch
+                )
+            )
+        }) {
+            true => execution.state_offset_bytes_per_row,
+            false => 0,
+        };
+        return not_state().map(column_bytes).sum::<u64>() + view_offset_bytes;
     }
     let is_text = |field: &&Field| field.dtype == FieldDataType::Plain(DataType::Utf8);
     let key_columns = not_state().filter(is_text).count() as u64;
@@ -104,10 +121,10 @@ pub fn keeps_every_value(measure: &AggIntent) -> bool {
 /// - DDSketch: what it is expected to hold sealed, not the most it can
 ///   ([`ddsketch_state_bytes`]).
 ///
-/// KLL is priced as the executor keeps a sealed state (it shrinks every
-/// KLL when it seals a window, `Kll::shrink_to_fit`): the struct, the
-/// 8-byte boundaries of the levels the rows fill, and the 8-byte items they
-/// leave retained ([`kll_sealed_bytes`]).
+/// The executor seals a DDSketch, a KLL and a Count-Min into its view
+/// layout, so each is priced at that layout's size: DDSketch
+/// [`ddsketch_state_bytes`], KLL `kll_view_bytes` (its items as its
+/// compaction schedule leaves them), Count-Min [`count_min_view_bytes`].
 ///
 /// An exact accumulator's state is the executor's sealed record of its
 /// kind, [`ExactKind::sealed_state_bytes`].
@@ -238,18 +255,34 @@ impl StateInputRows {
 
 /// [`sketch_state_bytes`] of a sketch still receiving values (the current
 /// window of a chain, a query-time build before it is sealed, a merge
-/// target): a DDSketch's stores as they grow
-/// ([`ddsketch_open_state_bytes`]); every other family as sealed.
+/// target), held as an owned sketch: a DDSketch's stores as they grow
+/// ([`ddsketch_open_state_bytes`]), an unshrunk KLL's level slots, growing
+/// buffer and compaction scratch (`kll_open_bytes`), a Count-Min's struct
+/// and counters; every family with no view layout as sealed.
 pub fn open_sketch_state_bytes(params: &SketchParams, input_rows: StateInputRows) -> u64 {
     match params {
         SketchParams::DDSketch { alpha } if *alpha > 0.0 && *alpha < 1.0 => {
             ddsketch_open_state_bytes(*alpha, input_rows)
+        }
+        SketchParams::Kll { k } => kll_open_bytes(*k, input_rows),
+        SketchParams::Cms { width, depth } => {
+            asap_sketchlib::CountMinF64::theoretical_memory_bytes(*depth as usize, *width as usize)
+                as u64
         }
         SketchParams::Hydra(hydra) => {
             open_sketch_state_bytes(&hydra.per_subpopulation(), input_rows)
         }
         _ => sketch_state_bytes(params, input_rows),
     }
+}
+
+/// Bytes of a sealed Count-Min of `width` × `depth` counters, as the
+/// executor keeps it: in its view layout (`CountMinSketch::to_view_bytes`),
+/// a 32-byte header (magic and version, rows, columns, admission rate) and
+/// its 8-byte counters. Example: 64 × 3: 32 + 8 · 192 = 1,568 bytes.
+fn count_min_view_bytes(width: u32, depth: u32) -> u64 {
+    const HEADER_BYTES: u64 = 32;
+    HEADER_BYTES + 8 * u64::from(width) * u64::from(depth)
 }
 
 /// [`summary_state_bytes`] of a state still receiving values
@@ -272,18 +305,19 @@ pub fn open_summary_state_bytes(
 /// (`crate::measured`).
 pub fn sketch_state_bytes(params: &SketchParams, input_rows: StateInputRows) -> u64 {
     use asap_sketchlib::{
-        Classic, CountMinF64, CountMinSketchWithHeap, CountSketch, CountSketchWithHeap, DataInput,
-        DdSketch, HyperLogLog, Kmv, RegularPath, UnivMon, Vector2D,
+        Classic, CountMinSketchWithHeap, CountSketch, CountSketchWithHeap, DataInput, DdSketch,
+        HyperLogLog, Kmv, RegularPath, UnivMon, Vector2D,
     };
     let heap_key = DataInput::Bytes(&[0; ASSUMED_HEAP_KEY_BYTES]);
     let rows = input_rows.rows_per_state().map_or(usize::MAX, |rows| {
         usize::try_from(rows.max(1)).unwrap_or(usize::MAX)
     });
     match params {
-        SketchParams::Hydra(hydra) => sketch_state_bytes(&hydra.per_subpopulation(), input_rows),
-        SketchParams::Cms { width, depth } => {
-            CountMinF64::theoretical_memory_bytes(*depth as usize, *width as usize) as u64
+        // A Hydra grid is held as objects, never in a view layout.
+        SketchParams::Hydra(hydra) => {
+            open_sketch_state_bytes(&hydra.per_subpopulation(), input_rows)
         }
+        SketchParams::Cms { width, depth } => count_min_view_bytes(*width, *depth),
         SketchParams::CountSketch { width, depth } => {
             CountSketch::<Vector2D<f64>, RegularPath>::theoretical_memory_bytes(
                 *depth as usize,
@@ -310,7 +344,7 @@ pub fn sketch_state_bytes(params: &SketchParams, input_rows: StateInputRows) -> 
             *heap_size as usize,
             &heap_key,
         ) as u64,
-        SketchParams::Kll { k, .. } => kll_sealed_bytes(*k, input_rows),
+        SketchParams::Kll { k, .. } => kll_view_bytes(*k, input_rows),
         // The executor builds no DDSketch outside α in (0, 1), where
         // sketchlib's estimate panics: priced as an empty one.
         SketchParams::DDSketch { alpha } if !(*alpha > 0.0 && *alpha < 1.0) => {
@@ -337,82 +371,6 @@ pub fn sketch_state_bytes(params: &SketchParams, input_rows: StateInputRows) -> 
             &DataInput::Bytes(&[0; ASSUMED_VALUE_KEY_BYTES]),
         ) as u64,
     }
-}
-
-/// Bytes a KLL state of `k` holds after folding `input_rows`: the struct,
-/// `levels + 1` 8-byte level boundaries for the `L(n)` levels `n` rows fill
-/// (`kll_levels_after`), and its 8-byte items. Up to `k` rows nothing
-/// compacts, and the state is priced as the executor keeps it sealed
-/// (`Kll::shrink_to_fit`): exactly the `n` items. Past `k`, the items are
-/// the buffer an open sketch grows to (16 items doubled up to the
-/// capacity of all its levels, `kll_buffer_items`), what a query-time merge
-/// holds while it folds windows; a sealed state past `k` holds about half
-/// of that, which this leaves uncharged. A state is assumed to fold at
-/// least one row, as a DDSketch's is; unknown rows fill every level.
-///
-/// Example: `k` = 132 over a 15 s window of one sample a second (15 rows):
-/// 248 + 8 · 2 + 8 · 15 = 384 bytes.
-fn kll_sealed_bytes(k: u32, input_rows: StateInputRows) -> u64 {
-    let k = u64::from(k.clamp(8, KLL_MAX_K));
-    let (levels, items) = match input_rows.rows_per_state() {
-        None => (KLL_MAX_LEVELS as u64, kll_capacity_items(k, KLL_MAX_LEVELS)),
-        Some(rows) => {
-            let rows = rows.max(1);
-            let items = match rows <= k {
-                true => rows,
-                false => kll_buffer_items(k, rows),
-            };
-            (kll_levels_after(k, rows), items)
-        }
-    };
-    std::mem::size_of::<asap_sketchlib::Kll<f64>>() as u64 + 8 * (levels + 1) + 8 * items
-}
-
-/// Items an open `asap_sketchlib` KLL of `k` allocates for `rows`: its
-/// item array starts empty and grows when full, to at least twice its
-/// length and at least 16 items, at most the capacity of all its levels
-/// ([`kll_capacity_items`]): the smallest `16 · 2^j` ≥ `rows`, capped.
-fn kll_buffer_items(k: u64, rows: u64) -> u64 {
-    const INITIAL_BUFFER_ITEMS: u64 = 16;
-    rows.div_ceil(INITIAL_BUFFER_ITEMS)
-        .next_power_of_two()
-        .saturating_mul(INITIAL_BUFFER_ITEMS)
-        .min(kll_capacity_items(k, KLL_MAX_LEVELS))
-}
-
-/// Levels `asap_sketchlib`'s KLL has room for (`MAX_LEVELS`).
-const KLL_MAX_LEVELS: usize = 61;
-
-/// `L(n)`: the levels a KLL of `k` holds after `n` rows, a level added once
-/// the top holds `k + 1` items of weight 2^top (`asap_sketchlib`'s
-/// `levels_after`). 1 up to `k` rows; 2 from `k + 1`.
-fn kll_levels_after(k: u64, rows: u64) -> u64 {
-    let mut levels = 1;
-    while levels < KLL_MAX_LEVELS as u64
-        && 1u64
-            .checked_shl(levels as u32 - 1)
-            .and_then(|weight| weight.checked_mul(k + 1))
-            .is_some_and(|items| items <= rows)
-    {
-        levels += 1;
-    }
-    levels
-}
-
-/// The items the top `levels` levels of a KLL of `k` hold at capacity:
-/// `max(ceil(k · (2/3)^i), 8)` for heights `i` from the top. Over all
-/// [`KLL_MAX_LEVELS`] levels, the most items the library holds: 1,206 at
-/// `k` = 269.
-fn kll_capacity_items(k: u64, levels: usize) -> u64 {
-    const MIN_LEVEL_CAPACITY: f64 = 8.0;
-    let k = k as f64;
-    let mut scale = 1.0_f64;
-    let mut total = 0;
-    for _ in 0..levels {
-        total += (k * scale).ceil().max(MIN_LEVEL_CAPACITY) as u64;
-        scale *= 2.0 / 3.0;
-    }
-    total
 }
 
 /// Bytes of the key one Count-Min / Count Sketch top-k heap slot holds: an
@@ -604,7 +562,8 @@ fn ddsketch_span(alpha: f64, input_rows: StateInputRows) -> (u64, u64) {
 /// it whatever the values within the column's range:
 ///
 /// - a 64-byte header (scalars, count width, form, each store's offset and
-///   length) and the state's 4-byte offset in its column;
+///   length); the state's 4-byte offset in its column is a byte of its row
+///   beside the state (`state_offset_bytes_per_row`);
 /// - its counts at the narrowest width holding every count (1, 2, 4 or 8
 ///   bytes; no count exceeds the state's rows, so the width follows from
 ///   them; unknown rows take 8);
@@ -630,17 +589,17 @@ fn ddsketch_span(alpha: f64, input_rows: StateInputRows) -> (u64, u64) {
 /// |---|---|---|
 /// | exponential (latency-like) | no | 1.0–4.2 |
 /// | exponential (latency-like) | the generator's [2.7e-8, 1104] | 1.0–4.9 |
-/// | lognormal σ = 1 | no | 1.0–5.6 |
+/// | lognormal σ = 1 | no | 1.0–5.7 |
 /// | lognormal σ = 2 | no | 1.0–3.1 |
 /// | log-uniform over 7 decades | no | 1.0–2.5 |
 /// | log-uniform over 7 decades | [0.001, 1e4] | 1.0–1.9 |
 /// | Zipf(1.1) integers in [1, 1e6] | no | 1.03–2.8 |
 /// | Zipf(1.1) integers in [1, 1e6] | [1, 1e6] | 1.0–1.9 |
-/// | narrow gauge 100 ± 10 | no | 1.5–26 |
+/// | narrow gauge 100 ± 10 | no | 1.5–27 |
 /// | narrow gauge 100 ± 10 | [90, 110] | 1.0–1.10 |
-/// | counter readings near 1e6 | no | 1.6–28 |
-/// | per-series levels ± 10%, levels over [1, 1e5] | no | 1.5–26 |
-/// | per-series levels ± 10%, levels over [1, 1e5] | [1, 1e5] | 1.5–14.6 |
+/// | counter readings near 1e6 | no | 1.7–30 |
+/// | per-series levels ± 10%, levels over [1, 1e5] | no | 1.5–27 |
+/// | per-series levels ± 10%, levels over [1, 1e5] | [1, 1e5] | 1.5–15.3 |
 ///
 /// Few rows per state are stored sparse and priced closely. Past them the
 /// price is the whole column range dense: values narrower than it (without
@@ -653,13 +612,12 @@ fn ddsketch_span(alpha: f64, input_rows: StateInputRows) -> (u64, u64) {
 /// family, replace it.
 ///
 /// Example: at α = 0.01, a state of 10 values with no declared range is
-/// stored sparse in at most 10 buckets at 1-byte counts: 64 + 4 + 40 + 16 =
-/// 124 bytes. A gauge declared within [90, 110] spans 12 buckets: 600 rows,
-/// dense at 2-byte counts, 64 + 4 + 24 = 92 bytes.
+/// stored sparse in at most 10 buckets at 1-byte counts: 64 + 40 + 16 = 120
+/// bytes. A gauge declared within [90, 110] spans 12 buckets: 600 rows,
+/// dense at 2-byte counts, 64 + 24 = 88 bytes.
 fn ddsketch_state_bytes(alpha: f64, input_rows: StateInputRows) -> u64 {
-    // The view's header, and the state's 4-byte offset in its column.
+    // The view's header.
     const HEADER_BYTES: u64 = 64;
-    const OFFSET_BYTES: u64 = 4;
     let padded = |bytes: u64| bytes.div_ceil(8) * 8;
     let (_, stores) = ddsketch_span(alpha, input_rows);
     // The most buckets a store's values can occupy: the declared (or
@@ -676,7 +634,7 @@ fn ddsketch_state_bytes(alpha: f64, input_rows: StateInputRows) -> u64 {
         }
     };
     let Some(rows) = input_rows.rows_per_state() else {
-        return HEADER_BYTES + OFFSET_BYTES + stores * padded(8 * column_span);
+        return HEADER_BYTES + stores * padded(8 * column_span);
     };
     // No count exceeds the rows, so they bound the width.
     let count_bytes = match rows {
@@ -690,7 +648,7 @@ fn ddsketch_state_bytes(alpha: f64, input_rows: StateInputRows) -> u64 {
     // the stores; each further store pads its two arrays.
     let occupied = rows.max(1).min(stores * column_span);
     let sparse = padded(4 * occupied) + padded(count_bytes * occupied) + (stores - 1) * 16;
-    HEADER_BYTES + OFFSET_BYTES + dense.min(sparse)
+    HEADER_BYTES + dense.min(sparse)
 }
 
 /// The bytes a DDSketch still receiving values holds (the current window

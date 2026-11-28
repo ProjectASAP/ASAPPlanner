@@ -39,6 +39,7 @@ mod promql_to_post_asap;
 mod rollup_controlled;
 mod scan;
 mod schema;
+mod sealed_state_bytes;
 mod sql_cardinality;
 mod sql_frequency;
 mod sql_relational_execution;

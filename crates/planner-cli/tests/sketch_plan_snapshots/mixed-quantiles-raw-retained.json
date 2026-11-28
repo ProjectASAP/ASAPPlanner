@@ -41,7 +41,7 @@
       }
     ],
     "cost": {
-      "cost_per_second": 5.96369380186e-8,
+      "cost_per_second": 5.96425472329e-8,
       "cpu_core_seconds_per_second": 0.0052704,
       "per_node": {
         "0": {
@@ -157,10 +157,10 @@
           "timing": "query_time"
         },
         "2": {
-          "cost_per_second": 9.52412691073e-9,
+          "cost_per_second": 9.52973612504e-9,
           "cost_source": "analytical",
           "cpu_core_seconds_per_second": 0.000846666666667,
-          "detail": "build KLL into 10000 states: 200000 rows x 84 ops, 200000 group visits; x 0.0167/s; holds 4320000 bytes for 50.800 ms",
+          "detail": "build KLL into 10000 states: 200000 rows x 84 ops, 200000 group visits; x 0.0167/s; holds 10080000 bytes for 50.800 ms",
           "ingest_cpu_core_seconds_per_second": 0.0,
           "multiplier": 1,
           "operator": "SummaryAgg",
@@ -271,7 +271,7 @@
       },
       "source": "analytical-cost-v2 (illustrative statistics)",
       "usage": {
-        "average_memory_bytes": 8168.9641728,
+        "average_memory_bytes": 13045.7641728,
         "cpu_ops_per_second": 5244000.0,
         "disk_bytes": 12800000,
         "latency_per_query": [
@@ -317,7 +317,7 @@
           }
         ],
         "peak_cpu_cores": 5,
-        "peak_memory_bytes": 8800416,
+        "peak_memory_bytes": 14560416,
         "precompute_load": -0.0,
         "recommended_configuration": {
           "ingest": {
@@ -1094,7 +1094,7 @@
           },
           "parameters": {
             "Kll": {
-              "k": 1404
+              "k": 2863
             }
           },
           "payload": {

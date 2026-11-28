@@ -548,9 +548,11 @@ pub(crate) const DDSKETCH_MERGE_OPERATIONS_PER_STATE: f64 = 700.0;
 /// state into a copy of its group's state, so a merge costs per byte of
 /// the input state (`KLL_MERGE_OPERATIONS_PER_INPUT_BYTE`) and per byte of
 /// the merged state (`KLL_MERGE_OPERATIONS_PER_MERGED_BYTE`), which grows
-/// towards its `k`. The bytes are those the planner charges for each state
-/// (`sketch_state_bytes` of the rows it folds), so the fit is over the
-/// quantity it is applied to. Refitted over the executor's `SummaryMerge`
+/// towards its `k`. The bytes are those the planner charged for each state
+/// when fitted (`sketch_state_bytes` of the rows it folds, then a shrunk
+/// owned sketch); a sealed KLL is now charged its smaller view layout and
+/// a merge target its unshrunk sketch, so the byte terms need refitting
+/// against those charges (#1544). Refitted over the executor's `SummaryMerge`
 /// at k = 132, 200, 547 and 1,404: 360 states of 10 rows, 60 of 100, 5 of
 /// 100, 60 of 600, 12 of 3,000 and 60 of 12,000 per group (1,000 groups of
 /// gauge-walk values, median of 5 runs), minimizing the squared log error

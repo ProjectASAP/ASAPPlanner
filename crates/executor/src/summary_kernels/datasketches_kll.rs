@@ -93,6 +93,10 @@ impl AggregateCore for DatasketchesKLLAccumulator {
     fn approx_memory_bytes(&self) -> usize {
         self.inner.memory_bytes()
     }
+
+    fn shrink_to_fit(&mut self) {
+        self.inner.shrink_to_fit();
+    }
 }
 
 #[cfg(test)]
