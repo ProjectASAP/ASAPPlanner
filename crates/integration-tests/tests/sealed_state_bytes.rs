@@ -1,6 +1,7 @@
 //! The price of a summary state against the bytes the executor holds for
 //! it. Sealed (`sketch_state_bytes`): a chain's own sealed window
-//! (`StateColumnUpdater::seal`) and a chain level merged from narrower
+//! (`StateColumnUpdater::seal`; a KLL window past k rows is built from
+//! seeded sketches and sealed by a one-window merge) and a chain level merged from narrower
 //! windows (a `SummaryMerge` with a sealed output). A state sealed into its
 //! view layout is held as its view padded to 8 bytes and a 4-byte offset in
 //! its column (plus one per column); the offset is a byte of the state's row
@@ -44,6 +45,12 @@ fn schema(family: &FieldDataType) -> Arc<Schema> {
     })
 }
 
+/// Value `sample` of series `s` in window `window` of `samples` values:
+/// distinct within a series.
+fn sample_value(s: u32, window: u32, samples: u32, sample: u32) -> f64 {
+    f64::from(s * 7 + window * samples + sample) * 0.5 + 1.0
+}
+
 /// Window `window` of a chain: one sealed state of `family` per series over
 /// `samples` distinct values each.
 fn window(family: &FieldDataType, params: &SketchParams, window: u32, samples: u32) -> Batch {
@@ -54,9 +61,10 @@ fn window(family: &FieldDataType, params: &SketchParams, window: u32, samples: u
     updater.ensure_groups(SERIES as usize).unwrap();
     for s in 0..SERIES {
         for sample in 0..samples {
-            let n = s * 7 + window * samples + sample;
             let t = i64::from(window * samples + sample) * 1_000;
-            updater.update(s, f64::from(n) * 0.5 + 1.0, t).unwrap();
+            updater
+                .update(s, sample_value(s, window, samples, sample), t)
+                .unwrap();
         }
     }
     let names: Vec<String> = (0..SERIES).map(|s| format!("s{s}")).collect();
@@ -100,9 +108,9 @@ fn count_min_window(width: u32, depth: u32, window: u32, samples: u32) -> Batch 
 }
 
 /// A window of KLL states of `k`, one per series over `samples` values
-/// each (the values [`window`] feeds), built as objects from sketches with
-/// a fixed coin seed per series and window, so the items each retains past
-/// `k` rows are the same on every run. [`merged`] seals it.
+/// each ([`sample_value`], as [`window`] feeds them), built as objects
+/// from sketches with a fixed coin seed per series and window, so a sketch
+/// past `k` rows retains the same items on every run. [`merged`] seals it.
 fn seeded_kll_window(k: u32, window: u32, samples: u32) -> Batch {
     use asap_executor::summary_kernels::DatasketchesKLLAccumulator;
     use asap_executor::values::Value;
@@ -112,8 +120,7 @@ fn seeded_kll_window(k: u32, window: u32, samples: u32) -> Batch {
             let seed = 1 + u64::from(s * WINDOWS + window);
             let mut sketch = asap_sketchlib::Kll::with_k_and_seed(k as i32, seed);
             for sample in 0..samples {
-                let n = s * 7 + window * samples + sample;
-                sketch.update(&(f64::from(n) * 0.5 + 1.0));
+                sketch.update(&sample_value(s, window, samples, sample));
             }
             let state = DatasketchesKLLAccumulator::restore_from_disk(sketch).unwrap();
             vec![
@@ -138,10 +145,11 @@ fn level(family: &FieldDataType, params: &SketchParams, samples: u32) -> Batch {
 }
 
 /// The per-series merge of `windows` into one sealed level, as a chain
-/// level is built. Each group's accumulator is seeded from its key, so a
-/// level merged from seeded windows is the same on every run; a single
-/// KLL window merges into its empty accumulator without a compaction,
-/// keeping its items.
+/// level is built. Windows of objects (Count-Min, [`seeded_kll_window`])
+/// merge in order into a copy of a group's first state, whose coin the
+/// merge keeps, so a level of seeded windows is the same on every run; a
+/// single window's state passes through unmerged, so `merged` of one
+/// window seals it as it is.
 fn merged(windows: Vec<Batch>) -> Batch {
     let schema = windows[0].schema().clone();
     let mut dag = PhysicalDAG::default();
@@ -263,14 +271,14 @@ fn a_sealed_states_price_is_the_view_the_executor_holds() {
             true,
         ),
         (
-            "KLL window, 1,100 rows",
+            "KLL window (seeded, merged), 1,100 rows",
             merged(vec![seeded_kll_window(200, 0, 1_100)]),
             &kll.1,
             1_100,
             false,
         ),
         (
-            "KLL level, 12 x 1,100 rows",
+            "KLL level (seeded), 12 x 1,100 rows",
             merged(
                 (0..WINDOWS)
                     .map(|w| seeded_kll_window(200, w, 1_100))
