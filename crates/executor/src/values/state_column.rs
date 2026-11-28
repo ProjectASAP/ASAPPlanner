@@ -289,7 +289,7 @@ impl StateColumn {
     /// layout ([`Self::from_sealed_views`]), the layout the cost model
     /// prices a sealed state at; any other family as owned sketches, the
     /// form it is priced at, shrunk (no update or merge follows, so each
-    /// state held only here drops the room they grow). A view holds only
+    /// state held only here drops the room it grew). A view holds only
     /// what a state retains, so a state copied into one is not shrunk. A
     /// chain's own windows, a query-time build and a level merged from
     /// narrower windows all seal here.

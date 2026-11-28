@@ -296,8 +296,9 @@ fn kll_state_bytes_grow_with_the_samples_it_sees() {
         assert_eq!(open(Some(u64::from(n))), open_bytes(n, 1), "{n} samples");
     }
     // Past `k`, the most the compaction schedule leaves over its seeds
-    // (`KLL_SIMULATED_SEEDS`), the library's own coin: sealed, of the view's levels and items;
-    // open, of the buffer and of the compaction scratch.
+    // (`KLL_SIMULATED_SEEDS`), the library's own coin: sealed, of the
+    // view's levels and items; open, of the buffer and of the compaction
+    // scratch.
     for n in [k + 1, 1_000, 5_000, 100_000] {
         let most = |bytes: &dyn Fn(u32, u64) -> u64| {
             kll::KLL_SIMULATED_SEEDS.map(|seed| bytes(n, seed)).max()

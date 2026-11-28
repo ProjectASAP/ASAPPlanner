@@ -277,8 +277,8 @@ fn sealed_counter_records_keep_resets() {
     assert!(matches!(records.get(2), ScalarState::Counter(None)));
 }
 
-/// Sealing shrinks each DDSketch to its occupied buckets (stores grow 128
-/// slots at a time): the same quantiles, less memory.
+/// Sealing stores each DDSketch's occupied buckets, its view (open stores
+/// grow 128 slots at a time): the same quantiles, less memory.
 #[test]
 fn sealed_ddsketch_windows_answer_alike_and_hold_less() {
     use planner_types::summary_type::{SketchAlgorithm, SketchStatistic};
